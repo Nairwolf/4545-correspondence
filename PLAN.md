@@ -1,0 +1,442 @@
+# Phase 1 implementation plan — Infinite Correspondence
+
+## Context
+
+`docs/infinite-correspondence-spec.md` specifies a Go replacement for the Lichess4545 Infinite Correspondence Google Sheet. Phase 1 (spec §12) is **read-only parity**: schema + migrations, a Lichess client, the `sync-games` job, the pure scoring module (§5), and the public home / standings / levels / player pages (Stats deferred) — everything needed to prove the hardest logic before anything depends on it. Pairing, OAuth, dashboards, notifications are later phases; they shape the schema here but are not built.
+
+The repo is empty (no code, no commits). Only the spec and `CLAUDE.md` exist.
+
+### Decisions taken during planning (answers from the maintainer)
+
+| Question | Answer | Consequence |
+|---|---|---|
+| History import (§9 / §14.1) | **No import.** | No historical games, no historical `User` rows. Round numbers continue the sheet's sequence via the imported open pairings (next row). Validation against sheet values (§9.2) is replaced by hand-built fixtures and live spot checks. |
+| Phase 1 data source | **Seed players + import the sheet's open pairings; discovery is pairing-anchored.** | `ic seed-players` creates approved players from a username list. `ic import-pairings` creates a round and its `manual_external` pairings from a CSV taken from the spreadsheet (round, white, black, optional game id). `sync-games` only ingests games that match a pairing (spec §7.3) — members' other correspondence games, including games against other members, are never touched. Round numbers come from the sheet, so the sequence continues (~168+). |
+| Unrated players (§5.1 / §14.5) | **Fixed constant**, not league median. | Setting `rating.unrated_default` (default 1500). Scoring returns an explicit unrated result; callers substitute the setting. |
+| Opponent rating in perf rating (§5.2) | **Rating at the time of the game** (`games.*_rating_at_game`). | Deliberate divergence from the sheet; standings reproducible from `games` alone. |
+| Stats page | **Deferred until after Phase 4.** | Removes the draw-subtype inference and analysed-games caveats from Phase 1. `notnil/chess` is not needed yet; `termination` for a bare `draw` is stored as `draw_other` for now and reclassified from `raw_payload` when Stats is built. |
+| Templating / migrations | **`html/template` + `goose`.** | Only `sqlc` and Tailwind need generation steps. |
+
+§14.3 (organiser account) is Phase 5. §14.4 (timezone) is Phase 2. **All of the above is now written into the spec** (§3.4, §4.1, §5.1, §5.2, §6.3, §7.1–7.3, §8.1, §9, §12, §13, §14, §15 changelog).
+
+---
+
+## Lichess API verification (source: `lichess-org/api` OpenAPI spec v2.0.169, fetched 2026-09-06)
+
+Verified against the real OpenAPI definitions, not the rendered docs page. **Where the spec and the API disagree, the API wins.** Items marked ⚠ were spec errors, now corrected in the spec.
+
+### Endpoints Phase 1 uses
+
+| Purpose | Endpoint | Notes |
+|---|---|---|
+| Player ratings, bulk | `POST /api/users` body `id1,id2,…` (text/plain), ≤300 IDs, no auth | Returns `perfs.correspondence.{rating,rd,prov,games}` and `perfs.classical.*`. `prov` is **absent when false**. Limit 8,000 users / 10 min. One call refreshes the whole roster. |
+| Player's games | `GET /api/games/user/{username}` `Accept: application/x-ndjson` | Query: `perfType=correspondence&rated=true&opening=true&accuracy=true&clocks=true&ongoing=true&finished=true&since=<ms>&sort=dateAsc`. Throttled at 30 games/s authenticated. `since` is a creation-time filter — see sync design. |
+| Fetch known games by ID | `POST /api/games/export/_ids` body `id1,id2,…`, ≤300 IDs, `Accept: application/x-ndjson` | Used to re-check known in-progress games. Ongoing games are delayed by 3 moves (irrelevant for finished ones). |
+| Single game | ⚠ `GET /game/export/{gameId}` — **not** `/api/game/export/{gameId}` as spec §3.4 says. | Only needed for an admin "re-fetch this game" command. |
+
+### Game JSON shape (fields we map)
+
+`id, rated, variant, speed, perf, createdAt, lastMoveAt, status, winner?, daysPerTurn, moves, opening{eco,name,ply}?, players.{white,black}.{user{name,id}, rating, ratingDiff, provisional?, analysis{inaccuracy,mistake,blunder,acpl,accuracy?}?}`
+
+`status` enum: `created, started, aborted, mate, resign, stalemate, timeout, draw, outoftime, cheat, noStart, unknownFinish, insufficientMaterialClaim, variantEnd`.
+
+### Findings already absorbed into the plan and spec — no decision needed
+
+Recorded so nobody re-derives them. Even without the Stats page, Phase 1 fills the `games` columns from the API payload, so the mapping had to be fixed once.
+
+1. **`status: draw` does not say why.** Lichess collapses agreement, threefold, 50-move and dead position into `draw`; only `insufficientMaterialClaim` and `stalemate` are distinct. Spec §7.1 now says: classify by replaying `moves` (`github.com/notnil/chess`) when the Stats page is built. **Phase 1 stores bare draws as `draw_other`** and does not pull in the chess library; reclassification runs from `raw_payload` later.
+2. **`timeout` vs `outoftime`.** `outoftime` = clock expired (→ `clock_flag`). `timeout` = player abandoned / was disconnected (rare in correspondence; map to `clock_flag` too but keep the raw status column so they can be split later). `cheat` → winner is set; map termination `unknown`, result from `winner`.
+3. **Aborted / noStart games have no result.** Spec's `games.result` is NOT NULL. **Decision:** do not insert `aborted`/`noStart` games into `games` at all (they are not games). Phase 5 will record them on the `pairings` row.
+4. **CPL is average, not total.** The API gives `analysis.acpl` (average centipawn loss). Spec columns `white_total_cpl` are renamed `white_acpl`. Spreadsheet values were presumably acpl too.
+5. **Accuracy / acpl only exist if the game has been analysed**, and correspondence games are not analysed automatically. The public API has no "request analysis" endpoint. Columns stay nullable and are filled when present. The one open question this raises (where the sheet's accuracy data came from) is parked in spec §14.6 for the Stats phase.
+6. **`evals=true` is unnecessary.** It appends a per-ply `analysis` array (large) that no metric uses; `acpl`/`accuracy` live on `players.*.analysis` without it. Drop it from §7.1. `clocks=true` is harmless and kept.
+7. **Rate limiting:** "Only make one request at a time"; on 429 wait ≥ 60 s. The client serialises all calls behind a single semaphore and sleeps 60 s on 429 before one retry, then fails the job (river retries later).
+
+### Verified for later phases (recorded now so nobody re-derives them)
+
+- `POST /api/bulk-pairing` (form-encoded): `players=tokW1:tokB1,tokW2:tokB2`, `days` ∈ {1,2,3,5,7,10,14}, `rated`, `variant`, `pairAt` (epoch ms), `message` (**must contain `{game}`** if set), `rules`. Max **500 games per bulk**, 500 games / 10 min, ≤20 scheduled bulks, ≤1000 scheduled games. Response: `{id, games:[{id,white,black}], pairAt, pairedAt|null, …}`. Cancel: `DELETE /api/bulk-pairing/{id}` (no-op once games exist). Games: `GET /api/bulk-pairing/{id}/games` (ndjson).
+- ⚠ **A bulk is all-or-nothing.** Rejected entirely if any token is missing/invalid/lacks scope, or an account is closed. Spec §6.3 step 4 ("failures must not roll back the successful pairings") cannot be satisfied per-pair by the API — Phase 5 must pre-validate tokens, and on a 400 parse the error, drop the offending pairing to the challenge fallback, and resubmit.
+- ⚠ **`pairAt` horizon is contradictory in the docs**: the endpoint description says "up to 24h in advance", the `pairAt` field says "up to 7 days". Spec assumes a week. Must be tested live with a throwaway bulk before Phase 5 commits to a Monday-noon → publish-later design.
+- Correspondence games **may include the same player twice in one bulk** ("except in correspondence" appears twice in the rejection list) — so the double-game (§6.2.6a) fits in a single request. Verify live; the `players` field text also says "each token at most once".
+
+---
+
+## Tooling and versions
+
+Go 1.27 is installed. `sqlc`, `goose`, `tailwindcss`, `psql` are **not** installed; Docker is available.
+
+- `go tool` directives in `go.mod` for `sqlc` (v1.31) and `goose` (v3.28) — no global installs.
+- Tailwind v4 **standalone binary**, downloaded by `make tailwind` into `.bin/` (git-ignored). No Node.
+- Postgres via `docker compose` (`postgres:17`) for dev and integration tests.
+- Pinned: `chi/v5 v5.3`, `river v0.47`, `pgx/v5 v5.10`, `testify v1.12`. (`notnil/chess` only when Stats is built.) Config is plain `os.LookupEnv` — no env-parsing library, the field count doesn't justify one.
+
+### Commands (to be added to `CLAUDE.md` once they exist)
+
+```
+make db-up            # docker compose up -d postgres
+make migrate          # go tool goose -dir internal/db/migrations postgres "$DATABASE_URL" up
+make sqlc             # go tool sqlc generate
+make css              # tailwind standalone: web/input.css -> internal/web/static/app.css
+make test             # go test ./...              (unit only; no DB)
+make test-integration # TEST_DATABASE_URL=… go test -tags integration ./...
+make run              # go run ./cmd/ic serve
+go test ./internal/scoring -run TestPerfDelta/…   # single test
+```
+
+---
+
+## Module layout
+
+```
+go.mod                          module github.com/nairwolf/4545-correspondence  (confirm path)
+cmd/ic/main.go                  subcommands: serve | migrate | seed-players | import-pairings | sync-games | refresh-ratings | recompute | refetch-game <id>
+internal/config/                env → Config struct (§2.2); only DATABASE_URL, LISTEN_ADDR, LICHESS_TOKEN (optional, for higher throttle) are read in Phase 1
+internal/db/
+  migrations/                   goose SQL files, embedded
+  queries/                      hand-written SQL for sqlc (standings.sql, games.sql, players.sql, settings.sql, jobs.sql)
+  sqlc.yaml
+  gen/                          sqlc output (committed)
+  db.go                         pgxpool + goose runner + tx helper
+internal/lichess/
+  client.go                     Client interface: UsersByID, UserGames (stream), GamesByID, ExportGame
+  http.go                       real implementation: one-at-a-time semaphore, 429 backoff, timeouts, ndjson decoding
+  types.go                      structs mirroring the verified JSON
+  fake.go                       in-memory fake for tests (serves fixture JSON)
+  testdata/                     recorded real responses (users, a finished game, an ongoing game, a draw, a cheat game)
+internal/scoring/               PURE — no imports beyond stdlib/math. See below.
+internal/ingest/                lichess.Game → games row; termination mapping; upsert; triggers standing recompute
+internal/matching/              spec §7.3: find the Lichess game for a pairing without a game id (exactly-one rule)
+internal/standings/             loads a player's games + ratings from db, calls scoring, writes player_standings
+internal/settings/              typed accessors over the settings table with defaults from §4.2 + rating.unrated_default
+internal/jobs/
+  runner.go                     wraps every river worker: writes job_runs row (start/finish/status/items/error), structured log with run id
+  sync_games.go                 hourly
+  refresh_ratings.go            daily
+  recompute.go                  nightly
+  periodic.go                   river PeriodicJob config
+internal/web/
+  router.go                     chi, middleware (request id, recover, logging, static)
+  handlers_*.go                 home, standings, levels, player, health, jobs
+  templates/ (embedded)         layout.html, standings.html, …
+  static/ (embedded)            app.css (generated), htmx.min.js (vendored), app.js (tiny)
+web/input.css                   tailwind source
+docker-compose.yml, Makefile, .gitignore, README.md
+```
+
+Dependency direction: `web → standings/ingest/settings → db, scoring, lichess`. `scoring` imports nothing from the project.
+
+---
+
+## Database schema (Phase 1 migrations)
+
+Phase 1 creates only the tables it writes, but with the column shapes from §4.1 so later phases add tables rather than alter these. `rounds` and `pairings` **are** created now: `import-pairings` writes them and every game must belong to a pairing.
+
+```sql
+-- 0001_extensions.sql
+CREATE EXTENSION IF NOT EXISTS pgcrypto;   -- gen_random_uuid()
+
+-- 0002_users.sql
+CREATE TYPE user_role   AS ENUM ('player','admin');
+CREATE TYPE user_status AS ENUM ('pending','approved','rejected','banned');
+
+CREATE TABLE users (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  lichess_username  text NOT NULL,                       -- canonical casing
+  lichess_user_id   text NOT NULL UNIQUE,                -- lowercase id from Lichess
+  role              user_role   NOT NULL DEFAULT 'player',
+  status            user_status NOT NULL DEFAULT 'pending',
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  approved_at       timestamptz,
+  approved_by       uuid REFERENCES users(id),
+  rejection_reason  text
+);
+CREATE UNIQUE INDEX users_username_ci ON users (lower(lichess_username));
+
+CREATE TABLE player_profiles (
+  user_id               uuid PRIMARY KEY REFERENCES users(id),
+  is_active             boolean NOT NULL DEFAULT true,
+  max_concurrent_games  int,                              -- NULL = UNLIMITED (§5.8). Never coerce.
+  accepts_double_game   boolean NOT NULL DEFAULT true,
+  paused_by_admin       boolean NOT NULL DEFAULT false,
+  paused_reason         text,
+  auto_paused_at        timestamptz,
+  timezone              text,
+  joined_at             timestamptz NOT NULL DEFAULT now(),
+  CHECK (max_concurrent_games IS NULL OR max_concurrent_games > 0)
+);
+
+-- 0003_ratings.sql
+CREATE TABLE rating_snapshots (
+  id                      bigserial PRIMARY KEY,
+  user_id                 uuid NOT NULL REFERENCES users(id),
+  correspondence_rating   int,
+  correspondence_prov     boolean,          -- NULL when no rating
+  correspondence_games    int,
+  classical_rating        int,
+  classical_prov          boolean,
+  classical_games         int,
+  fetched_at              timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX rating_snapshots_latest ON rating_snapshots (user_id, fetched_at DESC);
+
+-- 0004_rounds_pairings.sql
+CREATE TYPE round_state      AS ENUM ('draft','published','cancelled');
+CREATE TYPE round_source     AS ENUM ('schedule','manual','imported');
+CREATE TYPE pairing_method   AS ENUM ('bulk','challenge','manual_external');
+CREATE TYPE pairing_status   AS ENUM ('pending','created','in_progress','completed','failed','cancelled');
+
+CREATE TABLE rounds (
+  id               serial PRIMARY KEY,
+  number           int NOT NULL UNIQUE,
+  state            round_state NOT NULL,
+  generated_at     timestamptz NOT NULL DEFAULT now(),
+  publish_at       timestamptz NOT NULL,
+  published_at     timestamptz,
+  pair_at          timestamptz NOT NULL,        -- for imported rounds: the sheet's pairing date
+  generated_by     round_source NOT NULL,
+  bulk_pairing_id  text,
+  notes            text
+);
+
+CREATE TABLE pairings (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  round_id         int NOT NULL REFERENCES rounds(id),
+  white_user_id    uuid NOT NULL REFERENCES users(id),
+  black_user_id    uuid NOT NULL REFERENCES users(id),
+  creation_method  pairing_method NOT NULL,
+  lichess_game_id  text UNIQUE,
+  status           pairing_status NOT NULL DEFAULT 'pending',
+  match_ambiguous  boolean NOT NULL DEFAULT false,
+  created_at       timestamptz NOT NULL DEFAULT now(),
+  edited_by        uuid REFERENCES users(id),
+  CHECK (white_user_id <> black_user_id)
+);
+CREATE INDEX pairings_round ON pairings (round_id);
+CREATE INDEX pairings_unmatched ON pairings (status) WHERE lichess_game_id IS NULL;
+
+-- 0005_games.sql
+CREATE TYPE game_status      AS ENUM ('in_progress','finished');
+CREATE TYPE game_result      AS ENUM ('white_win','black_win','draw');
+CREATE TYPE game_termination AS ENUM ('mate','resign','clock_flag','draw_agreement','threefold',
+                                      'fifty_move','stalemate','insufficient_material','draw_other','unknown');
+
+CREATE TABLE games (
+  lichess_game_id    text PRIMARY KEY,
+  pairing_id         uuid NOT NULL UNIQUE REFERENCES pairings(id),
+  round_number       int NOT NULL,        -- denormalised from rounds.number
+  white_user_id      uuid NOT NULL REFERENCES users(id),
+  black_user_id      uuid NOT NULL REFERENCES users(id),
+  status             game_status NOT NULL,
+  result             game_result,         -- NULL while in_progress
+  termination        game_termination,    -- NULL while in_progress
+  lichess_status     text NOT NULL,       -- raw API status, kept verbatim
+  days_per_turn      int,
+  eco                text,
+  opening_name       text,
+  opening_ply        int,
+  white_first_move   text,
+  black_first_move   text,
+  white_rating_at_game int,               -- players.white.rating
+  black_rating_at_game int,
+  white_accuracy     numeric(5,2),
+  black_accuracy     numeric(5,2),
+  white_acpl         int,                 -- API gives average CPL, not total
+  black_acpl         int,
+  white_moves        int,
+  black_moves        int,
+  started_at         timestamptz NOT NULL,      -- createdAt
+  last_move_at       timestamptz NOT NULL,
+  finished_at        timestamptz,               -- lastMoveAt when finished
+  duration_seconds   bigint,
+  raw_payload        jsonb NOT NULL,
+  ingested_at        timestamptz NOT NULL DEFAULT now(),
+  updated_at         timestamptz NOT NULL DEFAULT now(),
+  CHECK (white_user_id <> black_user_id),
+  CHECK (status = 'in_progress' OR (result IS NOT NULL AND termination IS NOT NULL AND finished_at IS NOT NULL))
+);
+CREATE INDEX games_white_finished ON games (white_user_id, finished_at DESC);
+CREATE INDEX games_black_finished ON games (black_user_id, finished_at DESC);
+CREATE INDEX games_status ON games (status);
+CREATE INDEX games_finished_at ON games (finished_at DESC) WHERE status = 'finished';
+
+-- 0006_standings.sql
+CREATE TABLE player_standings (
+  user_id               uuid PRIMARY KEY REFERENCES users(id),
+  rating                int,              -- base rating (§5.1); NULL = unrated
+  is_unrated            boolean NOT NULL DEFAULT false,
+  games_played          int NOT NULL,
+  wins                  int NOT NULL,
+  draws                 int NOT NULL,
+  losses                int NOT NULL,
+  ongoing               int NOT NULL,
+  last_k_score          numeric(4,1),     -- NULL until >= min_games_for_perf
+  last_k_perf_rating    int,
+  power_rating          int NOT NULL,
+  color_score           int NOT NULL,
+  xp                    int NOT NULL,
+  level                 int NOT NULL,
+  xp_to_next_level      int NOT NULL,
+  last_level_up_round   int,              -- Phase 4+
+  last_level_up_at      timestamptz,      -- usable now
+  last_game_finished_at timestamptz,
+  is_eligible           boolean NOT NULL DEFAULT false,   -- Phase 4 fills this; Phase 1 = is_active && approved
+  updated_at            timestamptz NOT NULL DEFAULT now()
+);
+
+-- 0007_settings.sql
+CREATE TABLE settings (
+  key         text PRIMARY KEY,
+  value       jsonb NOT NULL,
+  updated_at  timestamptz NOT NULL DEFAULT now(),
+  updated_by  uuid REFERENCES users(id)
+);
+-- defaults are NOT inserted; the settings package returns §4.2 defaults for missing keys,
+-- so a fresh DB behaves correctly and the admin UI (Phase 6) only stores overrides.
+
+-- 0008_job_runs.sql
+CREATE TYPE job_run_status AS ENUM ('running','succeeded','failed');
+CREATE TABLE job_runs (
+  id               bigserial PRIMARY KEY,
+  job_name         text NOT NULL,
+  river_job_id     bigint,
+  started_at       timestamptz NOT NULL DEFAULT now(),
+  finished_at      timestamptz,
+  status           job_run_status NOT NULL DEFAULT 'running',
+  items_processed  int NOT NULL DEFAULT 0,
+  error            text,
+  detail           jsonb                      -- per-job counters (games seen / new / finished / skipped, players polled…)
+);
+CREATE INDEX job_runs_name_started ON job_runs (job_name, started_at DESC);
+
+-- 0009_audit_log.sql   (seed-players / import-pairings write here from day one)
+CREATE TABLE audit_log (
+  id             bigserial PRIMARY KEY,
+  actor_user_id  uuid REFERENCES users(id),   -- NULL = system/CLI
+  action         text NOT NULL,
+  entity_type    text NOT NULL,
+  entity_id      text NOT NULL,
+  before         jsonb,
+  after          jsonb,
+  created_at     timestamptz NOT NULL DEFAULT now()
+);
+
+-- 0010_river.sql   river's own schema via its migration package (rivermigrate), run inside the same goose migration
+```
+
+Why `games` carries `status` rather than a separate ongoing-games table: the Overview page and the `ongoing` standings column need in-progress games, and one row per league game updated in place is simpler than two tables. `ongoing_games(player)` (§5.8) becomes `COUNT(*) FROM games WHERE status='in_progress' AND (white_user_id=$1 OR black_user_id=$1)` — the Phase 4 engine can use that directly. `pairings.status` mirrors it (`in_progress` / `completed`) so the round views need no join.
+
+---
+
+## Scoring module (`internal/scoring`) — pure, no I/O
+
+```go
+type Rating struct{ Value int; Provisional bool }             // absent = nil pointer
+func BaseRating(corr, classical *Rating) (rating int, unrated bool) // §5.1, corrected rule
+func PerfDelta(score float64, k int) float64                   // §5.3: p = score/k, FIDE table interpolated on 10% steps
+func LastK(games []FinishedGame, k int) []FinishedGame         // ordered by FinishedAt desc, LIMIT k (caller passes sorted)
+func LastKScore(window []FinishedGame, me UserID) float64       // wins + 0.5*draws
+func PerfRating(window []FinishedGame, me UserID, opponentRating func(UserID) int) float64
+func PowerRating(perf *float64, base int, played, minGames int) int   // §5.4
+func ColorScore(games []FinishedGame, me UserID) int           // §5.5 (white − black)
+func XP(w, d, l int, weights XPWeights) int                    // §5.6
+func Level(xp int) (level, toNext int)                         // floor(sqrt(xp)), (level+1)^2 − xp
+func CapacityAllows(maxConcurrent *int, ongoing int) bool      // §5.8 — nil means unlimited
+```
+
+FIDE table stored as `[11]int{-800,-366,-240,-149,-72,0,72,149,240,366,800}` indexed by `p*10`, with linear interpolation between neighbours. `PerfDelta` panics on `k <= 0` and clamps `p` to [0,1].
+
+`CapacityAllows` lives here even though pairing is Phase 4, because the brief demands the NULL test exists from the start and the function is trivially pure.
+
+**Opponent rating for §5.2 — decided: rating at game time.** `PerfRating` takes the window of `FinishedGame`s, each carrying `OpponentRatingAtGame`; no rating lookup function is injected. A game whose API payload lacks the opponent's rating (should not happen for rated games) is excluded from the average and counted in `job_runs.detail`.
+
+---
+
+## `import-pairings` CLI (transition tool)
+
+`ic import-pairings round.csv` — CSV columns `round,white,black[,game_id]`, one round per file (the sheet's `Overview`/`Pairing_Maker` output). Creates the `rounds` row (`state=published`, `generated_by=imported`, `pair_at` from a `--pair-at` flag defaulting to the file's Monday) and one `manual_external` pairing per line. Usernames are resolved case-insensitively against `users`; an unknown name aborts the whole import with the offending line (no partial rounds). Re-running the same file is a no-op (matched on round number + white + black). Every row goes to `audit_log`. This is the only way pairings exist until Phase 4.
+
+## `sync-games` design (hourly, plus `ic sync-games` for manual runs) — spec §3.4 / §7.3
+
+1. **Re-check known games**: `POST /api/games/export/_ids` (batches of 300) with every `games.status='in_progress'` id. Newly finished → ingest. One or two calls for the whole league.
+2. **Match pairings without a game id** (`pairings.lichess_game_id IS NULL AND status='pending' AND NOT match_ambiguous`): for each, stream the **white** player's games `GET /api/games/user/{white}?perfType=correspondence&rated=true&since=<round.pair_at−1d>&ongoing=true&finished=true&opening=true&accuracy=true&clocks=true`, and keep candidates where white/black ids match the pairing **with the same colours**, `variant=standard`, `rated`, `daysPerTurn == pairing.days_per_move`, `createdAt >= pair_at−1d`, and the id is not attached to another pairing. Exactly one → attach + ingest. Zero → stay pending. Several → `match_ambiguous=true`, nothing attached, listed on `/jobs` detail. Group by white player so one player with several pending pairings costs one call.
+   Games with status `aborted`/`noStart` are candidates for matching (so the pairing can be marked `failed`) but are never inserted into `games`.
+3. `ingest.Upsert(game, pairing)`: map → row, `INSERT … ON CONFLICT (lichess_game_id) DO UPDATE` (payload, status, result, finished fields); update `pairings.status` (`in_progress` / `completed` / `failed`). Idempotent — re-running on the same JSON changes nothing but `updated_at`.
+4. For every game that transitioned to `finished` in this run, recompute both players' `player_standings` (`standings.Recompute(userID)` = one SQL aggregate + last-k query + scoring). Level-up detection compares old/new `level` and sets `last_level_up_at` / `last_level_up_round`.
+5. Write the `job_runs` row: pairings checked / matched / ambiguous / still pending, games finished, errors. A Lichess error on one call is logged and counted and the job carries on; it reports `failed` only if every call failed.
+
+No per-member cursor is needed: every search is anchored on a pairing's `pair_at`.
+
+`refresh-ratings` (daily): one `POST /api/users` per 300 members → insert `rating_snapshots` rows → recompute standings for members whose base rating changed.
+`recompute-aggregates` (nightly): `standings.RecomputeAll()` — full rebuild of `player_standings` from `games` + latest snapshots.
+
+River: one `river.Client` with three periodic jobs, `MaxAttempts: 3`, queue `default` concurrency 1 (Lichess wants one request at a time anyway). Job outcome goes to `job_runs` via the `runner` wrapper regardless of river's own retention.
+
+---
+
+## Web (public pages, no auth)
+
+chi router; `html/template` with a `layout.html` + one file per page; htmx only for sort/filter on standings (falls back to plain query-string links, so the pages work without JS). Dark-by-default, Lichess-like: near-black background, muted borders, dense tables — Tailwind utility classes only, no component library.
+
+| Route | Source query | Notes |
+|---|---|---|
+| `/` | recent finished games (20), in-progress games with days since last move, top 5 by `power_rating`, active count | Rules/FAQ text is a static template in Phase 1 (admin editing is Phase 6) |
+| `/standings` | `player_standings JOIN users JOIN player_profiles` | Columns per §8.1; `?sort=col&dir=asc&active=1&q=name` server-side; unrated players show "—" with an "unrated" badge |
+| `/levels` | same table ordered by xp desc | XP rule explanation inline; last level-up shows the round number (always known now) |
+| `/players/{username}` | header from standings; game list from `games` | Charts: rating over time from `rating_snapshots`, XP over time derived from finished games in order. Rendered as inline SVG server-side (no chart library) — keep it boring |
+| `/health` | `SELECT 1` + last `job_runs` row per job | JSON: `{db:"ok", jobs:{sync-games:{last_success, last_status, last_error}}}`; returns 503 if db down or any job's last run failed. This is the Phase 1 "outcome visible somewhere" |
+| `/jobs` | last 50 `job_runs` + pairings flagged `match_ambiguous` | Plain HTML table, read-only, no secrets. Satisfies the DoD until the admin health page (Phase 6) replaces it |
+
+All standings SQL is written to read like the spreadsheet formulas it replaces, with a comment naming the sheet cell (`-- Standings_Backend!U`) above each expression.
+
+---
+
+## Build order
+
+Each step is a self-contained commit point (the maintainer commits; see `CLAUDE.md`).
+
+1. **Scaffold**: `go.mod`, `cmd/ic` with `serve`/`migrate`, config, Makefile, docker-compose, `.gitignore`, README stub. `make db-up && make migrate` runs migrations 0001–0009 on an empty DB.
+2. **Scoring package** with full table-driven tests (no DB needed). Done before anything reads it.
+3. **sqlc queries + generated code** for players, games upsert, standings aggregates, settings, job_runs.
+4. **Lichess client** + fixtures + fake; `ic refresh-ratings` end to end against the real API with the seeded roster (read-only calls).
+5. **`seed-players` and `import-pairings` CLIs** (resolve via `POST /api/users`; create approved users + profiles + first snapshot; create the round + pairings; audit-log everything).
+6. **Matching + ingest + standings recompute**; `ic sync-games` once against the imported pairings; verify `games`, `pairings.status` and `job_runs`.
+7. **River wiring** (`serve` starts HTTP + river; periodic jobs registered).
+8. **Web pages** in the order standings → levels → player → home → health/jobs; Tailwind build.
+9. **README** with the commands, and update `CLAUDE.md`'s "Repository state" section to point at them.
+
+---
+
+## Testing
+
+- **`internal/scoring`** — table-driven, pure:
+  - `BaseRating`: every branch of §5.1 (established corr; prov corr + established classical → classical; prov corr only; classical only; neither → unrated).
+  - `PerfDelta`: all 11 FIDE points at `k=5` exactly; interpolation midpoints (e.g. 2.25/5 → −110.5); `k=3` and `k=10` sanity; clamping at 0% / 100%.
+  - `PowerRating` on both sides of `min_games_for_perf`.
+  - `XP`/`Level` at boundaries: xp 0,1,3,4,8,9,15,16.
+  - `ColorScore` sign convention.
+  - **`CapacityAllows(nil, 999) == true`** — the NULL-is-unlimited test the brief requires — plus `(4,3)=true`, `(4,4)=false`, `(4,7)=false`.
+- **`internal/ingest`** — fixtures from real Lichess JSON (recorded in `lichess/testdata`): a decisive game, a resign, a flag, a bare draw (→ `draw_other`), stalemate, insufficient material, a `cheat` game, an in-progress game; first-move extraction; duration; rating-at-game captured; acpl/accuracy present vs absent; `aborted` → pairing failed, no `games` row.
+- **`internal/matching`** — table-driven over fixture game lists: exactly one candidate → matched; reversed colours → not a candidate; a 3-day game → not a candidate; a game created before `pair_at−1d` → not a candidate; two candidates → `match_ambiguous`, nothing attached; a game already attached to another pairing → skipped; casual game between the same players → ignored. This is the test that proves outside-league games are never ingested.
+- **`internal/lichess`** — `httptest.Server` serving fixtures: ndjson streaming, `prov` absent-means-false, 429 → sleeps (clock injected) and retries once, batching of >300 ids.
+- **Integration (`-tags integration`, needs `TEST_DATABASE_URL`)** — runs goose from empty; `import-pairings` twice → one round, no duplicate pairings; ingest the same game JSON twice → exactly one row, standings unchanged on the second pass; in-progress → finished transition updates `games` and `pairings.status` and recomputes both players; `RecomputeAll` equals incremental results; `/standings` handler renders the expected order.
+- **Determinism guard**: standings recompute iterates over sorted slices from SQL, never Go maps; a test asserts `RecomputeAll` output is byte-identical across two runs.
+- No test touches lichess.org. `ic refresh-ratings`/`ic sync-games` against the live API are manual verification steps, not tests.
+
+---
+
+## Spec amendments
+
+Applied to `docs/infinite-correspondence-spec.md` on 2026-09-07 (see its §15 changelog): §3.4, §4.1 (Pairing + Game), §4.2, §5.1, §5.2, §6.3, §7, §7.1, §7.2, new §7.3, §8.1, §9, §12, §13, §14. Two questions remain open in §14 (organiser account — Phase 5; timezone — Phase 2) plus a new one (§14.6, whether the sheet's accuracy data came from analysis requested outside the API).
+
+---
+
+## Verification (end of Phase 1)
+
+1. `make db-up && make migrate` on an empty volume → all migrations apply; `make migrate-down` reverses them.
+2. `make test` green; `make test-integration` green.
+3. `ic seed-players players.txt` with the current active roster → users/profiles/snapshots exist; audit_log rows present.
+4. `ic import-pairings round-NNN.csv` for the current open round(s) from the sheet → rounds/pairings rows; re-run → no change.
+5. `ic sync-games` → `job_runs` row `succeeded`, pairings matched, `games` rows created (in progress or finished); re-run immediately → zero new matches, no row changes except `updated_at`. Confirm a member's known non-league correspondence game was **not** ingested.
+6. `ic serve`; open `/standings`, `/levels`, `/players/{name}`, `/` — tables populated; sorting/filtering works with JS disabled; `/health` returns 200 with `sync-games.last_status = succeeded`; `/jobs` lists the runs and any ambiguous matches.
+7. Hand-check five players' rating / last-5 score / XP against the live spreadsheet. Expect differences **only** where classical > correspondence (§5.1), where the opponent's current rating differs from their rating at game time (§5.2), or where the sheet counts games from before the imported rounds — document each.
+8. Stop Postgres while `serve` is running → `/health` returns 503; restart → river resumes and the next hourly run logs a `job_runs` row.

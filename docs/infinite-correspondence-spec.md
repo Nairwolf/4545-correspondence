@@ -2,7 +2,7 @@
 
 Replacement web application for the "Lichess4545 - Infinite Correspondence" Google Sheets system.
 
-**Status:** specification for implementation
+**Status:** specification for implementation — Phase 1 amendments applied 2026-09-07 (see §15 changelog)
 **Source of truth for existing behaviour:** the `Lichess4545 - Infinite Correspondence` spreadsheet (sheets: `Overview`, `Standings`, `Standings_Backend`, `Levels`, `Pairing_Maker`, `Pairing_Maker_Backend`, `Perf_Rating_Backend`, `RawData`, `Stats`)
 
 > **Out of scope:** the spreadsheet's `Awards` / `Awards_Backend` sheets are **not** being ported. The award metrics depend on a "compensation / sound sacrifice" detection rule whose implementation was lost, and the maintainers have confirmed the feature will not be carried over.
@@ -183,7 +183,11 @@ A player whose token has been invalid for more than `token.invalid_grace_days` (
 Two distinct sync jobs (§7):
 
 - **Ongoing detection.** For each published pairing, determine whether the Lichess game exists and is in progress. When games are created via bulk pairing, the game IDs are returned by the API at creation time (`GET /api/bulk-pairing/{id}` returns the pairing with its `games` array of `{id, white, black}`), so ongoing games are known immediately without polling for discovery. Polling is only needed for fallback-path challenge games and for detecting completion.
-- **Completion sync.** Export finished games and ingest full detail. `GET /api/bulk-pairing/{id}/games` streams the games of a bulk pairing with export options (`clocks`, `evals`, `accuracy`, `opening`). For fallback games, use `GET /api/games/user/{username}` or `GET /api/game/export/{gameId}` with the same options.
+- **Completion sync.** Export finished games and ingest full detail. For any pairing with a known game ID, use `POST /api/games/export/_ids` (up to 300 comma-separated IDs per call, `Accept: application/x-ndjson`) — one call re-checks every in-progress game. `GET /api/bulk-pairing/{id}/games` streams the games of a bulk pairing. For a pairing **without** a game ID (fallback challenge, or an externally created game — §7.3), search `GET /api/games/user/{username}` for the white player with `perfType=correspondence&rated=true&since=<round pair_at>` and match on opponent, colour, variant and `daysPerTurn`. Single-game export, when needed, is `GET /game/export/{gameId}` (note: **not** under `/api/`).
+
+Export options: `opening=true&accuracy=true&clocks=true`. Do **not** request `evals=true` — it appends a per-ply analysis array that no metric uses; `acpl` and `accuracy` come from `players.{white,black}.analysis` without it.
+
+**Only games that match a `Pairing` are ingested.** Players play correspondence games outside the league, including against other members; a game is a league game if and only if it belongs to a pairing. Polling members' game lists without a pairing to match against is not a valid discovery mechanism.
 
 All ingestion must be **idempotent**, keyed on the Lichess game ID.
 
@@ -256,35 +260,59 @@ Pairing
   white_user_id         uuid fk -> User
   black_user_id         uuid fk -> User
   creation_method       enum(bulk, challenge, manual_external)
+                                                    # manual_external: pairing published outside
+                                                    # the system (the spreadsheet during the
+                                                    # transition, or an admin fix-up); the game
+                                                    # is discovered by matching (§7.3)
   lichess_game_id       text nullable unique
   status                enum(pending, created, in_progress, completed, failed, cancelled)
+  match_ambiguous       boolean default false       # §7.3: more than one candidate game found;
+                                                    # admin must pick
   created_at            timestamptz
   edited_by             uuid nullable fk -> User    # set if an admin altered it
 
-Game
+Game                                       # one row per league game, in progress or finished
   lichess_game_id       text pk
-  pairing_id            uuid nullable fk -> Pairing   # null for imported history
-  round_number          int nullable
+  pairing_id            uuid fk -> Pairing          # every game belongs to a pairing (§3.4)
+  round_number          int                          # denormalised from Round
   white_user_id         uuid fk -> User
   black_user_id         uuid fk -> User
-  result                enum(white_win, black_win, draw)
-  termination           enum(mate, resign, clock_flag, draw_agreement,
-                             threefold, stalemate, insufficient_material, aborted, unknown)
+  status                enum(in_progress, finished)
+  lichess_status        text                         # raw API status, kept verbatim
+  result                enum(white_win, black_win, draw) nullable   # null while in_progress
+  termination           enum(mate, resign, clock_flag, draw_agreement, threefold,
+                             fifty_move, stalemate, insufficient_material,
+                             draw_other, unknown) nullable          # null while in_progress
+  days_per_turn         int nullable
   eco                   text nullable
   opening_name          text nullable
+  opening_ply           int nullable
   white_first_move      text nullable
   black_first_move      text nullable
-  white_accuracy        numeric nullable
+  white_rating_at_game  int nullable       # players.white.rating in the API response (§5.2)
+  black_rating_at_game  int nullable
+  white_accuracy        numeric nullable   # only present if the game was analysed on Lichess
   black_accuracy        numeric nullable
-  white_total_moves     int nullable
-  black_total_moves     int nullable
-  white_total_cpl       int nullable
-  black_total_cpl       int nullable
-  started_at            timestamptz
+  white_moves           int nullable
+  black_moves           int nullable
+  white_acpl            int nullable       # AVERAGE centipawn loss — the API has no "total"
+  black_acpl            int nullable
+  started_at            timestamptz        # createdAt
+  last_move_at          timestamptz
   finished_at           timestamptz nullable
   duration_seconds      bigint nullable
-  ingested_at           timestamptz
   raw_payload           jsonb             # full Lichess response, for reprocessing
+  ingested_at           timestamptz
+  updated_at            timestamptz
+
+  Aborted games (Lichess status aborted / noStart) are NOT stored here; they are
+  recorded on the Pairing as failed. Termination mapping from the Lichess status
+  enum: mate->mate, resign->resign, outoftime->clock_flag, timeout->clock_flag,
+  stalemate->stalemate, insufficientMaterialClaim->insufficient_material,
+  cheat/unknownFinish/variantEnd->unknown (result still taken from `winner`).
+  The API reports every other draw as a bare `draw`; the split into
+  draw_agreement / threefold / fifty_move / draw_other is INFERRED by replaying
+  the moves (§7.1) and must be labelled as inferred wherever it is displayed.
 
 PlayerStanding                             # materialised, recomputed on ingest
   user_id               uuid pk fk -> User
@@ -302,6 +330,7 @@ PlayerStanding                             # materialised, recomputed on ingest
   level                 int
   xp_to_next_level      int
   last_level_up_round   int nullable
+  last_level_up_at      timestamptz nullable
   last_game_finished_at timestamptz nullable
   is_eligible           boolean
   updated_at            timestamptz
@@ -406,6 +435,7 @@ All of these live in `Setting`, are editable from the admin panel, and have the 
 | `player.default_accepts_double` | `true` | New players absorb odd pools by default, minimising byes |
 | `xp.win` / `xp.draw` / `xp.loss` | `3` / `2` / `1` | XP award per result |
 | `token.invalid_grace_days` | `14` | Days before an unauthorised player is deactivated |
+| `rating.unrated_default` | `1500` | Rating assumed for a player with neither a correspondence nor a classical rating (§5.1) |
 
 ---
 
@@ -437,7 +467,7 @@ rating(player):
 Notes:
 
 - **Provisional** follows Lichess's own definition: the API marks a rating `prov` when its rating deviation is high (roughly RD > 110). Treat a provisional correspondence rating as weaker evidence than an established classical one, but better than nothing.
-- **`UNRATED`** players (brand-new Lichess accounts with neither rating) are pooled at the league median rating for pairing purposes, and flagged as unrated in the standings until they have played `pairing.min_games_for_perf` league games, after which their performance rating takes over (§5.4). Do not invent a fixed constant like 1500 — the league median is a better prior and adapts as the roster changes.
+- **`UNRATED`** players (brand-new Lichess accounts with neither rating) are given the configurable constant `rating.unrated_default` (default 1500) for pairing and power-rating purposes, and flagged as unrated in the standings until they have played `pairing.min_games_for_perf` league games, after which their performance rating takes over (§5.4). The scoring module returns an explicit *unrated* result; substituting the constant is the caller's job, so the constant never leaks into the pure logic. *(Decided 2026-09-07: a fixed constant was chosen over a league-median prior for simplicity.)*
 - Once a player has an established correspondence rating, classical is never consulted again. The fallback is a bootstrap, not an ongoing input.
 
 **Migration impact.** This is a deliberate behavioural difference from the spreadsheet. Any player whose classical rating exceeded their correspondence rating will compute a *lower* base rating here than the sheet showed. When validating a history import (§9.2), expect these players to differ, verify the difference is explained by exactly this rule, and do not "fix" the code to match the old values.
@@ -450,8 +480,10 @@ Within that window:
 
 ```
 last_k_score = wins + 0.5 * draws          # points out of k
-last_k_avg_opponent_rating = mean(rating(opponent) for each game in window)
+last_k_avg_opponent_rating = mean(opponent_rating_at_game for each game in window)
 ```
+
+**Opponent rating is the opponent's rating when the game was played** — `Game.white_rating_at_game` / `black_rating_at_game`, taken from `players.{white,black}.rating` in the Lichess game export. This is a deliberate difference from the spreadsheet, which used the opponent's *current* rating (`PLAYER_RATINGS`). Rating-at-game is what a performance rating means (FIDE uses opponents' ratings at the event), it never changes retroactively, and it makes every standing reproducible from the `Game` table alone. *(Decided 2026-09-07.)*
 
 ### 5.3 Performance rating
 
@@ -773,8 +805,10 @@ On publish:
 1. Partition pairings by whether both players have valid `challenge:write` tokens.
 2. For the bulk-capable set, issue `POST /api/bulk-pairing` with `days=2`, `rated=true`, `pairAt` set to the publish time. Store the returned bulk pairing id on the `Round` and the returned game ids on each `Pairing`; set `Pairing.status = created`.
 3. For the remainder, issue individual challenges via `POST /api/challenge/{username}`, set `creation_method = challenge`, `status = pending`.
-4. Any pairing whose creation call fails is marked `failed` and surfaced in the admin dashboard with the error. Failures must not roll back the successful pairings.
+4. **A bulk pairing is all-or-nothing on the Lichess side.** The whole request is rejected (HTTP 400 with an `error` message) if any token is missing, invalid, lacks `challenge:write`, or belongs to a closed account, or if the organiser already has 20 scheduled bulks / 1000 scheduled games. Partial bulks are never created; failed bulks do not count against the rate limit. Publication must therefore: (a) rely on `validate-tokens` (§7) having run just beforehand; (b) on a 400, parse the error, move the offending pairing(s) to the challenge fallback, and resubmit the rest; (c) give up after a bounded number of resubmissions and mark the remaining pairings `failed`. Individual challenge failures (step 3) are independent and never roll back anything.
 5. Notify players (§10).
+
+Verified limits: `days` must be one of 1, 2, 3, 5, 7, 10, 14; at most 500 games per bulk and 500 games per 10 minutes; a custom `message` must contain the `{game}` placeholder. Correspondence bulks may include the same player in more than one game (this is what makes the double game in §6.2 a single request) — confirm live before relying on it. **The `pairAt` horizon is documented inconsistently** (endpoint text says "up to 24h in advance", the field says "up to 7 days"); test it with a throwaway bulk before Phase 5 assumes a Monday-generate / later-publish gap of more than a day.
 
 If the round is cancelled during the review window and a bulk pairing was already scheduled with a future `pairAt`, cancel it via the bulk pairing cancel endpoint.
 
@@ -800,7 +834,7 @@ Every job must be idempotent, retryable, and record its outcome. A `JobRun` tabl
 |---|---|---|
 | `generate-round` | Weekly (`pairing.cron`) | Run the pairing engine, create a `draft` or published `Round` |
 | `publish-round` | **Scheduled once**, at the round's `publish_at`; hourly sweep as safety net | Publish a `draft` round when its review window expires |
-| `sync-games` | **Hourly** | Single merged job: reconcile pairing status, pick up fallback-challenge game ids, ingest newly finished games, update standings and levels |
+| `sync-games` | **Hourly** | Single merged job: reconcile pairing status, match games to pairings that have no game id yet (§7.3), ingest newly finished games, update standings and levels |
 | `validate-tokens` | **Weekly**, ~1h before `generate-round` | Check stored tokens, mark revoked, notify affected players — so the pairing pool is accurate when it matters |
 | `refresh-ratings` | Daily | Update `RatingSnapshot` for all approved players |
 | `evaluate-activity` | Weekly, after round generation | Record missed starts, apply auto-pause, flag long-inactive players |
@@ -820,18 +854,33 @@ Both `sync-games` and `generate-round` must also be **manually triggerable from 
 
 For each finished game:
 
-1. Fetch with `clocks=true`, `evals=true`, `accuracy=true`, `opening=true`.
+1. Fetch with `clocks=true`, `accuracy=true`, `opening=true` (not `evals`, see §3.4).
 2. Store the complete response in `Game.raw_payload`. This is non-negotiable — it allows every derived metric to be recomputed later without re-fetching, which the spreadsheet could not do.
-3. Map to the normalised `Game` columns.
-4. Upsert on `lichess_game_id`.
+3. Map to the normalised `Game` columns. For a bare `draw` status, replay `moves` with a chess library to classify threefold / fifty-move / insufficient material; anything else is `draw_agreement`; an unparsable move list yields `draw_other`.
+4. Upsert on `lichess_game_id`. In-progress games are stored too (`status = in_progress`, result null) so the Overview page and the `ongoing` count read from the same table; the row is updated in place when the game finishes.
 5. Recompute the two players' `PlayerStanding` rows (incremental).
 6. Detect level-ups and emit notifications.
 
 ### 7.2 Rate limiting and resilience
 
-- Respect Lichess rate limits; on HTTP 429, back off and retry rather than failing the job.
+- Respect Lichess rate limits. Lichess's rule is "only make one request at a time": the client serialises all outbound calls. On HTTP 429, wait at least 60 seconds before a single retry, then let the job fail and be retried by the scheduler.
 - All outbound calls go through a single client with a shared limiter, timeouts, and bounded retries with exponential backoff.
 - A Lichess outage must degrade gracefully: the site keeps serving cached data, jobs retry, and admins are alerted rather than the system silently doing nothing.
+
+### 7.3 Matching games to pairings without a game id
+
+A pairing can lack a `lichess_game_id` in two cases: a fallback challenge (§3.3) that has not yet been accepted, and a `manual_external` pairing — in particular every pairing imported from the spreadsheet during the transition (§12, Phase 1), when the league is still being paired by the sheet and games are still being created by hand.
+
+For each such pairing, `sync-games` fetches the **white** player's games with `GET /api/games/user/{white}?perfType=correspondence&rated=true&since=<round.pair_at − 1 day>&ongoing=true&finished=true&opening=true&accuracy=true&clocks=true` and keeps candidates where:
+
+- `players.white.user.id` is the pairing's white player and `players.black.user.id` its black player (colours must match — a game with reversed colours is not this pairing),
+- `variant = standard`, `rated = true`, `daysPerTurn = pairing.days_per_move`,
+- `createdAt >= round.pair_at − 1 day`,
+- the game id is not already attached to another pairing.
+
+Exactly one candidate → attach it and ingest. None → leave pending (the game may not exist yet). More than one → set `match_ambiguous = true`, attach nothing, and surface it in the admin round view; an admin picks the game (or marks the pairing failed). Never guess.
+
+Since the search is anchored on a pairing, games members play against each other outside the league are never ingested. This is the only discovery mechanism; there is no "scan everyone's games" mode.
 
 ---
 
@@ -852,7 +901,7 @@ For each finished game:
 - Player names link to Lichess profiles and to the internal player page.
 
 **Levels** — reproduces the `Levels` sheet.
-- Columns: rank, player, XP, level, XP until level-up, last level-up round.
+- Columns: rank, player, XP, level, XP until level-up, last level-up (round number when known, otherwise date).
 - Explanation of the XP rules inline (win 3 / draw 2 / loss 1, level = √XP).
 
 **Player profile**
@@ -860,11 +909,12 @@ For each finished game:
 - Full game history: opponent, colour, result, round, opening, accuracy, link to game.
 - Charts: rating over time, XP over time, results distribution.
 
-**Stats** — reproduces the `Stats` sheet.
-- Termination breakdown (mate, resign, clock flag, draw by agreement, threefold) with counts and percentages.
+**Stats** — reproduces the `Stats` sheet. **Deferred out of Phase 1** (decided 2026-09-07): the draw-subtype inference, the analysed-vs-unanalysed caveat and the per-round series all raise questions better answered once real data is flowing. Build after Phase 4.
+- Termination breakdown (mate, resign, clock flag, draw by agreement, threefold, fifty-move) with counts and percentages. Draw subtypes are inferred by replay (§7.1) and the page must say so.
 - Result distribution (white win / black win / draw).
 - Most common first replies to 1.e4 and 1.d4, with count, share, and white W/D/L split.
 - Average game duration.
+- Accuracy / centipawn-loss figures exist only for games someone has requested analysis on at Lichess; show "n of m games analysed" next to any such figure.
 - Players paired per round, as a time series.
 
 > **Not built:** the spreadsheet's Awards page (Archbishop of Accuracy, Compensation Addict, Ace) is out of scope and is not being ported.
@@ -934,9 +984,11 @@ This replaces the admin manually flipping the `active` column.
 
 ---
 
-## 9. Data migration (OPTIONAL — decide before implementation)
+## 9. Data migration (DECLINED)
 
-**This section is deferred. Do not implement until the maintainers confirm they want it.**
+**Decided 2026-09-07: historical games are not imported.** The site starts with an empty game record. What *is* imported, during Phase 1, is the small set of **currently open pairings** from the spreadsheet (round number, white, black, and the game id where the sheet has it), as `manual_external` pairings — see §7.3 and §12. Round numbers on those pairings are taken from the sheet as-is, and the pairing engine continues the sequence from the highest imported round.
+
+The remainder of this section is kept for reference in case the decision is revisited.
 
 If history is imported, it must be the **full historical game record**, not a standings snapshot — the stats pages depend on per-game opening, accuracy, termination and CPL data, and a snapshot would leave those pages empty for all pre-launch games.
 
@@ -1025,7 +1077,7 @@ Notes:
 Each phase should be independently deployable and useful.
 
 **Phase 1 — Read-only parity.**
-Database schema, migrations, Lichess client, completion sync, scoring module (§5), standings / levels / player profile / stats pages. Validates the hardest logic against known-good spreadsheet output before anything depends on it.
+Database schema, migrations, Lichess client, scoring module (§5), the `sync-games` / `refresh-ratings` / `recompute-aggregates` jobs with persisted outcomes, and the home / standings / levels / player profile pages. Because registration (Phase 2) and the pairing engine (Phase 4) do not exist yet, Phase 1 also ships two admin CLI commands: `seed-players` (create approved players from a username list) and `import-pairings` (create a round and its `manual_external` pairings from a CSV taken from the spreadsheet), which is what lets `sync-games` find the league's games (§7.3). A read-only `/jobs` page and `/health` make job outcomes visible before the admin panel exists. The Stats page is deferred (§8.1). With no history import, correctness is validated with hand-built fixtures and by spot-checking live players against the sheet.
 
 **Phase 2 — Identity.**
 Lichess OAuth, registration flow, admin registration queue, sessions, roles.
@@ -1061,6 +1113,12 @@ These were open and are now settled. Recorded here so they are not relitigated d
 | Bye selection | Longest time since last bye; never rating-based. |
 | Email notifications | **None.** No SMTP, no email stored. On-site centre, optional Lichess PM, optional Discord (§10). |
 | Base rating | **Correspondence, falling back to classical** only when correspondence is missing or provisional. Corrects the spreadsheet's `MAX()` (§5.1). |
+| Unrated players | **Fixed constant** `rating.unrated_default` (1500), not the league median (§5.1). |
+| Opponent rating in performance rating | **Rating at the time of the game**, stored on `Game`, not the opponent's current rating (§5.2). |
+| History import | **No.** Only currently open pairings are imported, as `manual_external` (§9). Round numbers continue the sheet's sequence. |
+| League-game discovery | **Pairing-anchored only** (§7.3). Members' other correspondence games are never ingested. |
+| Stats page | Deferred until after Phase 4 (§8.1). |
+| Templating / migrations | `html/template` and `goose`. |
 | Perf-rating deltas | The **FIDE `dp` table**, indexed by score percentage so any `k` works (§5.3). |
 | Job frequency | Deliberately slow. One hourly job; everything else daily or weekly (§7). |
 | Awards page | Not ported. Out of scope. |
@@ -1069,8 +1127,15 @@ These were open and are now settled. Recorded here so they are not relitigated d
 
 ## 14. Open questions for the maintainers
 
-1. **History import** — required or not? If yes, it must be the full historical game record (§9). This decides whether Phase 7 exists at all.
-2. **Round numbering** — continue the existing sequence (currently ~168+) or restart at 1?
-3. **Organiser account** — which Lichess account holds the `challenge:bulk` token, and who has access to it? This is a single point of failure and needs a named owner.
-4. **Timezone field** — registration currently collects a timezone, but nothing in this spec uses it. Either find a use (displaying deadlines in local time) or drop it and make registration a single click.
-5. **League median for unrated players** (§5.1) — confirm this is preferred over a fixed constant.
+1. ~~History import~~ — **resolved: no** (§9, §13).
+2. ~~Round numbering~~ — **resolved: continue the sheet's sequence** via the imported open pairings (§9).
+3. **Organiser account** — which Lichess account holds the `challenge:bulk` token, and who has access to it? This is a single point of failure and needs a named owner. *(Needed before Phase 5.)*
+4. **Timezone field** — registration currently collects a timezone, but nothing in this spec uses it. Either find a use (displaying deadlines in local time) or drop it and make registration a single click. *(Needed before Phase 2.)*
+5. ~~League median for unrated players~~ — **resolved: fixed constant** (§5.1, §13).
+6. **Game analysis** — accuracy and centipawn loss exist only for games analysed on Lichess, and the public API cannot request analysis. Did the old Python script request it some other way, or were those columns sparsely populated in the sheet? *(Affects the Stats page, after Phase 4.)*
+
+---
+
+## 15. Changelog
+
+- **2026-09-07** — Lichess API verified against the OpenAPI definition (v2.0.169). Corrected export paths and options (§3.4, §7.1); documented bulk-pairing atomicity, limits and the `pairAt` ambiguity (§6.3); added pairing-anchored game matching (§7.3) and `manual_external` semantics (§4.1); reshaped `Game` (status column, rating-at-game, acpl, inferred draw subtypes, aborted games excluded); decided unrated constant, rating-at-game, no history import, round numbering, Stats deferral, tooling (§13). Phase 1 scope updated (§12).

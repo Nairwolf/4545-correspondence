@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ic
+      POSTGRES_PASSWORD: ic
+      POSTGRES_DB: ic
+    ports:
+      - "55432:5432"
+    volumes:
+      - ic-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ic"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+volumes:
+  ic-postgres:
