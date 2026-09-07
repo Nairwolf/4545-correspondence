@@ -453,22 +453,20 @@ Corrected rule — **prefer correspondence, fall back to classical**:
 
 ```
 rating(player):
-    if correspondence_rating exists and is not provisional:
+    if correspondence_rating exists:              # provisional or not — see note below
         return correspondence_rating
-    if classical_rating exists and is not provisional:
-        return classical_rating                  # newcomer fallback
-    if correspondence_rating exists:             # provisional, but it's what we have
-        return correspondence_rating
-    if classical_rating exists:
+    if classical_rating exists:                   # provisional or not — newcomer fallback
         return classical_rating
     return UNRATED
 ```
 
+*(Simplified 2026-09-07: an earlier version of this rule additionally preferred an established classical rating over a provisional correspondence one. The maintainer decided that added a distinction not worth the complexity — any correspondence rating, however new, is closer to what the league is actually measuring than a classical one, and provisional ratings settle quickly as a player accumulates league games.)*
+
 Notes:
 
-- **Provisional** follows Lichess's own definition: the API marks a rating `prov` when its rating deviation is high (roughly RD > 110). Treat a provisional correspondence rating as weaker evidence than an established classical one, but better than nothing.
+- **Provisional** follows Lichess's own definition: the API marks a rating `prov` when its rating deviation is high (roughly RD > 110). It plays no role in this rule beyond being one of the two things that can be missing (see `UNRATED` below) — a provisional correspondence rating is used exactly like an established one.
 - **`UNRATED`** players (brand-new Lichess accounts with neither rating) are given the configurable constant `rating.unrated_default` (default 1500) for pairing and power-rating purposes, and flagged as unrated in the standings until they have played `pairing.min_games_for_perf` league games, after which their performance rating takes over (§5.4). The scoring module returns an explicit *unrated* result; substituting the constant is the caller's job, so the constant never leaks into the pure logic. *(Decided 2026-09-07: a fixed constant was chosen over a league-median prior for simplicity.)*
-- Once a player has an established correspondence rating, classical is never consulted again. The fallback is a bootstrap, not an ongoing input.
+- Once a player has *any* correspondence rating, classical is never consulted again. The fallback is a bootstrap, not an ongoing input.
 
 **Migration impact.** This is a deliberate behavioural difference from the spreadsheet. Any player whose classical rating exceeded their correspondence rating will compute a *lower* base rating here than the sheet showed. When validating a history import (§9.2), expect these players to differ, verify the difference is explained by exactly this rule, and do not "fix" the code to match the old values.
 
@@ -1112,7 +1110,7 @@ These were open and are now settled. Recorded here so they are not relitigated d
 | Double-game opt-in | **On by default**, to keep byes rare. Players may opt out. |
 | Bye selection | Longest time since last bye; never rating-based. |
 | Email notifications | **None.** No SMTP, no email stored. On-site centre, optional Lichess PM, optional Discord (§10). |
-| Base rating | **Correspondence, falling back to classical** only when correspondence is missing or provisional. Corrects the spreadsheet's `MAX()` (§5.1). |
+| Base rating | **Any correspondence rating (even provisional), falling back to classical only when correspondence is entirely absent.** Corrects the spreadsheet's `MAX()`; provisional status no longer distinguishes the two sources (§5.1). |
 | Unrated players | **Fixed constant** `rating.unrated_default` (1500), not the league median (§5.1). |
 | Opponent rating in performance rating | **Rating at the time of the game**, stored on `Game`, not the opponent's current rating (§5.2). |
 | History import | **No.** Only currently open pairings are imported, as `manual_external` (§9). Round numbers continue the sheet's sequence. |
@@ -1139,3 +1137,4 @@ These were open and are now settled. Recorded here so they are not relitigated d
 ## 15. Changelog
 
 - **2026-09-07** — Lichess API verified against the OpenAPI definition (v2.0.169). Corrected export paths and options (§3.4, §7.1); documented bulk-pairing atomicity, limits and the `pairAt` ambiguity (§6.3); added pairing-anchored game matching (§7.3) and `manual_external` semantics (§4.1); reshaped `Game` (status column, rating-at-game, acpl, inferred draw subtypes, aborted games excluded); decided unrated constant, rating-at-game, no history import, round numbering, Stats deferral, tooling (§13). Phase 1 scope updated (§12).
+- **2026-09-07** — Simplified §5.1 base rating: any correspondence rating (provisional or not) is now used ahead of classical; the earlier rule's extra branch preferring an *established* classical rating over a *provisional* correspondence one was dropped as unwarranted complexity (§5.1, §13).

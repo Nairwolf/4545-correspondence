@@ -38,7 +38,7 @@ Key modules and their properties:
 
 - **One pairing per player per round. Always.** `max_concurrent_games` caps *total ongoing games*, not pairings per round.
 - **`max_concurrent_games IS NULL` means unlimited**, and it is the default for every player. A NULL→0 coercion would silently exclude the entire default population from every round while the engine appears to succeed. Spec §11 requires a dedicated test for this.
-- **Base rating prefers correspondence, falling back to classical** only when correspondence is missing or provisional (§5.1). This deliberately differs from the spreadsheet's `MAX()`. When validating against historical values, expect mismatches for players whose classical exceeded their correspondence rating — verify the difference is explained by this rule, do not "fix" the code to match.
+- **Base rating uses any correspondence rating — provisional or not — falling back to classical only when there's no correspondence rating at all** (§5.1). This deliberately differs from the spreadsheet's `MAX()`. When validating against historical values, expect mismatches for players whose classical exceeded their correspondence rating — verify the difference is explained by this rule, do not "fix" the code to match.
 - **The FIDE `dp` table is indexed by score *percentage*, not raw score** (§5.3). Interpolate between the 10% steps so changing `pairing.last_k` keeps working. Indexing by raw score corrupts every number invisibly.
 - **`repeat_penalty` is a large finite number (1e6), not infinity** — infinity makes the matching unsolvable rather than merely expensive.
 - **Byes are never selected by rating, level, XP, or results** — longest time since last bye, then fewest byes, then user id. A bye must never look like punishment.

@@ -329,25 +329,39 @@ Why `games` carries `status` rather than a separate ongoing-games table: the Ove
 
 ## Scoring module (`internal/scoring`) — pure, no I/O
 
+**Implemented as built (step 2), superseding the earlier sketch:**
+
 ```go
-type Rating struct{ Value int; Provisional bool }             // absent = nil pointer
-func BaseRating(corr, classical *Rating) (rating int, unrated bool) // §5.1, corrected rule
-func PerfDelta(score float64, k int) float64                   // §5.3: p = score/k, FIDE table interpolated on 10% steps
-func LastK(games []FinishedGame, k int) []FinishedGame         // ordered by FinishedAt desc, LIMIT k (caller passes sorted)
-func LastKScore(window []FinishedGame, me UserID) float64       // wins + 0.5*draws
-func PerfRating(window []FinishedGame, me UserID, opponentRating func(UserID) int) float64
-func PowerRating(perf *float64, base int, played, minGames int) int   // §5.4
-func ColorScore(games []FinishedGame, me UserID) int           // §5.5 (white − black)
-func XP(w, d, l int, weights XPWeights) int                    // §5.6
-func Level(xp int) (level, toNext int)                         // floor(sqrt(xp)), (level+1)^2 − xp
-func CapacityAllows(maxConcurrent *int, ongoing int) bool      // §5.8 — nil means unlimited
+type FinishedGame struct {              // already resolved to ONE player's perspective —
+    OpponentID           UserID          // no separate "me" parameter needed anywhere below
+    OpponentRatingAtGame int
+    PlayedWhite          bool
+    Result               Result          // Win | Draw | Loss, from that player's side
+    FinishedAt           time.Time
+}
+
+type Rating struct{ Value int; Provisional bool }
+func BaseRating(correspondence, classical *Rating) (value int, unrated bool)   // §5.1, corrected rule
+func PerfDelta(score float64, windowSize int) float64                          // §5.3: p = score/windowSize, FIDE table interpolated on 10% steps
+func LastK(games []FinishedGame, k int) []FinishedGame                         // sorts its own copy by FinishedAt desc, caps at k
+func LastKScore(window []FinishedGame) float64                                  // wins + 0.5*draws
+func PerfRating(games []FinishedGame, k int) (perf float64, ok bool)           // avg(OpponentRatingAtGame) + PerfDelta; ok=false on an empty window
+func PowerRating(perf float64, perfOK bool, base int, gamesPlayed, minGamesForPerf int) int  // §5.4
+func ColorScore(games []FinishedGame) int                                       // §5.5 (white − black), all-time not windowed
+func XP(games []FinishedGame, weights XPWeights) int                            // §5.6
+func Level(xp int) (level, xpToNextLevel int)                                   // floor(sqrt(xp)), (level+1)^2 − xp, integer-corrected
+func CapacityAllows(maxConcurrent *int, ongoing int) bool                       // §5.8 — nil means unlimited
 ```
 
-FIDE table stored as `[11]int{-800,-366,-240,-149,-72,0,72,149,240,366,800}` indexed by `p*10`, with linear interpolation between neighbours. `PerfDelta` panics on `k <= 0` and clamps `p` to [0,1].
+Two deliberate deviations from the original sketch: (1) `FinishedGame` carries the result already resolved to one player's side, so no function needs a `me UserID` parameter — the caller (the future `standings` package) does that resolution once per player instead of every scoring function repeating it; (2) `PowerRating` takes `perf float64, perfOK bool` instead of `*float64`, avoiding nil-vs-zero ambiguity for "no computable performance rating yet".
 
-`CapacityAllows` lives here even though pairing is Phase 4, because the brief demands the NULL test exists from the start and the function is trivially pure.
+FIDE table stored as `[11]float64{-800,-366,...,800}` indexed by `p*10`, linearly interpolated between neighbours. `PerfDelta` panics on `windowSize <= 0` and clamps `p` to `[0,1]` rather than extrapolating past the FIDE table's own ±800 cap.
 
-**Opponent rating for §5.2 — decided: rating at game time.** `PerfRating` takes the window of `FinishedGame`s, each carrying `OpponentRatingAtGame`; no rating lookup function is injected. A game whose API payload lacks the opponent's rating (should not happen for rated games) is excluded from the average and counted in `job_runs.detail`.
+`CapacityAllows` lives here even though pairing is Phase 4, because the brief demands the NULL test exists from the start and the function is trivially pure. `Level` corrects `math.Sqrt`'s float result with integer arithmetic before trusting it — cheap, and it removes any dependence on floating-point rounding behaviour at level boundaries even though no drift was observed in practice.
+
+**Opponent rating for §5.2 — decided: rating at game time.** `PerfRating` takes the window of `FinishedGame`s, each carrying `OpponentRatingAtGame`; no rating lookup function is injected. A game whose API payload lacks the opponent's rating (should not happen for rated games) is excluded from the average and counted in `job_runs.detail` — this is an ingest-layer concern (step 6), not something the pure `scoring` package handles.
+
+Tests: `internal/scoring/scoring_test.go`, table-driven with `testify`, covering every §5.1 branch (established correspondence beating a higher established classical; provisional correspondence beating an established classical, since 2026-09-07 that's a plain win not a fallback; provisional correspondence with no classical at all; both provisional; classical-only, established and provisional; neither → unrated), the full FIDE table at `k=5`, interpolation at a non-table-aligned score, `k=3`/`k=10` sanity, out-of-range clamping, the `PowerRating` threshold on both sides, `XP`/`Level` boundaries, and `CapacityAllows(nil, 999) == true` plus the at/over-cap cases per spec §11.
 
 ---
 
@@ -409,7 +423,7 @@ Each step is a self-contained commit point (the maintainer commits; see `CLAUDE.
 ## Testing
 
 - **`internal/scoring`** — table-driven, pure:
-  - `BaseRating`: every branch of §5.1 (established corr; prov corr + established classical → classical; prov corr only; classical only; neither → unrated).
+  - `BaseRating`: every branch of §5.1, simplified 2026-09-07 to drop provisional-vs-established distinctions entirely — any correspondence rating wins (established or provisional; provisional-over-established-classical is the case that changed), classical only when correspondence is absent, neither → unrated.
   - `PerfDelta`: all 11 FIDE points at `k=5` exactly; interpolation midpoints (e.g. 2.25/5 → −110.5); `k=3` and `k=10` sanity; clamping at 0% / 100%.
   - `PowerRating` on both sides of `min_games_for_perf`.
   - `XP`/`Level` at boundaries: xp 0,1,3,4,8,9,15,16.
