@@ -88,24 +88,7 @@ func doRefreshRatings(ctx context.Context, q *gen.Queries, client lichess.API) (
 			continue
 		}
 
-		params := gen.InsertRatingSnapshotParams{UserID: u.ID}
-		if lu.Perfs.Correspondence != nil {
-			rating := int32(lu.Perfs.Correspondence.Rating)
-			games := int32(lu.Perfs.Correspondence.Games)
-			prov := lu.Perfs.Correspondence.Provisional
-			params.CorrespondenceRating = &rating
-			params.CorrespondenceGames = &games
-			params.CorrespondenceProv = &prov
-		}
-		if lu.Perfs.Classical != nil {
-			rating := int32(lu.Perfs.Classical.Rating)
-			games := int32(lu.Perfs.Classical.Games)
-			prov := lu.Perfs.Classical.Provisional
-			params.ClassicalRating = &rating
-			params.ClassicalGames = &games
-			params.ClassicalProv = &prov
-		}
-
+		params := ratingSnapshotParams(u.ID, lu)
 		if _, err := q.InsertRatingSnapshot(ctx, params); err != nil {
 			return inserted, fmt.Errorf("insert rating snapshot for %s: %w", u.LichessUsername, err)
 		}

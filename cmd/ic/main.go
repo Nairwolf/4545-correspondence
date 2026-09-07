@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
@@ -22,7 +23,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: ic <serve|migrate|refresh-ratings> ...")
+		return errors.New("usage: ic <serve|migrate|refresh-ratings|seed-players|import-pairings> ...")
 	}
 
 	cfg, err := config.Load()
@@ -44,8 +45,36 @@ func run(args []string) error {
 		}
 		defer pool.Close()
 		return runRefreshRatings(ctx, pool, lichess.New(cfg.LichessToken))
+	case "seed-players":
+		if len(args) < 2 {
+			return errors.New("usage: ic seed-players <usernames-file>")
+		}
+		pool, err := db.Open(ctx, cfg.DatabaseURL)
+		if err != nil {
+			return err
+		}
+		defer pool.Close()
+		return runSeedPlayers(ctx, pool, lichess.New(cfg.LichessToken), args[1])
+	case "import-pairings":
+		fs := flag.NewFlagSet("import-pairings", flag.ContinueOnError)
+		pairAt := fs.String("pair-at", "", "RFC3339 timestamp; defaults to the most recent Monday 12:00 UTC")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() < 1 {
+			return errors.New("usage: ic import-pairings [--pair-at RFC3339] <pairings.csv>")
+		}
+		pool, err := db.Open(ctx, cfg.DatabaseURL)
+		if err != nil {
+			return err
+		}
+		defer pool.Close()
+		return runImportPairings(ctx, pool, fs.Arg(0), *pairAt)
 	default:
-		return fmt.Errorf("unknown command %q (want: serve, migrate, refresh-ratings)", args[0])
+		return fmt.Errorf(
+			"unknown command %q (want: serve, migrate, refresh-ratings, seed-players, import-pairings)",
+			args[0],
+		)
 	}
 }
 

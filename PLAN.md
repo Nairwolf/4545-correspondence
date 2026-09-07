@@ -375,9 +375,13 @@ Tests: `internal/scoring/scoring_test.go`, table-driven with `testify`, covering
 
 ---
 
-## `import-pairings` CLI (transition tool)
+## `seed-players` and `import-pairings` CLIs — built step 5, verified against the live API
 
-`ic import-pairings round.csv` — CSV columns `round,white,black[,game_id]`, one round per file (the sheet's `Overview`/`Pairing_Maker` output). Creates the `rounds` row (`state=published`, `generated_by=imported`, `pair_at` from a `--pair-at` flag defaulting to the file's Monday) and one `manual_external` pairing per line. Usernames are resolved case-insensitively against `users`; an unknown name aborts the whole import with the offending line (no partial rounds). Re-running the same file is a no-op (matched on round number + white + black). Every row goes to `audit_log`. This is the only way pairings exist until Phase 4.
+Both wrap their writes in one `pgx.Tx` and validate every username up front, reporting *every* unresolvable one at once rather than stopping at the first — no partial roster/round is ever left behind on failure. Their sqlc queries (`internal/db/queries/pairings.sql`, `audit.sql`) were deferred from step 3 to here, where they're first consumed, per the step-3 scoping decision.
+
+`ic seed-players usernames.txt` — one username per line, blank lines and `#` comments skipped. Lichess ids are the lowercased username (holds in practice; the actual match is still keyed off `UsersByID`'s own response, not the assumption). For each name already present (`GetUserByLichessUserID`), it's a no-op; for each new one: `CreateApprovedUser` → `CreatePlayerProfile` → `InsertRatingSnapshot` (via the `ratingSnapshotParams` helper shared with `refresh-ratings`, in `cmd/ic/lichess_mapping.go`) → an `audit_log` row. Verified live: seeded `thibault` and `DrNykterstein`, confirmed their real ratings landed (1942/377 correspondence for thibault, matching §refresh-ratings' earlier verification); re-run was a true no-op (`created=0`); an unresolvable username aborted with zero rows written.
+
+`ic import-pairings round.csv` — CSV columns `round,white,black[,game_id]`, one round per file (the sheet's `Overview`/`Pairing_Maker` output), header row required. Creates or reuses the `rounds` row by number (`state=published`, `generated_by=imported`, `published_at` set equal to `pair_at` since an imported round has no review window to have happened; `pair_at` from `--pair-at` (RFC3339) or defaulting to the most recent Monday 12:00 UTC) and upserts one `manual_external` pairing per line via the `pairings_round_white_black` unique index. On conflict, `lichess_game_id` is only filled in if it was previously unset — `COALESCE(pairings.lichess_game_id, EXCLUDED.lichess_game_id)` — so a re-import can never clobber a game id `sync-games` (§7.3) has since discovered. Usernames are resolved case-insensitively against `users`; an unknown name, self-pairing, or a file mixing more than one round number aborts before any write. Every round-creation and every pairing-upsert writes an `audit_log` row, including on a no-op re-run (it's an audit trail of when the command ran, not just of what changed). Verified live end to end: created round 1 with a real pairing; re-run was a no-op (same round/pairing count); all four validation paths (mixed rounds, self-pairing, unresolved username, wrong header) rejected cleanly with zero partial writes; a second round with an explicit `game_id` and `--pair-at` both worked as designed.
 
 ## `sync-games` design (hourly, plus `ic sync-games` for manual runs) — spec §3.4 / §7.3
 
@@ -422,7 +426,7 @@ Each step is a self-contained commit point (the maintainer commits; see `CLAUDE.
 2. **Scoring package** with full table-driven tests (no DB needed). Done before anything reads it.
 3. **sqlc queries + generated code** for players, games upsert, standings aggregates, settings, job_runs.
 4. **Done.** Lichess client + fixtures + fake; `ic refresh-ratings` wired and run end to end against the live API — verified with one real account (thibault) manually inserted via SQL, since `seed-players` doesn't exist until step 5; confirmed the inserted `rating_snapshots` row matched the live API response exactly, then the test row was deleted.
-5. **`seed-players` and `import-pairings` CLIs** (resolve via `POST /api/users`; create approved users + profiles + first snapshot; create the round + pairings; audit-log everything).
+5. **Done.** `seed-players` and `import-pairings` CLIs — see their own section above for what was built and verified.
 6. **Matching + ingest + standings recompute**; `ic sync-games` once against the imported pairings; verify `games`, `pairings.status` and `job_runs`.
 7. **River wiring** (`serve` starts HTTP + river; periodic jobs registered).
 8. **Web pages** in the order standings → levels → player → home → health/jobs; Tailwind build.
