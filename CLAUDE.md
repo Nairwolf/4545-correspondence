@@ -86,3 +86,9 @@ Default to the standard library. Before adding a new Go dependency, ask the main
 This does not apply to the libraries the spec itself mandates (§2.1: `chi`, `river`, `sqlc`, `pgx`, `goose`, `testify`, etc.) — those are settled. It applies to anything beyond that set, including a mandated library's optional companion packages.
 
 When a new dependency is added (mandated or approved), record in the commit body: what it's for, and why the stdlib alternative was rejected (too much code to hand-roll, missing functionality, correctness/security risk in a hand-rolled version, etc.). A build-time-only tool dependency (`go tool`, never linked into the shipped binary) still needs the same approval, but its transitive dependency count is not by itself a reason to reject it — call that out explicitly rather than treating a large `go.sum` diff as disqualifying.
+
+## Go style
+
+Code is written to be read by a human, not just to compile — this outranks any mechanical formatting rule below when the two conflict.
+
+When a function or method's parameters — at a call site or in its declaration — don't fit comfortably on one line (roughly 80+ characters), spread them one per line rather than wrapping mid-line. See `internal/lichess/client.go`'s `c.do(...)` call sites and its `do` method declaration for the pattern. This is about parameter lists specifically: a short one-line functional-option constructor (e.g. `func WithHTTPClient(hc *http.Client) Option { return func(c *Client) { c.httpClient = hc } }`) that runs long because of its inline body, not its parameters, stays on one line — splitting the two short parameters wouldn't shorten anything or help a reader. Likewise, a chained call or boolean expression that runs long isn't "a call with multiple arguments" and shouldn't be force-wrapped into that shape; restructure it on its own terms if it's genuinely hard to read, don't just apply the one-argument-per-line pattern where it doesn't fit.
