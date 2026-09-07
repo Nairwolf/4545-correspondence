@@ -1,0 +1,27 @@
+{
+  "id": "abcd1234",
+  "rated": true,
+  "variant": "standard",
+  "speed": "correspondence",
+  "perf": "correspondence",
+  "createdAt": 1757203200000,
+  "lastMoveAt": 1757289600000,
+  "status": "started",
+  "daysPerTurn": 2,
+  "opening": {
+    "eco": "C50",
+    "name": "Italian Game",
+    "ply": 4
+  },
+  "moves": "e4 e5 Nf3 Nc6 Bc4",
+  "players": {
+    "white": {
+      "user": { "name": "WhitePlayer", "id": "whiteplayer" },
+      "rating": 1620
+    },
+    "black": {
+      "user": { "name": "BlackPlayer", "id": "blackplayer" },
+      "rating": 1580
+    }
+  }
+}

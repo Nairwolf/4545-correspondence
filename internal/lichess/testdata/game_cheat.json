@@ -1,0 +1,29 @@
+{
+  "id": "cheatg01",
+  "rated": true,
+  "variant": "standard",
+  "speed": "correspondence",
+  "perf": "correspondence",
+  "createdAt": 1757030400000,
+  "lastMoveAt": 1757116800000,
+  "status": "cheat",
+  "winner": "black",
+  "daysPerTurn": 2,
+  "opening": {
+    "eco": "B01",
+    "name": "Scandinavian Defense",
+    "ply": 2
+  },
+  "moves": "e4 d5 exd5 Qxd5",
+  "players": {
+    "white": {
+      "user": { "name": "SuspiciousPlayer", "id": "suspiciousplayer" },
+      "rating": 1700
+    },
+    "black": {
+      "user": { "name": "BlackPlayer", "id": "blackplayer" },
+      "rating": 1580,
+      "ratingDiff": 8
+    }
+  }
+}
