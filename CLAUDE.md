@@ -76,3 +76,13 @@ Unresolved with the maintainers: whether history is imported at all, round numbe
 **Never run `git commit`.** The maintainer commits all work themselves, and commits must carry no `Co-Authored-By` trailer or any other attribution to Claude.
 
 Work in atomic units: keep each change set to one coherent, self-contained piece of work rather than letting unrelated changes pile up in the working tree. When a unit is complete, say so explicitly — "this is a good point to commit" — and summarise what changed. Suggesting a commit message is welcome, but treat it as a starting point: the maintainer writes the final message and will usually rephrase it.
+
+Suggested commit messages must follow [Conventional Commits](https://www.conventionalcommits.org/) — `type(optional scope): summary`, e.g. `feat(scoring): add FIDE performance-rating table` or `docs(spec): correct bulk-pairing endpoint`. Pick `type` from `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `build`, `ci`; add `!` or a `BREAKING CHANGE:` footer only for an actual breaking change.
+
+## Go dependencies
+
+Default to the standard library. Before adding a new Go dependency, ask the maintainer whether it's really necessary and whether the stdlib can do it with a reasonably small amount of code — do not add it preemptively on the assumption it will be wanted. `internal/config` reading `os.LookupEnv` directly instead of a struct-tag env-parsing library is the precedent: three fields didn't justify a dependency.
+
+This does not apply to the libraries the spec itself mandates (§2.1: `chi`, `river`, `sqlc`, `pgx`, `goose`, `testify`, etc.) — those are settled. It applies to anything beyond that set, including a mandated library's optional companion packages.
+
+When a new dependency is added (mandated or approved), record in the commit body: what it's for, and why the stdlib alternative was rejected (too much code to hand-roll, missing functionality, correctness/security risk in a hand-rolled version, etc.). A build-time-only tool dependency (`go tool`, never linked into the shipped binary) still needs the same approval, but its transitive dependency count is not by itself a reason to reject it — call that out explicitly rather than treating a large `go.sum` diff as disqualifying.
