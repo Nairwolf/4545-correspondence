@@ -10,6 +10,7 @@ import (
 
 	"github.com/nairwolf/4545-correspondence/internal/config"
 	"github.com/nairwolf/4545-correspondence/internal/db"
+	"github.com/nairwolf/4545-correspondence/internal/lichess"
 )
 
 func main() {
@@ -21,7 +22,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: ic <serve|migrate> ...")
+		return errors.New("usage: ic <serve|migrate|refresh-ratings> ...")
 	}
 
 	cfg, err := config.Load()
@@ -36,8 +37,15 @@ func run(args []string) error {
 		return runMigrate(ctx, cfg)
 	case "serve":
 		return runServe(ctx, cfg)
+	case "refresh-ratings":
+		pool, err := db.Open(ctx, cfg.DatabaseURL)
+		if err != nil {
+			return err
+		}
+		defer pool.Close()
+		return runRefreshRatings(ctx, pool, lichess.New(cfg.LichessToken))
 	default:
-		return fmt.Errorf("unknown command %q (want: serve, migrate)", args[0])
+		return fmt.Errorf("unknown command %q (want: serve, migrate, refresh-ratings)", args[0])
 	}
 }
 

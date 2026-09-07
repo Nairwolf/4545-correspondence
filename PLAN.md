@@ -97,12 +97,22 @@ internal/db/
   sqlc.yaml
   gen/                          sqlc output (committed)
   db.go                         pgxpool + goose runner + tx helper
-internal/lichess/
-  client.go                     Client interface: UsersByID, UserGames (stream), GamesByID, ExportGame
-  http.go                       real implementation: one-at-a-time semaphore, 429 backoff, timeouts, ndjson decoding
-  types.go                      structs mirroring the verified JSON
-  fake.go                       in-memory fake for tests (serves fixture JSON)
-  testdata/                     recorded real responses (users, a finished game, an ongoing game, a draw, a cheat game)
+internal/lichess/                built step 4; see its testdata/README.md for fixture provenance
+  client.go                     API interface (UsersByID, UserGames, GamesByID, ExportGame) + the real
+                                 Client: mutex-serialized calls, one 429 retry after a 60s wait (both
+                                 injectable for tests), internal batching at Lichess's own 300-id limit
+                                 for both UsersByID and GamesByID (GamesByID chains multiple batches
+                                 behind one GameStream so callers never see the seam) — merged into one
+                                 file rather than split client.go/http.go, small enough not to need it
+  types.go                      structs mirroring the verified JSON (User/Perf, Game/GamePlayer/GameOpening)
+  fake.go                       in-memory API implementation for tests — no httptest.Server needed downstream
+  testdata/                     two REAL captures (GET /api/user/thibault, GET /game/export/q7ZvsdUF) plus
+                                 two hand-built-from-verified-schema fixtures (ongoing correspondence game,
+                                 cheat game) — this session's egress could reach /api/user/{username},
+                                 /api/users and /game/export/{id} but consistently got 404 from
+                                 /api/games/user/{username} despite it being correctly documented and the
+                                 export/_ids endpoint on the same host being reachable enough to trip its
+                                 own rate limiter; treated as a sandbox networking quirk, not a spec error
 internal/scoring/               PURE — no imports beyond stdlib/math. See below.
 internal/ingest/                lichess.Game → games row; termination mapping; upsert; triggers standing recompute
 internal/matching/              spec §7.3: find the Lichess game for a pairing without a game id (exactly-one rule)
@@ -411,7 +421,7 @@ Each step is a self-contained commit point (the maintainer commits; see `CLAUDE.
 1. **Scaffold**: `go.mod`, `cmd/ic` with `serve`/`migrate`, config, Makefile, docker-compose, `.gitignore`, README stub. `make db-up && make migrate` runs migrations 0001–0009 on an empty DB.
 2. **Scoring package** with full table-driven tests (no DB needed). Done before anything reads it.
 3. **sqlc queries + generated code** for players, games upsert, standings aggregates, settings, job_runs.
-4. **Lichess client** + fixtures + fake; `ic refresh-ratings` end to end against the real API with the seeded roster (read-only calls).
+4. **Done.** Lichess client + fixtures + fake; `ic refresh-ratings` wired and run end to end against the live API — verified with one real account (thibault) manually inserted via SQL, since `seed-players` doesn't exist until step 5; confirmed the inserted `rating_snapshots` row matched the live API response exactly, then the test row was deleted.
 5. **`seed-players` and `import-pairings` CLIs** (resolve via `POST /api/users`; create approved users + profiles + first snapshot; create the round + pairings; audit-log everything).
 6. **Matching + ingest + standings recompute**; `ic sync-games` once against the imported pairings; verify `games`, `pairings.status` and `job_runs`.
 7. **River wiring** (`serve` starts HTTP + river; periodic jobs registered).
