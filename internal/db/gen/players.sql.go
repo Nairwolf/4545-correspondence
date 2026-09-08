@@ -110,6 +110,27 @@ func (q *Queries) GetPlayerProfile(ctx context.Context, userID pgtype.UUID) (Pla
 	return i, err
 }
 
+const getUserByID = `-- name: GetUserByID :one
+SELECT id, lichess_username, lichess_user_id, role, status, created_at, approved_at, approved_by, rejection_reason FROM users WHERE id = $1
+`
+
+func (q *Queries) GetUserByID(ctx context.Context, id pgtype.UUID) (User, error) {
+	row := q.db.QueryRow(ctx, getUserByID, id)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.LichessUsername,
+		&i.LichessUserID,
+		&i.Role,
+		&i.Status,
+		&i.CreatedAt,
+		&i.ApprovedAt,
+		&i.ApprovedBy,
+		&i.RejectionReason,
+	)
+	return i, err
+}
+
 const getUserByLichessUserID = `-- name: GetUserByLichessUserID :one
 SELECT id, lichess_username, lichess_user_id, role, status, created_at, approved_at, approved_by, rejection_reason FROM users WHERE lichess_user_id = $1
 `

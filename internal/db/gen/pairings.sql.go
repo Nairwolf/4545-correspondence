@@ -11,6 +11,21 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const attachGameToPairing = `-- name: AttachGameToPairing :exec
+UPDATE pairings SET lichess_game_id = $2, status = $3 WHERE id = $1
+`
+
+type AttachGameToPairingParams struct {
+	ID            pgtype.UUID   `json:"id"`
+	LichessGameID *string       `json:"lichess_game_id"`
+	Status        PairingStatus `json:"status"`
+}
+
+func (q *Queries) AttachGameToPairing(ctx context.Context, arg AttachGameToPairingParams) error {
+	_, err := q.db.Exec(ctx, attachGameToPairing, arg.ID, arg.LichessGameID, arg.Status)
+	return err
+}
+
 const createRound = `-- name: CreateRound :one
 INSERT INTO rounds (number, state, publish_at, published_at, pair_at, generated_by)
 VALUES ($1, $2, $3, $4, $5, $6)
@@ -75,6 +90,171 @@ func (q *Queries) GetRoundByNumber(ctx context.Context, number int32) (Round, er
 		&i.Notes,
 	)
 	return i, err
+}
+
+const listAttachedGameIDs = `-- name: ListAttachedGameIDs :many
+SELECT lichess_game_id FROM pairings WHERE lichess_game_id IS NOT NULL
+`
+
+// Every game id already claimed by some pairing — matching.Match's
+// takenGameIDs, so a game already ingested for one pairing is never
+// also matched to a different one.
+func (q *Queries) ListAttachedGameIDs(ctx context.Context) ([]*string, error) {
+	rows, err := q.db.Query(ctx, listAttachedGameIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []*string
+	for rows.Next() {
+		var lichess_game_id *string
+		if err := rows.Scan(&lichess_game_id); err != nil {
+			return nil, err
+		}
+		items = append(items, lichess_game_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPairingsToRecheck = `-- name: ListPairingsToRecheck :many
+SELECT
+  p.id AS pairing_id,
+  p.lichess_game_id,
+  r.number AS round_number,
+  p.white_user_id,
+  p.black_user_id
+FROM pairings p
+JOIN rounds r ON r.id = p.round_id
+WHERE p.lichess_game_id IS NOT NULL
+  AND p.status NOT IN ('completed', 'failed', 'cancelled')
+`
+
+type ListPairingsToRecheckRow struct {
+	PairingID     pgtype.UUID `json:"pairing_id"`
+	LichessGameID *string     `json:"lichess_game_id"`
+	RoundNumber   int32       `json:"round_number"`
+	WhiteUserID   pgtype.UUID `json:"white_user_id"`
+	BlackUserID   pgtype.UUID `json:"black_user_id"`
+}
+
+// Every pairing whose Lichess game is worth re-fetching (spec §7.3 step
+// 1): it already has a game id and hasn't reached a terminal pairing
+// status. This deliberately covers two cases with one query: a pairing
+// already ingested as in_progress (its games row exists, we want the
+// latest state), AND a pairing whose game id was already known at
+// import time — e.g. from the CSV's optional game_id column — but has
+// never been fetched at all yet, so no games row exists for it.
+// Matching (ListUnmatchedPairings) only ever handles the OTHER case:
+// no game id known yet.
+func (q *Queries) ListPairingsToRecheck(ctx context.Context) ([]ListPairingsToRecheckRow, error) {
+	rows, err := q.db.Query(ctx, listPairingsToRecheck)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPairingsToRecheckRow
+	for rows.Next() {
+		var i ListPairingsToRecheckRow
+		if err := rows.Scan(
+			&i.PairingID,
+			&i.LichessGameID,
+			&i.RoundNumber,
+			&i.WhiteUserID,
+			&i.BlackUserID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUnmatchedPairings = `-- name: ListUnmatchedPairings :many
+SELECT
+  p.id AS pairing_id,
+  p.round_id,
+  r.number AS round_number,
+  r.pair_at,
+  p.white_user_id,
+  p.black_user_id,
+  wu.lichess_user_id AS white_lichess_id,
+  bu.lichess_user_id AS black_lichess_id
+FROM pairings p
+JOIN rounds r ON r.id = p.round_id
+JOIN users wu ON wu.id = p.white_user_id
+JOIN users bu ON bu.id = p.black_user_id
+WHERE p.lichess_game_id IS NULL
+  AND p.status = 'pending'
+  AND NOT p.match_ambiguous
+`
+
+type ListUnmatchedPairingsRow struct {
+	PairingID      pgtype.UUID        `json:"pairing_id"`
+	RoundID        int32              `json:"round_id"`
+	RoundNumber    int32              `json:"round_number"`
+	PairAt         pgtype.Timestamptz `json:"pair_at"`
+	WhiteUserID    pgtype.UUID        `json:"white_user_id"`
+	BlackUserID    pgtype.UUID        `json:"black_user_id"`
+	WhiteLichessID string             `json:"white_lichess_id"`
+	BlackLichessID string             `json:"black_lichess_id"`
+}
+
+// Pairings sync-games must try to match against a Lichess game (spec
+// §7.3 step 2): no game id yet, still pending, and not already flagged
+// for an admin to resolve. Joins in exactly what matching.Match needs
+// (the round's pair_at, and both players' Lichess ids) so the caller
+// makes no further per-pairing queries.
+func (q *Queries) ListUnmatchedPairings(ctx context.Context) ([]ListUnmatchedPairingsRow, error) {
+	rows, err := q.db.Query(ctx, listUnmatchedPairings)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUnmatchedPairingsRow
+	for rows.Next() {
+		var i ListUnmatchedPairingsRow
+		if err := rows.Scan(
+			&i.PairingID,
+			&i.RoundID,
+			&i.RoundNumber,
+			&i.PairAt,
+			&i.WhiteUserID,
+			&i.BlackUserID,
+			&i.WhiteLichessID,
+			&i.BlackLichessID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const markPairingAmbiguous = `-- name: MarkPairingAmbiguous :exec
+UPDATE pairings SET match_ambiguous = true WHERE id = $1
+`
+
+func (q *Queries) MarkPairingAmbiguous(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, markPairingAmbiguous, id)
+	return err
+}
+
+const markPairingFailed = `-- name: MarkPairingFailed :exec
+UPDATE pairings SET status = 'failed' WHERE id = $1
+`
+
+func (q *Queries) MarkPairingFailed(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, markPairingFailed, id)
+	return err
 }
 
 const upsertManualPairing = `-- name: UpsertManualPairing :one

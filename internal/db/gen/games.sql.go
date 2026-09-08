@@ -24,6 +24,19 @@ func (q *Queries) CountOngoingGamesForUser(ctx context.Context, whiteUserID pgty
 	return count, err
 }
 
+const deleteGame = `-- name: DeleteGame :exec
+DELETE FROM games WHERE lichess_game_id = $1
+`
+
+// Only for the rare case a previously in_progress game later turns out
+// to be aborted/noStart on re-check — those are never stored (spec
+// §4.1), so any row that was written before that was known removes
+// itself here rather than lingering.
+func (q *Queries) DeleteGame(ctx context.Context, lichessGameID string) error {
+	_, err := q.db.Exec(ctx, deleteGame, lichessGameID)
+	return err
+}
+
 const listFinishedGamesForUser = `-- name: ListFinishedGamesForUser :many
 SELECT lichess_game_id, pairing_id, round_number, white_user_id, black_user_id, status, result, termination, lichess_status, days_per_turn, eco, opening_name, opening_ply, white_first_move, black_first_move, white_rating_at_game, black_rating_at_game, white_accuracy, black_accuracy, white_acpl, black_acpl, white_moves, black_moves, started_at, last_move_at, finished_at, duration_seconds, raw_payload, ingested_at, updated_at FROM games
 WHERE status = 'finished' AND (white_user_id = $1 OR black_user_id = $1)
@@ -77,32 +90,6 @@ func (q *Queries) ListFinishedGamesForUser(ctx context.Context, whiteUserID pgty
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listInProgressGameIDs = `-- name: ListInProgressGameIDs :many
-SELECT lichess_game_id FROM games WHERE status = 'in_progress'
-`
-
-// Fed to the Lichess /api/games/export/_ids re-check in sync-games
-// (spec §7.3 step 1), batched 300 at a time by the caller.
-func (q *Queries) ListInProgressGameIDs(ctx context.Context) ([]string, error) {
-	rows, err := q.db.Query(ctx, listInProgressGameIDs)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []string
-	for rows.Next() {
-		var lichess_game_id string
-		if err := rows.Scan(&lichess_game_id); err != nil {
-			return nil, err
-		}
-		items = append(items, lichess_game_id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

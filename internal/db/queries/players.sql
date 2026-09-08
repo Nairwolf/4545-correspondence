@@ -1,3 +1,6 @@
+-- name: GetUserByID :one
+SELECT * FROM users WHERE id = $1;
+
 -- name: GetUserByLichessUserID :one
 SELECT * FROM users WHERE lichess_user_id = $1;
 

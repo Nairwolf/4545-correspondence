@@ -42,10 +42,12 @@ ON CONFLICT (lichess_game_id) DO UPDATE SET
   updated_at           = now()
 RETURNING *;
 
--- name: ListInProgressGameIDs :many
--- Fed to the Lichess /api/games/export/_ids re-check in sync-games
--- (spec §7.3 step 1), batched 300 at a time by the caller.
-SELECT lichess_game_id FROM games WHERE status = 'in_progress';
+-- name: DeleteGame :exec
+-- Only for the rare case a previously in_progress game later turns out
+-- to be aborted/noStart on re-check — those are never stored (spec
+-- §4.1), so any row that was written before that was known removes
+-- itself here rather than lingering.
+DELETE FROM games WHERE lichess_game_id = $1;
 
 -- name: ListFinishedGamesForUser :many
 -- All finished games for one player, most recent first — the raw
