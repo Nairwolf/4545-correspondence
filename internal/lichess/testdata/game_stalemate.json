@@ -1,0 +1,27 @@
+{
+  "id": "stale0001",
+  "rated": true,
+  "variant": "standard",
+  "speed": "correspondence",
+  "perf": "correspondence",
+  "createdAt": 1755993600000,
+  "lastMoveAt": 1756857600000,
+  "status": "stalemate",
+  "daysPerTurn": 2,
+  "opening": {
+    "eco": "A00",
+    "name": "Irregular Opening",
+    "ply": 1
+  },
+  "moves": "a4",
+  "players": {
+    "white": {
+      "user": { "name": "WhitePlayer", "id": "whiteplayer" },
+      "rating": 1500
+    },
+    "black": {
+      "user": { "name": "BlackPlayer", "id": "blackplayer" },
+      "rating": 1510
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "id": "abort0001",
+  "rated": true,
+  "variant": "standard",
+  "speed": "correspondence",
+  "perf": "correspondence",
+  "createdAt": 1757289600000,
+  "lastMoveAt": 1757289600000,
+  "status": "aborted",
+  "daysPerTurn": 2,
+  "moves": "",
+  "players": {
+    "white": {
+      "user": { "name": "WhitePlayer", "id": "whiteplayer" },
+      "rating": 1600
+    },
+    "black": {
+      "user": { "name": "NoShowPlayer", "id": "noshowplayer" },
+      "rating": 1550
+    }
+  }
+}

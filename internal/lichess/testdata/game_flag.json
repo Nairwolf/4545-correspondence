@@ -1,0 +1,29 @@
+{
+  "id": "flagg001",
+  "rated": true,
+  "variant": "standard",
+  "speed": "correspondence",
+  "perf": "correspondence",
+  "createdAt": 1756512000000,
+  "lastMoveAt": 1757116800000,
+  "status": "outoftime",
+  "winner": "white",
+  "daysPerTurn": 2,
+  "opening": {
+    "eco": "D02",
+    "name": "Queen's Pawn Game",
+    "ply": 2
+  },
+  "moves": "d4 d5 Nf3 Nf6",
+  "players": {
+    "white": {
+      "user": { "name": "WhitePlayer", "id": "whiteplayer" },
+      "rating": 1580,
+      "ratingDiff": 6
+    },
+    "black": {
+      "user": { "name": "SlowPlayer", "id": "slowplayer" },
+      "rating": 1520
+    }
+  }
+}

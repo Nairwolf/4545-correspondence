@@ -1,0 +1,29 @@
+{
+  "id": "resign001",
+  "rated": true,
+  "variant": "standard",
+  "speed": "correspondence",
+  "perf": "correspondence",
+  "createdAt": 1756944000000,
+  "lastMoveAt": 1757030400000,
+  "status": "resign",
+  "winner": "black",
+  "daysPerTurn": 2,
+  "opening": {
+    "eco": "B10",
+    "name": "Caro-Kann Defense",
+    "ply": 2
+  },
+  "moves": "e4 c6 d4 d5 Nc3 dxe4 Nxe4 Bf5",
+  "players": {
+    "white": {
+      "user": { "name": "WhitePlayer", "id": "whiteplayer" },
+      "rating": 1650
+    },
+    "black": {
+      "user": { "name": "BlackPlayer", "id": "blackplayer" },
+      "rating": 1700,
+      "ratingDiff": 8
+    }
+  }
+}

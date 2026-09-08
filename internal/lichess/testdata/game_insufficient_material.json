@@ -1,0 +1,22 @@
+{
+  "id": "insuf0001",
+  "rated": true,
+  "variant": "standard",
+  "speed": "correspondence",
+  "perf": "correspondence",
+  "createdAt": 1755388800000,
+  "lastMoveAt": 1756252800000,
+  "status": "insufficientMaterialClaim",
+  "daysPerTurn": 2,
+  "moves": "e4 e5 Nf3 Nc6 Bb5 a6 Bxc6 dxc6",
+  "players": {
+    "white": {
+      "user": { "name": "WhitePlayer", "id": "whiteplayer" },
+      "rating": 1490
+    },
+    "black": {
+      "user": { "name": "BlackPlayer", "id": "blackplayer" },
+      "rating": 1495
+    }
+  }
+}
