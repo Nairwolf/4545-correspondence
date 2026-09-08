@@ -1,4 +1,5 @@
 DATABASE_URL ?= postgres://ic:ic@localhost:55432/ic?sslmode=disable
+TEST_DATABASE_URL ?= $(DATABASE_URL)
 
 .PHONY: db-up db-down migrate migrate-down sqlc css test test-integration run build
 
@@ -24,7 +25,7 @@ test:
 	go test ./...
 
 test-integration:
-	go test -tags integration ./...
+	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -tags integration ./...
 
 run:
 	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/ic serve

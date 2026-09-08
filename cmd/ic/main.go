@@ -23,7 +23,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: ic <serve|migrate|refresh-ratings|seed-players|import-pairings> ...")
+		return errors.New("usage: ic <serve|migrate|refresh-ratings|seed-players|import-pairings|sync-games> ...")
 	}
 
 	cfg, err := config.Load()
@@ -70,9 +70,16 @@ func run(args []string) error {
 		}
 		defer pool.Close()
 		return runImportPairings(ctx, pool, fs.Arg(0), *pairAt)
+	case "sync-games":
+		pool, err := db.Open(ctx, cfg.DatabaseURL)
+		if err != nil {
+			return err
+		}
+		defer pool.Close()
+		return runSyncGames(ctx, pool, lichess.New(cfg.LichessToken))
 	default:
 		return fmt.Errorf(
-			"unknown command %q (want: serve, migrate, refresh-ratings, seed-players, import-pairings)",
+			"unknown command %q (want: serve, migrate, refresh-ratings, seed-players, import-pairings, sync-games)",
 			args[0],
 		)
 	}
