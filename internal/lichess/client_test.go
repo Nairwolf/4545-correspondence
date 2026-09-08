@@ -106,6 +106,15 @@ func TestUserGames_StreamsNDJSON(t *testing.T) {
 func TestGamesByID_ChainsAcrossBatches(t *testing.T) {
 	var requestSizes []int
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		// Regression test: an earlier version of GamesByID sent no query
+		// params at all, silently falling back to Lichess's defaults
+		// (accuracy/opening off) and losing exactly the data spec §7.1
+		// needs — caught by live verification, not by a unit test, which
+		// is why this assertion now exists.
+		assert.Equal(t, "true", r.URL.Query().Get("opening"))
+		assert.Equal(t, "true", r.URL.Query().Get("accuracy"))
+		assert.Equal(t, "true", r.URL.Query().Get("clocks"))
+
 		body, _ := io.ReadAll(r.Body)
 		ids := strings.Split(string(body), ",")
 		requestSizes = append(requestSizes, len(ids))

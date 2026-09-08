@@ -310,6 +310,8 @@ func (c *Client) GamesByID(
 		ids = ids[n:]
 	}
 
+	q := url.Values{"opening": {"true"}, "accuracy": {"true"}, "clocks": {"true"}}
+
 	idx := 0
 	fetch := func() (io.ReadCloser, error) {
 		if idx >= len(batches) {
@@ -321,7 +323,7 @@ func (c *Client) GamesByID(
 			ctx,
 			http.MethodPost,
 			"/api/games/export/_ids",
-			nil,
+			q,
 			[]byte(strings.Join(batch, ",")),
 			"text/plain",
 			"application/x-ndjson",
