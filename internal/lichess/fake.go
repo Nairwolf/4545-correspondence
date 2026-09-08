@@ -24,6 +24,12 @@ type Fake struct {
 	// Set it when a test needs UserGames to filter or order differently
 	// than that default.
 	UserGamesFn func(username string, opts UserGamesOptions) []Game
+
+	// UserGamesErrFor, keyed by username, makes UserGames return that
+	// error instead of a stream — the one knob this fake needs to test
+	// a caller's graceful-degradation path (spec §7.2/§11: a Lichess
+	// failure must not be fatal) without touching the live API.
+	UserGamesErrFor map[string]error
 }
 
 // NewFake returns an empty Fake ready for a test to populate.
@@ -48,6 +54,9 @@ func (f *Fake) UserGames(
 	username string,
 	opts UserGamesOptions,
 ) (*GameStream, error) {
+	if err := f.UserGamesErrFor[username]; err != nil {
+		return nil, err
+	}
 	var games []Game
 	if f.UserGamesFn != nil {
 		games = f.UserGamesFn(username, opts)
