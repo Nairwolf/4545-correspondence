@@ -8,7 +8,8 @@ CREATE TABLE player_standings (
   draws                 int NOT NULL,
   losses                int NOT NULL,
   ongoing               int NOT NULL,
-  last_k_score          numeric(4,1),     -- NULL until >= min_games_for_perf
+  last_k_score          numeric(4,1),     -- NULL only until the player's first finished game;
+                                          -- min_games_for_perf gates power_rating (§5.4), not this
   last_k_perf_rating    int,
   power_rating          int NOT NULL,
   color_score           int NOT NULL,
