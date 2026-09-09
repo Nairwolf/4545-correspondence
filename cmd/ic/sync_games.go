@@ -38,10 +38,10 @@ type syncGamesStats struct {
 // already known to belong to a pairing — that's the whole point of
 // matching being pairing-anchored (spec §7.3): a member's other
 // correspondence games are never looked at.
-func runSyncGames(ctx context.Context, pool *pgxpool.Pool, client lichess.API) error {
+func runSyncGames(ctx context.Context, pool *pgxpool.Pool, client lichess.API, riverJobID *int64) error {
 	q := gen.New(pool)
 
-	jobRun, err := q.CreateJobRun(ctx, gen.CreateJobRunParams{JobName: "sync-games"})
+	jobRun, err := q.CreateJobRun(ctx, gen.CreateJobRunParams{JobName: "sync-games", RiverJobID: riverJobID})
 	if err != nil {
 		return fmt.Errorf("sync-games: create job run: %w", err)
 	}

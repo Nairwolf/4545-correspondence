@@ -19,10 +19,10 @@ import (
 // whatever these snapshots say (spec §5.1's rule needs a Games count as
 // well as a Rating, so both are stored verbatim rather than interpreted
 // here).
-func runRefreshRatings(ctx context.Context, pool *pgxpool.Pool, client lichess.API) error {
+func runRefreshRatings(ctx context.Context, pool *pgxpool.Pool, client lichess.API, riverJobID *int64) error {
 	q := gen.New(pool)
 
-	jobRun, err := q.CreateJobRun(ctx, gen.CreateJobRunParams{JobName: "refresh-ratings"})
+	jobRun, err := q.CreateJobRun(ctx, gen.CreateJobRunParams{JobName: "refresh-ratings", RiverJobID: riverJobID})
 	if err != nil {
 		return fmt.Errorf("refresh-ratings: create job run: %w", err)
 	}

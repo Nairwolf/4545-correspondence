@@ -417,6 +417,54 @@ The "match pending pairings" path (`GET /api/games/user/{username}`) could not b
 
 ---
 
+## Step 7 — built: `internal/jobs`, `ic serve`, `ic recompute`
+
+`serve` now starts the two long-running concerns and blocks until a
+signal: the river job runner and an HTTP server. `signal.NotifyContext`
+(SIGINT/SIGTERM) cancels the root context; shutdown then drains the HTTP
+server and stops river under a fresh 30s-bounded context so a running
+job gets to finish. Verified locally end to end: `ic serve` against the
+dev Postgres logs `River client started` and `http listening`, `GET
+/healthz` returns 200 (`pool.Ping`) / 404 for anything else, and a
+SIGTERM produces a clean `River client stopped` with exit 0.
+
+**`internal/jobs`** owns only river scheduling and dispatch, nothing
+domain-specific: a `Handlers` struct of `func(ctx, riverJobID int64)
+error` supplied by the caller, three zero-field job-arg types
+(`sync-games`, `refresh-ratings`, `recompute-aggregates`), and
+`NewClient` returning a `*river.Client[pgx.Tx]` with one `default` queue
+at `MaxWorkers: 1` (Lichess wants one request at a time — spec §3.4),
+`MaxAttempts: 3`, and three `PeriodicInterval` jobs (1h / 24h / 24h,
+`RunOnStart: false`). Fixed intervals from process start are deliberate
+for Phase 1: the spec §4.2 cron settings and wall-clock alignment belong
+to the Phase 4 pairing scheduler, not these sync workers.
+
+**Job bodies stayed in `cmd/ic`.** `runSyncGames` / `runRefreshRatings`
+already do the full `job_runs` bookkeeping and are verified; they gained
+a trailing `riverJobID *int64` (nil from the one-shot CLI subcommand,
+`&job.ID` from the periodic worker) so `job_runs.river_job_id` — dead
+until now — is populated when the job ran under `serve`. `serve` passes
+each as a `jobs.Handler` closure over the shared pool + `LichessClient`.
+
+**New `runRecompute` + `ic recompute` subcommand.** The nightly
+`recompute-aggregates` job (`standings.RecomputeAll`, no Lichess I/O)
+existed in the package but was never wired to anything; it now has the
+same `job_runs` wrapper as the other two and both a periodic
+registration and a manual subcommand.
+
+**HTTP is a placeholder.** `serveMux` answers only `GET /healthz`
+(`pool.Ping`). The chi router, the public pages and the real `/health` /
+`/jobs` endpoints (spec §8.1) are step 8 — `serve` needs *an* HTTP
+server now so a deployment has something to health-check and so step 8
+is purely additive.
+
+**Dependencies:** `go mod tidy` pulled in `tidwall/{gjson,match,pretty,
+sjson}` and `robfig/cron/v3` as new `// indirect` entries — all
+transitive deps of `river` that the migrate-only usage hadn't reached.
+No new direct dependency; nothing outside the mandated set.
+
+---
+
 ## Web (public pages, no auth)
 
 chi router; `html/template` with a `layout.html` + one file per page; htmx only for sort/filter on standings (falls back to plain query-string links, so the pages work without JS). Dark-by-default, Lichess-like: near-black background, muted borders, dense tables — Tailwind utility classes only, no component library.
@@ -444,7 +492,7 @@ Each step is a self-contained commit point (the maintainer commits; see `CLAUDE.
 4. **Done.** Lichess client + fixtures + fake; `ic refresh-ratings` wired and run end to end against the live API — verified with one real account (thibault) manually inserted via SQL, since `seed-players` doesn't exist until step 5; confirmed the inserted `rating_snapshots` row matched the live API response exactly, then the test row was deleted.
 5. **Done.** `seed-players` and `import-pairings` CLIs — see their own section above for what was built and verified.
 6. **Done.** Matching + ingest + standings recompute; `ic sync-games` wired and run live. See the dedicated section above for what was built, the two real bugs live verification caught, and the deterministic integration test suite that now covers the orchestration (including the error path live testing couldn't reliably reach).
-7. **River wiring** (`serve` starts HTTP + river; periodic jobs registered).
+7. **Done.** River wiring — `serve` starts HTTP + river, periodic jobs registered; `internal/jobs` + `ic recompute`. See the dedicated section above.
 8. **Web pages** in the order standings → levels → player → home → health/jobs; Tailwind build.
 9. **README** with the commands, and update `CLAUDE.md`'s "Repository state" section to point at them.
 

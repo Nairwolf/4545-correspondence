@@ -23,7 +23,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: ic <serve|migrate|refresh-ratings|seed-players|import-pairings|sync-games> ...")
+		return errors.New("usage: ic <serve|migrate|refresh-ratings|seed-players|import-pairings|sync-games|recompute> ...")
 	}
 
 	cfg, err := config.Load()
@@ -44,7 +44,7 @@ func run(args []string) error {
 			return err
 		}
 		defer pool.Close()
-		return runRefreshRatings(ctx, pool, lichess.New(cfg.LichessToken))
+		return runRefreshRatings(ctx, pool, lichess.New(cfg.LichessToken), nil)
 	case "seed-players":
 		if len(args) < 2 {
 			return errors.New("usage: ic seed-players <usernames-file>")
@@ -76,10 +76,17 @@ func run(args []string) error {
 			return err
 		}
 		defer pool.Close()
-		return runSyncGames(ctx, pool, lichess.New(cfg.LichessToken))
+		return runSyncGames(ctx, pool, lichess.New(cfg.LichessToken), nil)
+	case "recompute":
+		pool, err := db.Open(ctx, cfg.DatabaseURL)
+		if err != nil {
+			return err
+		}
+		defer pool.Close()
+		return runRecompute(ctx, pool, nil)
 	default:
 		return fmt.Errorf(
-			"unknown command %q (want: serve, migrate, refresh-ratings, seed-players, import-pairings, sync-games)",
+			"unknown command %q (want: serve, migrate, refresh-ratings, seed-players, import-pairings, sync-games, recompute)",
 			args[0],
 		)
 	}
@@ -97,17 +104,4 @@ func runMigrate(ctx context.Context, cfg config.Config) error {
 	}
 	slog.Info("migrations applied")
 	return nil
-}
-
-func runServe(ctx context.Context, cfg config.Config) error {
-	pool, err := db.Open(ctx, cfg.DatabaseURL)
-	if err != nil {
-		return err
-	}
-	defer pool.Close()
-
-	// The web server, job runner and remaining subcommands (seed-players,
-	// import-pairings, sync-games, refresh-ratings, recompute,
-	// refetch-game) are added in later build-order steps; see PLAN.md.
-	return fmt.Errorf("serve: not implemented yet")
 }
