@@ -4,9 +4,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-This repo currently contains **no code and no commits** — only `docs/infinite-correspondence-spec.md`, a complete technical specification for a Go web application that replaces the "Lichess4545 — Infinite Correspondence" Google Sheets system. That spec is the source of truth; read it before implementing anything, and update it when a decision changes rather than letting code and spec diverge.
+Phase 1 (spec §12: read-only parity) is implemented — schema/migrations,
+the Lichess client, `sync-games`/`refresh-ratings`/`recompute` as both
+river-scheduled jobs and one-shot `ic` subcommands, the pure scoring
+module, and the public web pages (`/`, `/standings`, `/levels`,
+`/players/{name}`, `/health`, `/jobs`). `docs/infinite-correspondence-spec.md`
+is still the source of truth for behaviour; read it before changing
+anything under `internal/`, and update it when a decision changes rather
+than letting code and spec diverge. `PLAN.md` records what was actually
+built at each step, including the live-verification results and the
+handful of deliberate deviations from the spec's original sketch — read
+it alongside the spec, not instead of it.
 
-There is therefore no build, lint, or test command yet. When scaffolding the project, use the stack fixed in spec §2.1 (below) and add the commands here.
+Build/test commands:
+
+```
+make db-up             # start Postgres
+make migrate           # apply schema migrations
+make test               # unit tests (no DB)
+make test-integration   # integration tests (needs TEST_DATABASE_URL)
+make run                # run the server (HTTP site + background jobs)
+make psql               # psql shell on the dev database
+```
+
+See `README.md` for the full command list (including `make tailwind` /
+`make css` and the one-shot `ic` admin subcommands) and `PLAN.md`'s build
+order for what's done and what's next (pairing engine onward — Phase 4+
+in spec §12 — is not built yet).
 
 ## What the system does
 

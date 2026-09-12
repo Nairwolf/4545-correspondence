@@ -562,7 +562,7 @@ Each step is a self-contained commit point (the maintainer commits; see `CLAUDE.
 6. **Done.** Matching + ingest + standings recompute; `ic sync-games` wired and run live. See the dedicated section above for what was built, the two real bugs live verification caught, and the deterministic integration test suite that now covers the orchestration (including the error path live testing couldn't reliably reach).
 7. **Done.** River wiring — `serve` starts HTTP + river, periodic jobs registered; `internal/jobs` + `ic recompute`. See the dedicated section above.
 8. **Done.** Web pages (`internal/web`, all six routes) + Tailwind build. See the dedicated section above.
-9. **README** with the commands, and update `CLAUDE.md`'s "Repository state" section to point at them.
+9. **Done.** README documents both the `make` targets and the one-shot `ic` admin subcommands; `CLAUDE.md`'s "Repository state" section now reflects Phase 1 being built rather than the empty-repo bootstrap text, and points at README/PLAN for the rest. This closes out Phase 1's build order (spec §12) — Phase 2 onward (identity, self-service, pairing, automation, polish, optional history migration) is not started.
 
 ---
 

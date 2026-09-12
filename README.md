@@ -30,4 +30,22 @@ generated file is committed, so a plain `go build` needs no CSS step.
 
 Override the database connection with `DATABASE_URL=... make <target>`.
 
+### `ic` subcommands
+
+`make run` / `make build` wrap the `ic` binary (`go run ./cmd/ic <cmd>` /
+`bin/ic <cmd>`), which also has one-shot admin commands beyond `serve`
+and `migrate`:
+
+```
+ic seed-players <usernames.txt>              # approve players from a username list, one per line
+ic import-pairings [--pair-at RFC3339] <round.csv>  # create a round + pairings from a CSV export of the sheet
+ic sync-games                                 # run the hourly Lichess sync job once
+ic refresh-ratings                            # run the daily rating-snapshot job once
+ic recompute                                  # rebuild every player_standings row from scratch
+```
+
+`serve` runs `sync-games`, `refresh-ratings` and `recompute` on their own
+schedule automatically (spec §7) — the subcommands above are for a manual
+run or a first-time data load, not something normal operation needs.
+
 See `CLAUDE.md` for architecture notes and working conventions in this repo.
