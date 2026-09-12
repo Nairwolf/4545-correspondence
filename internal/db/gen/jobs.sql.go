@@ -91,6 +91,32 @@ func (q *Queries) GetLatestJobRunByName(ctx context.Context, jobName string) (Jo
 	return i, err
 }
 
+const getLatestSuccessfulJobRunByName = `-- name: GetLatestSuccessfulJobRunByName :one
+SELECT id, job_name, river_job_id, started_at, finished_at, status, items_processed, error, detail FROM job_runs
+WHERE job_name = $1 AND status = 'succeeded'
+ORDER BY started_at DESC
+LIMIT 1
+`
+
+// Backs /health's "last_success" field: the newest run of a named job
+// that actually succeeded, independent of what the most recent run did.
+func (q *Queries) GetLatestSuccessfulJobRunByName(ctx context.Context, jobName string) (JobRun, error) {
+	row := q.db.QueryRow(ctx, getLatestSuccessfulJobRunByName, jobName)
+	var i JobRun
+	err := row.Scan(
+		&i.ID,
+		&i.JobName,
+		&i.RiverJobID,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.Status,
+		&i.ItemsProcessed,
+		&i.Error,
+		&i.Detail,
+	)
+	return i, err
+}
+
 const listRecentJobRuns = `-- name: ListRecentJobRuns :many
 SELECT id, job_name, river_job_id, started_at, finished_at, status, items_processed, error, detail FROM job_runs ORDER BY started_at DESC LIMIT $1
 `

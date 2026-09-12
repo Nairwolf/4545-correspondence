@@ -465,6 +465,74 @@ No new direct dependency; nothing outside the mandated set.
 
 ---
 
+## Step 8 — built: `internal/web` (public pages), Tailwind build
+
+`serve` now serves the public site (spec §8.1) instead of the step-7
+liveness stub. `internal/web` is a self-contained SSR package:
+`html/template` (embedded), a chi router with the standard middleware
+(request id, real ip, recover, logger, 15s timeout), and embedded static
+assets. Dependency direction holds: `web → db/gen, settings, scoring`.
+
+**Routes**
+
+| Route | What it renders |
+|---|---|
+| `/` | Overview: ongoing games (idle days), recent results feed (20), top 5 by power rating, active-player count, static Rules/FAQ |
+| `/standings` | every approved player; `?sort=&dir=&active=&q=` handled in Go; unrated shown as "—" + badge |
+| `/levels` | same feed ranked by XP; XP rules stated inline from `settings.XPWeights` |
+| `/players/{username}` | header (rating, level+progress bar, W/D/L, member since), full game history, inline-SVG rating and XP sparklines |
+| `/health` | JSON `{db, jobs:{<name>:{last_status,last_error,last_run_at,last_success}}}`; 503 if the DB is unreachable or any job's most recent run failed |
+| `/jobs` | last 50 `job_runs` + the `match_ambiguous` pairings — the read-only stand-in for the Phase 6 admin health page |
+
+**Design decisions**
+
+- **Sort/filter/search is done in Go**, not SQL. `GetStandings` stays one
+  readable statement; `arrangeStandings` is a pure function with a
+  table-driven unit test (no DB). The league is small enough that
+  fetching every row per request is a non-issue, and it keeps the "reads
+  like the sheet" property the spec asks for.
+- **`GetStandings` extended** to also carry the level columns so one
+  query feeds both `/standings` and `/levels`.
+- **New read-only queries** live in `internal/db/queries/web.sql`
+  (`ListOngoingGames`, `ListRecentFinishedGames`, `CountActivePlayers`,
+  `GetPlayerHeader`, `ListGamesForUser`, `ListRatingSnapshotsForUser`,
+  `ListFinishedGamesForUserAsc`, `ListAmbiguousPairings`) plus
+  `GetLatestSuccessfulJobRunByName` in `jobs.sql`.
+- **htmx** is vendored (`static/htmx.min.js`) and used only as
+  progressive enhancement (`hx-boost` on `<body>`, a tiny `app.js` that
+  auto-submits the standings filter). Every page works with JS disabled —
+  the filter form and column-sort links are plain `GET`s.
+- **Charts** are inline SVG `<polyline>`s built by a pure `lineChart`
+  helper (600×160 viewBox, y inverted, empty on <2 points); no chart
+  library.
+- **Settings are read once at startup** (`web.New`), not per request —
+  Phase 1 has no admin UI to change them (spec §4.2 editing is Phase 6).
+- **Test seam:** `newServer(pool, q, cfg)` lets the integration test
+  inject a transaction-scoped `*gen.Queries` (rolled back, nothing
+  committed) while `/health` still pings the real pool.
+
+**Tailwind**
+
+Tailwind v4 **standalone binary** (no Node), fetched by `make tailwind`
+into `.bin/` (git-ignored). `make css` builds `web/input.css` →
+`internal/web/static/app.css`. That generated file is now **committed**
+(removed from `.gitignore`) because `//go:embed static` needs it present
+at build time, so `go build` / `make run` / `make test` never depend on
+the Tailwind step. Utility classes only, dark zinc palette, dense
+tables — no component library.
+
+**Dependency:** `github.com/go-chi/chi/v5 v5.2.3` — mandated by spec
+§2.1 (PLAN's "v5.3" was approximate; v5.2.x is chi v5's current line).
+
+**Verified locally end to end:** seeded the two real players from the
+`q7ZvsdUF` draw, imported round 168, ran `sync-games` + `recompute`,
+then hit every route — standings ordered by power rating, `?sort` /
+`?active` / `?q` all correct, player page rendering the game and Level 1,
+`/health` 200 with per-job status, static assets served with correct
+content types. Dev DB truncated afterward.
+
+---
+
 ## Web (public pages, no auth)
 
 chi router; `html/template` with a `layout.html` + one file per page; htmx only for sort/filter on standings (falls back to plain query-string links, so the pages work without JS). Dark-by-default, Lichess-like: near-black background, muted borders, dense tables — Tailwind utility classes only, no component library.
@@ -493,7 +561,7 @@ Each step is a self-contained commit point (the maintainer commits; see `CLAUDE.
 5. **Done.** `seed-players` and `import-pairings` CLIs — see their own section above for what was built and verified.
 6. **Done.** Matching + ingest + standings recompute; `ic sync-games` wired and run live. See the dedicated section above for what was built, the two real bugs live verification caught, and the deterministic integration test suite that now covers the orchestration (including the error path live testing couldn't reliably reach).
 7. **Done.** River wiring — `serve` starts HTTP + river, periodic jobs registered; `internal/jobs` + `ic recompute`. See the dedicated section above.
-8. **Web pages** in the order standings → levels → player → home → health/jobs; Tailwind build.
+8. **Done.** Web pages (`internal/web`, all six routes) + Tailwind build. See the dedicated section above.
 9. **README** with the commands, and update `CLAUDE.md`'s "Repository state" section to point at them.
 
 ---

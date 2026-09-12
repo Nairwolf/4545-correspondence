@@ -47,33 +47,43 @@ const getStandings = `-- name: GetStandings :many
 SELECT
   u.id, u.lichess_username, p.is_active,
   s.rating, s.is_unrated, s.games_played, s.wins, s.draws, s.losses, s.ongoing,
-  s.last_k_score, s.last_k_perf_rating, s.power_rating
+  s.last_k_score, s.last_k_perf_rating, s.power_rating,
+  s.xp, s.level, s.xp_to_next_level, s.last_level_up_round, s.last_level_up_at
 FROM users u
 JOIN player_profiles p ON p.user_id = u.id
 LEFT JOIN player_standings s ON s.user_id = u.id
 WHERE u.status = 'approved'
-ORDER BY s.power_rating DESC NULLS LAST
+ORDER BY s.power_rating DESC NULLS LAST, u.lichess_username ASC
 `
 
 type GetStandingsRow struct {
-	ID              pgtype.UUID    `json:"id"`
-	LichessUsername string         `json:"lichess_username"`
-	IsActive        bool           `json:"is_active"`
-	Rating          *int32         `json:"rating"`
-	IsUnrated       *bool          `json:"is_unrated"`
-	GamesPlayed     *int32         `json:"games_played"`
-	Wins            *int32         `json:"wins"`
-	Draws           *int32         `json:"draws"`
-	Losses          *int32         `json:"losses"`
-	Ongoing         *int32         `json:"ongoing"`
-	LastKScore      pgtype.Numeric `json:"last_k_score"`
-	LastKPerfRating *int32         `json:"last_k_perf_rating"`
-	PowerRating     *int32         `json:"power_rating"`
+	ID               pgtype.UUID        `json:"id"`
+	LichessUsername  string             `json:"lichess_username"`
+	IsActive         bool               `json:"is_active"`
+	Rating           *int32             `json:"rating"`
+	IsUnrated        *bool              `json:"is_unrated"`
+	GamesPlayed      *int32             `json:"games_played"`
+	Wins             *int32             `json:"wins"`
+	Draws            *int32             `json:"draws"`
+	Losses           *int32             `json:"losses"`
+	Ongoing          *int32             `json:"ongoing"`
+	LastKScore       pgtype.Numeric     `json:"last_k_score"`
+	LastKPerfRating  *int32             `json:"last_k_perf_rating"`
+	PowerRating      *int32             `json:"power_rating"`
+	Xp               *int32             `json:"xp"`
+	Level            *int32             `json:"level"`
+	XpToNextLevel    *int32             `json:"xp_to_next_level"`
+	LastLevelUpRound *int32             `json:"last_level_up_round"`
+	LastLevelUpAt    pgtype.Timestamptz `json:"last_level_up_at"`
 }
 
-// One row per approved player, sorted by power rating — the /standings
-// page (spec §8.1). A player with no player_standings row yet (never
-// recomputed) still appears, sorted last.
+// One row per approved player — the raw feed for both the /standings and
+// /levels pages (spec §8.1). Sorting, active/inactive filtering and name
+// search are all done in Go (the league is small and it keeps the SQL a
+// single readable statement); the default order here is power rating,
+// highest first, so an un-sorted render already looks right. A player
+// with no player_standings row yet (never recomputed) still appears,
+// sorted last.
 func (q *Queries) GetStandings(ctx context.Context) ([]GetStandingsRow, error) {
 	rows, err := q.db.Query(ctx, getStandings)
 	if err != nil {
@@ -97,6 +107,11 @@ func (q *Queries) GetStandings(ctx context.Context) ([]GetStandingsRow, error) {
 			&i.LastKScore,
 			&i.LastKPerfRating,
 			&i.PowerRating,
+			&i.Xp,
+			&i.Level,
+			&i.XpToNextLevel,
+			&i.LastLevelUpRound,
+			&i.LastLevelUpAt,
 		); err != nil {
 			return nil, err
 		}

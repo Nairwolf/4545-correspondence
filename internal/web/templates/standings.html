@@ -1,0 +1,71 @@
+{{define "content"}}
+<div class="mb-4 flex items-baseline justify-between">
+  <h1 class="text-lg font-semibold text-zinc-100">Standings</h1>
+  <span class="text-xs text-zinc-500">
+    {{len .Rows}}{{if ne (len .Rows) .Total}} of {{.Total}}{{end}} players
+  </span>
+</div>
+
+<form method="get" action="/standings" class="mb-4 flex flex-wrap gap-3 text-xs">
+  <input type="hidden" name="sort" value="{{.Params.Sort}}">
+  <input type="hidden" name="dir" value="{{.Params.Dir}}">
+  <label class="flex items-center gap-2">
+    <span class="text-zinc-500">Show</span>
+    <select name="active" class="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-zinc-200">
+      <option value="" {{if eq .Params.Active ""}}selected{{end}}>all</option>
+      <option value="1" {{if eq .Params.Active "1"}}selected{{end}}>active</option>
+      <option value="0" {{if eq .Params.Active "0"}}selected{{end}}>inactive</option>
+    </select>
+  </label>
+  <label class="flex items-center gap-2">
+    <span class="text-zinc-500">Search</span>
+    <input type="search" name="q" value="{{.Params.Q}}" placeholder="name"
+           class="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-zinc-200">
+  </label>
+  <button class="rounded border border-zinc-700 px-3 py-1 text-zinc-300 hover:bg-zinc-800">Apply</button>
+</form>
+
+<div class="overflow-x-auto">
+<table class="w-full min-w-[48rem] border-collapse text-left">
+  <thead class="text-xs uppercase tracking-wide text-zinc-500">
+    <tr class="border-b border-zinc-800">
+      <th class="py-2 pr-3 text-right">#</th>
+      <th class="py-2 pr-3"><a class="hover:text-zinc-200" href="{{sortHref .Params "player"}}">Player{{sortArrow .Params "player"}}</a></th>
+      <th class="py-2 pr-3 text-right"><a class="hover:text-zinc-200" href="{{sortHref .Params "rating"}}">Rating{{sortArrow .Params "rating"}}</a></th>
+      <th class="py-2 pr-3 text-right"><a class="hover:text-zinc-200" href="{{sortHref .Params "games"}}">Games{{sortArrow .Params "games"}}</a></th>
+      <th class="py-2 pr-3 text-right"><a class="hover:text-zinc-200" href="{{sortHref .Params "wins"}}">W{{sortArrow .Params "wins"}}</a></th>
+      <th class="py-2 pr-3 text-right"><a class="hover:text-zinc-200" href="{{sortHref .Params "draws"}}">D{{sortArrow .Params "draws"}}</a></th>
+      <th class="py-2 pr-3 text-right"><a class="hover:text-zinc-200" href="{{sortHref .Params "losses"}}">L{{sortArrow .Params "losses"}}</a></th>
+      <th class="py-2 pr-3 text-right"><a class="hover:text-zinc-200" href="{{sortHref .Params "ongoing"}}">Ongoing{{sortArrow .Params "ongoing"}}</a></th>
+      <th class="py-2 pr-3 text-right"><a class="hover:text-zinc-200" href="{{sortHref .Params "last5"}}">Last 5{{sortArrow .Params "last5"}}</a></th>
+      <th class="py-2 pr-3 text-right"><a class="hover:text-zinc-200" href="{{sortHref .Params "perf"}}">Perf{{sortArrow .Params "perf"}}</a></th>
+      <th class="py-2 pr-3"><a class="hover:text-zinc-200" href="{{sortHref .Params "active"}}">Active{{sortArrow .Params "active"}}</a></th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Rows}}
+    <tr class="border-b border-zinc-900 hover:bg-zinc-900/50">
+      <td class="py-1.5 pr-3 text-right tabular-nums text-zinc-600">{{.Rank}}</td>
+      <td class="py-1.5 pr-3">
+        <a class="hover:text-zinc-100" href="{{playerURL .Username}}">{{.Username}}</a>
+        <a class="ml-1 text-zinc-600 hover:text-zinc-400" href="{{userURL .Username}}" title="Lichess profile">↗</a>
+      </td>
+      <td class="py-1.5 pr-3 text-right tabular-nums">
+        {{if .Unrated}}<span class="text-zinc-600">—</span> <span class="rounded bg-zinc-800 px-1 text-[10px] uppercase text-zinc-400">unrated</span>{{else}}{{int32OrDash .Rating}}{{end}}
+      </td>
+      <td class="py-1.5 pr-3 text-right tabular-nums text-zinc-400">{{int32OrDash .Games}}</td>
+      <td class="py-1.5 pr-3 text-right tabular-nums">{{int32OrDash .Wins}}</td>
+      <td class="py-1.5 pr-3 text-right tabular-nums">{{int32OrDash .Draws}}</td>
+      <td class="py-1.5 pr-3 text-right tabular-nums">{{int32OrDash .Losses}}</td>
+      <td class="py-1.5 pr-3 text-right tabular-nums text-zinc-400">{{int32OrDash .Ongoing}}</td>
+      <td class="py-1.5 pr-3 text-right tabular-nums">{{numOrDash .Last5}}</td>
+      <td class="py-1.5 pr-3 text-right tabular-nums">{{int32OrDash .Last5Perf}}</td>
+      <td class="py-1.5 pr-3">{{if .IsActive}}<span class="text-emerald-500">●</span>{{else}}<span class="text-zinc-700">○</span>{{end}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="11" class="py-4 text-zinc-500">No players match.</td></tr>
+    {{end}}
+  </tbody>
+</table>
+</div>
+{{end}}

@@ -1,0 +1,8 @@
+/* Tailwind source for the public site. Built to internal/web/static/app.css
+   by `make css` (the standalone CLI in .bin/, fetched by `make tailwind`).
+   The generated file is committed so `go build` / `make run` need no CSS
+   step and the //go:embed of static/ always resolves. */
+@import "tailwindcss";
+
+/* Class scanning: the templates are the only place utility classes appear. */
+@source "../internal/web/templates/**/*.html";

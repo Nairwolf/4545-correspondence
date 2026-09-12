@@ -3,6 +3,7 @@ module github.com/nairwolf/4545-correspondence
 go 1.27.0
 
 require (
+	github.com/go-chi/chi/v5 v5.2.3
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/pressly/goose/v3 v3.28.0
 	github.com/riverqueue/river v0.47.0

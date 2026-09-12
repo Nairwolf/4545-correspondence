@@ -1,0 +1,41 @@
+{{define "content"}}
+<h1 class="mb-2 text-lg font-semibold text-zinc-100">Levels</h1>
+<p class="mb-4 max-w-2xl text-xs leading-relaxed text-zinc-500">
+  Every finished game earns XP regardless of result — win {{.Win}}, draw {{.Draw}}, loss {{.Loss}}.
+  Your level is &lfloor;&radic;XP&rfloor;, so each level costs a little more XP than the last.
+  "Last level-up" shows the round it happened in when that is known.
+</p>
+
+<div class="overflow-x-auto">
+<table class="w-full min-w-[36rem] border-collapse text-left">
+  <thead class="text-xs uppercase tracking-wide text-zinc-500">
+    <tr class="border-b border-zinc-800">
+      <th class="py-2 pr-3 text-right">#</th>
+      <th class="py-2 pr-3">Player</th>
+      <th class="py-2 pr-3 text-right">XP</th>
+      <th class="py-2 pr-3 text-right">Level</th>
+      <th class="py-2 pr-3 text-right">To next</th>
+      <th class="py-2 pr-3">Last level-up</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Rows}}
+    <tr class="border-b border-zinc-900 hover:bg-zinc-900/50">
+      <td class="py-1.5 pr-3 text-right tabular-nums text-zinc-600">{{.Rank}}</td>
+      <td class="py-1.5 pr-3"><a class="hover:text-zinc-100" href="{{playerURL .Username}}">{{.Username}}</a></td>
+      <td class="py-1.5 pr-3 text-right tabular-nums">{{int32OrDash .XP}}</td>
+      <td class="py-1.5 pr-3 text-right tabular-nums text-zinc-100">{{int32OrDash .Level}}</td>
+      <td class="py-1.5 pr-3 text-right tabular-nums text-zinc-500">{{int32OrDash .XPToNext}}</td>
+      <td class="py-1.5 pr-3 text-zinc-500">
+        {{if .LastLevelUpRound}}round {{int32OrDash .LastLevelUpRound}}
+        {{- else if .LastLevelUpAt.Valid}}{{date .LastLevelUpAt}}
+        {{- else}}—{{end}}
+      </td>
+    </tr>
+    {{else}}
+    <tr><td colspan="6" class="py-4 text-zinc-500">No players yet.</td></tr>
+    {{end}}
+  </tbody>
+</table>
+</div>
+{{end}}

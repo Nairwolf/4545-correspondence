@@ -1,0 +1,60 @@
+{{define "content"}}
+<h1 class="mb-4 text-lg font-semibold text-zinc-100">Background jobs</h1>
+
+{{if .Ambiguous}}
+<div class="mb-6 rounded border border-amber-800/60 bg-amber-950/30 p-3">
+  <h2 class="mb-2 text-sm font-semibold text-amber-400">Pairings needing a hand ({{len .Ambiguous}})</h2>
+  <p class="mb-2 text-xs text-amber-200/70">sync-games found more than one Lichess game that could be these pairings and attached none.</p>
+  <table class="w-full border-collapse text-left text-xs">
+    <thead class="uppercase tracking-wide text-amber-200/60">
+      <tr class="border-b border-amber-900/60">
+        <th class="py-1 pr-3">Round</th><th class="py-1 pr-3">White</th><th class="py-1 pr-3">Black</th><th class="py-1">Created</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Ambiguous}}
+      <tr class="border-b border-amber-900/30">
+        <td class="py-1 pr-3">{{.RoundNumber}}</td>
+        <td class="py-1 pr-3">{{.WhiteUsername}}</td>
+        <td class="py-1 pr-3">{{.BlackUsername}}</td>
+        <td class="py-1 text-amber-200/60">{{datetime .CreatedAt}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{end}}
+
+<div class="overflow-x-auto">
+<table class="w-full min-w-[48rem] border-collapse text-left">
+  <thead class="text-xs uppercase tracking-wide text-zinc-500">
+    <tr class="border-b border-zinc-800">
+      <th class="py-2 pr-3">Job</th>
+      <th class="py-2 pr-3">Started</th>
+      <th class="py-2 pr-3">Status</th>
+      <th class="py-2 pr-3 text-right">Items</th>
+      <th class="py-2 pr-3">Detail</th>
+      <th class="py-2">Error</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Runs}}
+    <tr class="border-b border-zinc-900 align-top">
+      <td class="py-1.5 pr-3 font-medium text-zinc-200">{{.JobName}}</td>
+      <td class="py-1.5 pr-3 whitespace-nowrap text-zinc-500">{{datetime .StartedAt}}</td>
+      <td class="py-1.5 pr-3">
+        {{if eq (printf "%s" .Status) "succeeded"}}<span class="text-emerald-500">succeeded</span>
+        {{- else if eq (printf "%s" .Status) "failed"}}<span class="text-rose-500">failed</span>
+        {{- else}}<span class="text-amber-400">running</span>{{end}}
+      </td>
+      <td class="py-1.5 pr-3 text-right tabular-nums text-zinc-400">{{.ItemsProcessed}}</td>
+      <td class="py-1.5 pr-3 font-mono text-xs text-zinc-500">{{.Detail}}</td>
+      <td class="py-1.5 font-mono text-xs text-rose-400">{{if .Error}}{{.Error}}{{end}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="6" class="py-4 text-zinc-500">No job runs recorded yet.</td></tr>
+    {{end}}
+  </tbody>
+</table>
+</div>
+{{end}}

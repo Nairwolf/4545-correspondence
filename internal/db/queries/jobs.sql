@@ -23,3 +23,11 @@ SELECT * FROM job_runs ORDER BY started_at DESC LIMIT $1;
 -- name: GetLatestJobRunByName :one
 -- Backs /health: the most recent outcome of a named job.
 SELECT * FROM job_runs WHERE job_name = $1 ORDER BY started_at DESC LIMIT 1;
+
+-- name: GetLatestSuccessfulJobRunByName :one
+-- Backs /health's "last_success" field: the newest run of a named job
+-- that actually succeeded, independent of what the most recent run did.
+SELECT * FROM job_runs
+WHERE job_name = $1 AND status = 'succeeded'
+ORDER BY started_at DESC
+LIMIT 1;

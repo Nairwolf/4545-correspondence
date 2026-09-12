@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} · Infinite Correspondence</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body class="min-h-screen bg-zinc-950 text-zinc-300 text-sm antialiased" hx-boost="true">
+  <header class="border-b border-zinc-800">
+    <div class="mx-auto flex max-w-5xl items-center gap-6 px-4 py-3">
+      <a href="/" class="font-semibold text-zinc-100">Infinite Correspondence</a>
+      <nav class="flex gap-4 text-zinc-400">
+        {{- $nav := .Nav}}
+        <a href="/" class="hover:text-zinc-100 {{if eq $nav "home"}}text-zinc-100{{end}}">Overview</a>
+        <a href="/standings" class="hover:text-zinc-100 {{if eq $nav "standings"}}text-zinc-100{{end}}">Standings</a>
+        <a href="/levels" class="hover:text-zinc-100 {{if eq $nav "levels"}}text-zinc-100{{end}}">Levels</a>
+        <a href="/jobs" class="hover:text-zinc-100 {{if eq $nav "jobs"}}text-zinc-100{{end}}">Jobs</a>
+      </nav>
+    </div>
+  </header>
+  <main class="mx-auto max-w-5xl px-4 py-6">
+    {{template "content" .}}
+  </main>
+  <footer class="mx-auto max-w-5xl px-4 py-8 text-xs text-zinc-600">
+    Games are played on <a class="underline hover:text-zinc-400" href="https://lichess.org">lichess.org</a>.
+    This site orchestrates and reports.
+  </footer>
+</body>
+</html>

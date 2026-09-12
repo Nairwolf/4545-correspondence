@@ -11,19 +11,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/nairwolf/4545-correspondence/internal/config"
 	"github.com/nairwolf/4545-correspondence/internal/db"
 	"github.com/nairwolf/4545-correspondence/internal/jobs"
 	"github.com/nairwolf/4545-correspondence/internal/lichess"
+	"github.com/nairwolf/4545-correspondence/internal/web"
 )
 
 // runServe starts the long-running process: the river job runner (spec
-// §7's periodic sync workers) and the HTTP server. The public pages and
-// the real /health endpoint (spec §8.1) land in the next build-order
-// step; for now the server answers only a liveness probe so `serve` is
-// something a deployment can point a health check at.
+// §7's periodic sync workers) and the public HTTP site (spec §8.1). A
+// SIGINT/SIGTERM drains in-flight requests and any running job before
+// exiting.
 func runServe(ctx context.Context, cfg config.Config) error {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -54,9 +52,14 @@ func runServe(ctx context.Context, cfg config.Config) error {
 		return fmt.Errorf("serve: start job runner: %w", err)
 	}
 
+	handler, err := web.New(ctx, pool)
+	if err != nil {
+		return fmt.Errorf("serve: build web handler: %w", err)
+	}
+
 	srv := &http.Server{
 		Addr:        cfg.ListenAddr,
-		Handler:     serveMux(pool),
+		Handler:     handler.Handler(),
 		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
 
@@ -90,16 +93,4 @@ func runServe(ctx context.Context, cfg config.Config) error {
 		slog.Error("serve: job runner shutdown", "error", err)
 	}
 	return nil
-}
-
-func serveMux(pool *pgxpool.Pool) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		if err := pool.Ping(r.Context()); err != nil {
-			http.Error(w, "db unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		fmt.Fprintln(w, "ok")
-	})
-	return mux
 }

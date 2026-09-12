@@ -32,18 +32,23 @@ ON CONFLICT (user_id) DO UPDATE SET
   updated_at             = now();
 
 -- name: GetStandings :many
--- One row per approved player, sorted by power rating — the /standings
--- page (spec §8.1). A player with no player_standings row yet (never
--- recomputed) still appears, sorted last.
+-- One row per approved player — the raw feed for both the /standings and
+-- /levels pages (spec §8.1). Sorting, active/inactive filtering and name
+-- search are all done in Go (the league is small and it keeps the SQL a
+-- single readable statement); the default order here is power rating,
+-- highest first, so an un-sorted render already looks right. A player
+-- with no player_standings row yet (never recomputed) still appears,
+-- sorted last.
 SELECT
   u.id, u.lichess_username, p.is_active,
   s.rating, s.is_unrated, s.games_played, s.wins, s.draws, s.losses, s.ongoing,
-  s.last_k_score, s.last_k_perf_rating, s.power_rating
+  s.last_k_score, s.last_k_perf_rating, s.power_rating,
+  s.xp, s.level, s.xp_to_next_level, s.last_level_up_round, s.last_level_up_at
 FROM users u
 JOIN player_profiles p ON p.user_id = u.id
 LEFT JOIN player_standings s ON s.user_id = u.id
 WHERE u.status = 'approved'
-ORDER BY s.power_rating DESC NULLS LAST;
+ORDER BY s.power_rating DESC NULLS LAST, u.lichess_username ASC;
 
 -- name: GetPlayerStanding :one
 SELECT * FROM player_standings WHERE user_id = $1;
