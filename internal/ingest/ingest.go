@@ -79,15 +79,26 @@ func ResultFor(g lichess.Game) gen.GameResult {
 // the caller — Game itself carries neither, they're resolved from the
 // pairing/round rows already loaded before matching. Call only when
 // IsStorable(g.Status).
+//
+// raw is the exact JSON Lichess sent for g (GameStream.Raw or
+// ExportGame's second result) and is stored verbatim as raw_payload.
+// It must not be a re-serialisation of g: lichess.Game only declares
+// the fields Phase 1 maps, so marshalling it back would silently drop
+// everything else — ratingDiff, blunder counts, tournament info, any
+// field Lichess adds later — and defeat the column's purpose (spec
+// §7.1: recompute derived metrics later without re-fetching). It is
+// checked to be valid JSON here because the column is jsonb and a bad
+// payload should fail loudly at the mapping, not deep inside the
+// upsert.
 func BuildGameParams(
 	pairingID pgtype.UUID,
 	roundNumber int32,
 	whiteUserID, blackUserID pgtype.UUID,
 	g lichess.Game,
+	raw []byte,
 ) (gen.UpsertGameParams, error) {
-	raw, err := json.Marshal(g)
-	if err != nil {
-		return gen.UpsertGameParams{}, fmt.Errorf("ingest: marshal raw payload: %w", err)
+	if !json.Valid(raw) {
+		return gen.UpsertGameParams{}, fmt.Errorf("ingest: raw payload for %s is not valid JSON", g.ID)
 	}
 
 	params := gen.UpsertGameParams{

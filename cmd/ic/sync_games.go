@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -141,7 +142,17 @@ func recheckInProgressGames(ctx context.Context, q *gen.Queries, client lichess.
 			continue
 		}
 		stats.InProgressChecked++
-		finished, err := syncOneGame(ctx, q, row.PairingID, row.RoundNumber, row.WhiteUserID, row.BlackUserID, g, cfg)
+		finished, err := syncOneGame(
+			ctx,
+			q,
+			row.PairingID,
+			row.RoundNumber,
+			row.WhiteUserID,
+			row.BlackUserID,
+			g,
+			stream.Raw(),
+			cfg,
+		)
 		if err != nil {
 			return fmt.Errorf("sync game %s: %w", g.ID, err)
 		}
@@ -198,8 +209,11 @@ func matchPendingPairings(ctx context.Context, q *gen.Queries, client lichess.AP
 			continue
 		}
 		var candidates []lichess.Game
+		rawByID := map[string][]byte{}
 		for stream.Next() {
-			candidates = append(candidates, stream.Game())
+			g := stream.Game()
+			candidates = append(candidates, g)
+			rawByID[g.ID] = bytes.Clone(stream.Raw()) // Raw is only valid until the next Next
 		}
 		streamErr := stream.Err()
 		stream.Close()
@@ -233,7 +247,17 @@ func matchPendingPairings(ctx context.Context, q *gen.Queries, client lichess.AP
 				stats.PairingsAmbiguous++
 			case result.Game != "":
 				g := byGameID[result.Game]
-				finished, err := syncOneGame(ctx, q, p.PairingID, p.RoundNumber, p.WhiteUserID, p.BlackUserID, g, cfg)
+				finished, err := syncOneGame(
+					ctx,
+					q,
+					p.PairingID,
+					p.RoundNumber,
+					p.WhiteUserID,
+					p.BlackUserID,
+					g,
+					rawByID[g.ID],
+					cfg,
+				)
 				if err != nil {
 					return fmt.Errorf("sync matched game %s: %w", g.ID, err)
 				}
@@ -260,6 +284,7 @@ func syncOneGame(
 	roundNumber int32,
 	whiteID, blackID pgtype.UUID,
 	g lichess.Game,
+	raw []byte,
 	cfg settings.Settings,
 ) (finished bool, err error) {
 	if !ingest.IsStorable(g.Status) {
@@ -275,7 +300,7 @@ func syncOneGame(
 		return false, nil
 	}
 
-	params, err := ingest.BuildGameParams(pairingID, roundNumber, whiteID, blackID, g)
+	params, err := ingest.BuildGameParams(pairingID, roundNumber, whiteID, blackID, g, raw)
 	if err != nil {
 		return false, err
 	}

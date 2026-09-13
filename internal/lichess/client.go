@@ -52,8 +52,9 @@ type API interface {
 	// don't match a game are simply absent from the stream.
 	GamesByID(ctx context.Context, ids []string) (*GameStream, error)
 
-	// ExportGame fetches one game by id.
-	ExportGame(ctx context.Context, gameID string) (Game, error)
+	// ExportGame fetches one game by id, returning both the decoded game
+	// and the exact response bytes (see GameStream.Raw for why).
+	ExportGame(ctx context.Context, gameID string) (Game, []byte, error)
 }
 
 // Client is the real, HTTP-backed implementation of API.
@@ -351,7 +352,7 @@ func (c *Client) GamesByID(
 // game" command (spec §3.4) — the regular sync jobs always know a
 // game's id already, from a pairing or a batch export, and use GamesByID
 // instead.
-func (c *Client) ExportGame(ctx context.Context, gameID string) (Game, error) {
+func (c *Client) ExportGame(ctx context.Context, gameID string) (Game, []byte, error) {
 	q := url.Values{"opening": {"true"}, "accuracy": {"true"}}
 	resp, err := c.do(
 		ctx,
@@ -363,14 +364,18 @@ func (c *Client) ExportGame(ctx context.Context, gameID string) (Game, error) {
 		"application/json",
 	)
 	if err != nil {
-		return Game{}, err
+		return Game{}, nil, err
 	}
 	defer resp.Body.Close()
-	var g Game
-	if err := json.NewDecoder(resp.Body).Decode(&g); err != nil {
-		return Game{}, fmt.Errorf("lichess: decode game export: %w", err)
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxGameBytes))
+	if err != nil {
+		return Game{}, nil, fmt.Errorf("lichess: read game export: %w", err)
 	}
-	return g, nil
+	var g Game
+	if err := json.Unmarshal(raw, &g); err != nil {
+		return Game{}, nil, fmt.Errorf("lichess: decode game export: %w", err)
+	}
+	return g, raw, nil
 }
 
 // GameStream reads newline-delimited games one at a time, mirroring
@@ -382,6 +387,7 @@ type GameStream struct {
 	body    io.Closer
 	scanner *bufio.Scanner
 	cur     Game
+	raw     []byte // exact bytes of the line that produced cur
 	err     error
 
 	// next fetches the next batch's body when the current one is
@@ -397,11 +403,15 @@ func newGameStream(body io.ReadCloser) *GameStream {
 func newLineScanner(r io.Reader) *bufio.Scanner {
 	scanner := bufio.NewScanner(r)
 	// A long, fully-analysed game's ndjson line can exceed the default
-	// 64KB token size; 4MB is comfortably beyond anything a real game
-	// produces.
-	scanner.Buffer(make([]byte, 0, 64*1024), 4<<20)
+	// 64KB token size; maxGameBytes is comfortably beyond anything a real
+	// game produces.
+	scanner.Buffer(make([]byte, 0, 64*1024), maxGameBytes)
 	return scanner
 }
+
+// maxGameBytes bounds a single game's JSON, whether one ndjson line or
+// one ExportGame body.
+const maxGameBytes = 4 << 20
 
 // Next advances to the next game, fetching the next batch transparently
 // if the current one is exhausted. It returns false at the end of the
@@ -413,7 +423,10 @@ func (s *GameStream) Next() bool {
 			if len(line) == 0 {
 				continue // Lichess's ndjson stream can include blank keep-alive lines
 			}
-			if err := json.Unmarshal(line, &s.cur); err != nil {
+			// Copy: the scanner reuses its buffer on the next Scan, and
+			// callers hold Raw() across that boundary.
+			s.raw = append(s.raw[:0], line...)
+			if err := json.Unmarshal(s.raw, &s.cur); err != nil {
 				s.err = fmt.Errorf("lichess: decode game: %w", err)
 				return false
 			}
@@ -442,6 +455,14 @@ func (s *GameStream) Next() bool {
 
 // Game returns the game decoded by the most recent successful Next.
 func (s *GameStream) Game() Game { return s.cur }
+
+// Raw returns the exact bytes Lichess sent for the game returned by
+// Game(): the ndjson line, untouched. This — not a re-serialisation of
+// Game, which only declares the fields this application maps — is what
+// belongs in games.raw_payload (spec §7.1: the complete response, so
+// derived metrics can be recomputed later without re-fetching). The
+// slice is only valid until the next call to Next; copy it to keep it.
+func (s *GameStream) Raw() []byte { return s.raw }
 
 // Err returns the error that stopped iteration, if Next returned false
 // because of one rather than because the stream is simply exhausted.

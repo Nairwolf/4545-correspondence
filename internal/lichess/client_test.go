@@ -191,11 +191,44 @@ func TestExportGame_DecodesSingleObject(t *testing.T) {
 		fmt.Fprint(w, `{"id":"abc12345","status":"resign","winner":"white","daysPerTurn":2}`)
 	})
 
-	g, err := client.ExportGame(context.Background(), "abc12345")
+	g, raw, err := client.ExportGame(context.Background(), "abc12345")
 	require.NoError(t, err)
 	assert.Equal(t, "abc12345", g.ID)
 	assert.Equal(t, "resign", g.Status)
 	assert.Equal(t, 2, g.DaysPerTurn)
+	assert.JSONEq(t, `{"id":"abc12345","status":"resign","winner":"white","daysPerTurn":2}`, string(raw))
+}
+
+func TestGameStream_RawIsTheExactLineAndSurvivesAcrossNext(t *testing.T) {
+	// Two lines, each carrying a field lichess.Game doesn't declare, so
+	// a re-encode of Game() would visibly differ from Raw(). The second
+	// line is longer than the first so a buffer-reuse bug (Raw pointing
+	// into the scanner's buffer) would show up as corrupted bytes.
+	line1 := `{"id":"g1","undeclared":1}`
+	line2 := `{"id":"g2","undeclared":2,"padding":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}`
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		fmt.Fprintln(w, line1)
+		fmt.Fprintln(w, line2)
+	})
+
+	stream, err := client.UserGames(context.Background(), "x", UserGamesOptions{})
+	require.NoError(t, err)
+	defer stream.Close()
+
+	require.True(t, stream.Next())
+	assert.Equal(t, "g1", stream.Game().ID)
+	firstRaw := stream.Raw() // deliberately NOT copied: the next Next must not corrupt a copy we take now
+	firstCopy := string(firstRaw)
+	assert.Equal(t, line1, firstCopy)
+
+	require.True(t, stream.Next())
+	assert.Equal(t, "g2", stream.Game().ID)
+	assert.Equal(t, line2, string(stream.Raw()))
+	assert.Equal(t, line1, firstCopy, "a string taken from Raw() before the second Next is unaffected")
+
+	require.False(t, stream.Next())
+	require.NoError(t, stream.Err())
 }
 
 func TestGameStream_SkipsBlankKeepAliveLines(t *testing.T) {

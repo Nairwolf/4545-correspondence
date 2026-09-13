@@ -533,6 +533,45 @@ content types. Dev DB truncated afterward.
 
 ---
 
+## Post-review fixes (2026-09-13)
+
+Findings from `REVIEW.md` that have been addressed, with what changed.
+
+**B-1 — `raw_payload` now holds Lichess's bytes, not a re-encoding.**
+`ingest.BuildGameParams` used to `json.Marshal` the decoded
+`lichess.Game`, which only declares the fields Phase 1 maps, so
+`ratingDiff`, per-player blunder/mistake/inaccuracy counts, tournament
+info and anything Lichess adds later were silently dropped — and
+`"accuracy": null` was written for a key Lichess never sent. Spec §7.1
+calls the full response non-negotiable. Now:
+
+- `lichess.GameStream` keeps a copy of each ndjson line (`Raw()`); the
+  slice is valid until the next `Next`, so `sync-games` clones it when it
+  buffers candidates. `ExportGame` reads its body once and returns the
+  bytes alongside the decoded game.
+- `BuildGameParams` takes the bytes as a parameter and stores them
+  verbatim, rejecting anything that isn't valid JSON up front so a bad
+  payload fails at the mapping rather than inside the jsonb upsert.
+- `lichess.Fake` gained `RawGames map[string][]byte`: when set for an id,
+  the fake emits those bytes as the stream line, exactly as the real
+  client would, so a test can prove pass-through end to end.
+- Tests at each layer: `GameStream.Raw` equals the line and survives
+  buffer reuse across `Next`; `BuildGameParams` stores the live
+  `q7ZvsdUF` fixture byte-for-byte including three fields the struct
+  doesn't declare; and an integration test (`-tags integration`) runs
+  `doSyncGames` with a `RawGames` entry carrying an undeclared field and
+  reads it back from `games.raw_payload`.
+
+Cost: with `clocks` no longer requested (see the API findings above),
+the stored payload grows by roughly 250 bytes per game over the old
+re-encoding. Games ingested before this fix keep their lossy payload;
+`UpsertGame` overwrites `raw_payload` on every re-fetch, so in-progress
+games self-heal on their next hourly poll, but finished games are never
+re-fetched and would need a one-off pass through the still-unbuilt
+`refetch-game` command if the old rows ever matter.
+
+---
+
 ## Web (public pages, no auth)
 
 chi router; `html/template` with a `layout.html` + one file per page; htmx only for sort/filter on standings (falls back to plain query-string links, so the pages work without JS). Dark-by-default, Lichess-like: near-black background, muted borders, dense tables — Tailwind utility classes only, no component library.

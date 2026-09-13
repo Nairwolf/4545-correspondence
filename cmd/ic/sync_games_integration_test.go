@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"testing"
 	"time"
@@ -120,6 +121,39 @@ func TestDoSyncGames_RechecksKnownGameIDAndFinishesIt(t *testing.T) {
 	whiteStanding, err := q.GetPlayerStanding(ctx, white.ID)
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), whiteStanding.Wins)
+}
+
+func TestDoSyncGames_StoresLichessBytesAsRawPayload(t *testing.T) {
+	// Spec §7.1: raw_payload is what Lichess sent, not what we decoded.
+	// The fake emits RawGames bytes verbatim, exactly as the real stream
+	// hands back an ndjson line; the field "undeclaredByOurStruct" has no
+	// home in lichess.Game and can only reach the database if the bytes
+	// are passed through untouched.
+	q := testQueries(t)
+	ctx := context.Background()
+
+	white := createUser(t, q, "rawsyncwhite")
+	black := createUser(t, q, "rawsyncblack")
+	gameID := "rawsync01"
+	createPendingPairing(t, q, 80006, white, black, &gameID)
+
+	fake := lichess.NewFake()
+	g := fakeGame(gameID, white, black, lichess.StatusResign, "white")
+	fake.Games[gameID] = g
+	base, err := json.Marshal(g)
+	require.NoError(t, err)
+	// Splice an undeclared field in; the rest stays a faithful encoding
+	// of g so decoding still yields the same game.
+	fake.RawGames[gameID] = append([]byte(`{"undeclaredByOurStruct":{"kept":true},`), base[1:]...)
+
+	_, err = doSyncGames(ctx, q, fake, settings.Defaults())
+	require.NoError(t, err)
+
+	games, err := q.ListFinishedGamesForUser(ctx, white.ID)
+	require.NoError(t, err)
+	require.Len(t, games, 1)
+	assert.JSONEq(t, string(fake.RawGames[gameID]), string(games[0].RawPayload))
+	assert.Contains(t, string(games[0].RawPayload), "undeclaredByOurStruct")
 }
 
 func TestDoSyncGames_MatchesAnUnmatchedPairing(t *testing.T) {

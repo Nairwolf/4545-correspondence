@@ -19,6 +19,14 @@ type Fake struct {
 	// Games is keyed by Lichess game id.
 	Games map[string]Game
 
+	// RawGames, also keyed by game id, supplies the exact bytes a stream
+	// or ExportGame should hand back for that id. Optional: when absent,
+	// the fake re-encodes the Game struct, which is fine for every test
+	// that doesn't care what ends up in raw_payload. A test that does
+	// (spec §7.1: the payload must be Lichess's response, not our
+	// subset) sets both — the Game for behaviour, RawGames for bytes.
+	RawGames map[string][]byte
+
 	// UserGamesFn overrides UserGames's default behaviour, which is to
 	// return every game in Games where the given username is a player.
 	// Set it when a test needs UserGames to filter or order differently
@@ -34,7 +42,7 @@ type Fake struct {
 
 // NewFake returns an empty Fake ready for a test to populate.
 func NewFake() *Fake {
-	return &Fake{Users: map[string]User{}, Games: map[string]Game{}}
+	return &Fake{Users: map[string]User{}, Games: map[string]Game{}, RawGames: map[string][]byte{}}
 }
 
 var _ API = (*Fake)(nil)
@@ -67,7 +75,7 @@ func (f *Fake) UserGames(
 			}
 		}
 	}
-	return gameSliceStream(games), nil
+	return f.gameSliceStream(games), nil
 }
 
 func playerIs(p GamePlayer, username string) bool {
@@ -84,25 +92,37 @@ func (f *Fake) GamesByID(
 			games = append(games, g)
 		}
 	}
-	return gameSliceStream(games), nil
+	return f.gameSliceStream(games), nil
 }
 
-func (f *Fake) ExportGame(ctx context.Context, gameID string) (Game, error) {
+func (f *Fake) ExportGame(ctx context.Context, gameID string) (Game, []byte, error) {
 	g, ok := f.Games[gameID]
 	if !ok {
-		return Game{}, &APIError{StatusCode: 404, Message: "Not found"}
+		return Game{}, nil, &APIError{StatusCode: 404, Message: "Not found"}
 	}
-	return g, nil
+	return g, f.rawFor(g), nil
 }
 
-// gameSliceStream encodes games to ndjson in memory and wraps them in
-// the same GameStream type the real client returns, so Fake is a drop-in
-// substitute for Client behind the API interface.
-func gameSliceStream(games []Game) *GameStream {
+// rawFor is the bytes the fake emits for g: RawGames if the test set
+// them, otherwise a plain re-encoding.
+func (f *Fake) rawFor(g Game) []byte {
+	if raw, ok := f.RawGames[g.ID]; ok {
+		return raw
+	}
+	b, _ := json.Marshal(g) // Game has no unmarshalable fields
+	return b
+}
+
+// gameSliceStream writes games as ndjson in memory and wraps them in the
+// same GameStream type the real client returns, so Fake is a drop-in
+// substitute for Client behind the API interface. Each line is rawFor's
+// bytes, so a test-supplied RawGames entry comes back through Raw()
+// exactly as the real stream would deliver Lichess's line.
+func (f *Fake) gameSliceStream(games []Game) *GameStream {
 	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
 	for _, g := range games {
-		_ = enc.Encode(g) // bytes.Buffer never fails to write
+		buf.Write(bytes.TrimSpace(f.rawFor(g)))
+		buf.WriteByte('\n')
 	}
 	return newGameStream(io.NopCloser(&buf))
 }
