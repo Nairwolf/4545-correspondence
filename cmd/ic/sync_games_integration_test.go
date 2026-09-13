@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -26,6 +27,13 @@ import (
 // boundaries for no real benefit at this size.
 func testQueries(t *testing.T) *gen.Queries {
 	t.Helper()
+	return gen.New(testTx(t))
+}
+
+// testTx is testQueries' transaction, for the tests that need to hand it
+// to runSyncGames directly or read rows no generated query exposes.
+func testTx(t *testing.T) pgx.Tx {
+	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL not set")
@@ -40,7 +48,7 @@ func testQueries(t *testing.T) *gen.Queries {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = tx.Rollback(ctx) })
 
-	return gen.New(tx)
+	return tx
 }
 
 func createUser(t *testing.T, q *gen.Queries, username string) gen.User {
@@ -233,4 +241,120 @@ func TestDoSyncGames_LichessErrorOnOnePlayerDoesNotFailTheWholeJob(t *testing.T)
 
 	_, err = q.GetPlayerStanding(ctx, badWhite.ID)
 	assert.Error(t, err) // the failed pairing was never touched
+}
+
+// recordedRun reads back the job_runs row runSyncGames wrote, found by
+// the river job id the test passed in (unique per test).
+func recordedRun(t *testing.T, tx pgx.Tx, riverJobID int64) (status string, errText *string, detail syncGamesStats) {
+	t.Helper()
+	var raw []byte
+	err := tx.QueryRow(
+		context.Background(),
+		"SELECT status::text, error, detail FROM job_runs WHERE river_job_id = $1",
+		riverJobID,
+	).Scan(&status, &errText, &raw)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(raw, &detail))
+	return status, errText, detail
+}
+
+func TestRunSyncGames_LichessUnreachableIsRecordedAsFailed(t *testing.T) {
+	// Before the B-2 fix this run was recorded as succeeded with no error
+	// and runSyncGames returned nil, so /health stayed green while Lichess
+	// was down.
+	tx := testTx(t)
+	q := gen.New(tx)
+	ctx := context.Background()
+
+	white := createUser(t, q, "downsyncwhite")
+	black := createUser(t, q, "downsyncblack")
+	gameID := "downsync1"
+	createPendingPairing(t, q, 80010, white, black, &gameID) // guarantees at least one call is attempted
+
+	fake := lichess.NewFake()
+	fake.Err = &lichess.APIError{StatusCode: 503, Message: "Service Unavailable"}
+
+	riverJobID := time.Now().UnixNano()
+	err := runSyncGames(ctx, tx, fake, &riverJobID)
+	require.Error(t, err, "a failed run must return an error so river retries it")
+
+	status, errText, detail := recordedRun(t, tx, riverJobID)
+	assert.Equal(t, "failed", status)
+	require.NotNil(t, errText)
+	assert.Contains(t, *errText, "Lichess calls failed")
+	assert.Contains(t, *errText, "Service Unavailable")
+	assert.Zero(t, detail.LichessCallsOK)
+	assert.Positive(t, detail.LichessCallsFailed)
+}
+
+func TestRunSyncGames_PartialLichessFailureSucceedsButRecordsTheError(t *testing.T) {
+	tx := testTx(t)
+	q := gen.New(tx)
+	ctx := context.Background()
+
+	goodWhite := createUser(t, q, "partialsyncwhite1")
+	goodBlack := createUser(t, q, "partialsyncblack1")
+	createPendingPairing(t, q, 80011, goodWhite, goodBlack, nil)
+	badWhite := createUser(t, q, "partialsyncwhite2")
+	badBlack := createUser(t, q, "partialsyncblack2")
+	createPendingPairing(t, q, 80012, badWhite, badBlack, nil)
+
+	fake := lichess.NewFake()
+	good := fakeGame("partialsync1", goodWhite, goodBlack, lichess.StatusMate, "white")
+	fake.Games[good.ID] = good
+	fake.UserGamesErrFor = map[string]error{
+		badWhite.LichessUserID: &lichess.APIError{StatusCode: 404, Message: "Not found"},
+	}
+
+	riverJobID := time.Now().UnixNano()
+	require.NoError(t, runSyncGames(ctx, tx, fake, &riverJobID))
+
+	status, errText, detail := recordedRun(t, tx, riverJobID)
+	assert.Equal(t, "succeeded", status)
+	require.NotNil(t, errText, "the failed call must still be visible on the run")
+	assert.Contains(t, *errText, badWhite.LichessUserID)
+	assert.Equal(t, 1, detail.LichessCallsFailed)
+	assert.Equal(t, 1, detail.PairingsMatched)
+}
+
+func TestDoSyncGames_DatabaseErrorAfterASuccessfulLichessCallIsFatal(t *testing.T) {
+	// The other half of B-2: a database write failing after one Lichess
+	// call had succeeded was discarded entirely. Here the re-check call
+	// succeeds, then ingesting the matched game fails inside Postgres
+	// (accuracy overflows numeric(5,2)) after its Lichess fetch completed.
+	//
+	// This drives doSyncGames rather than runSyncGames: the database
+	// error aborts the test transaction, so the job_runs row can't be
+	// written back inside it. How the result is recorded is covered by
+	// TestSyncGamesOutcome.
+	q := testQueries(t)
+	ctx := context.Background()
+
+	okWhite := createUser(t, q, "dberrsyncwhite1")
+	okBlack := createUser(t, q, "dberrsyncblack1")
+	okID := "dberrsync1"
+	createPendingPairing(t, q, 80013, okWhite, okBlack, &okID)
+
+	badWhite := createUser(t, q, "dberrsyncwhite2")
+	badBlack := createUser(t, q, "dberrsyncblack2")
+	createPendingPairing(t, q, 80014, badWhite, badBlack, nil)
+
+	fake := lichess.NewFake()
+	fake.Games[okID] = fakeGame(okID, okWhite, okBlack, lichess.StatusStarted, "")
+	bad := fakeGame("dberrsync2", badWhite, badBlack, lichess.StatusMate, "white")
+	overflow := 1_000_000
+	bad.Players.White.Analysis = &lichess.GamePlayerAnalysis{ACPL: 10, Accuracy: &overflow}
+	fake.Games[bad.ID] = bad
+
+	stats, err := doSyncGames(ctx, q, fake, settings.Defaults())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "numeric field overflow")
+	// Both the re-check and the fetch of the second white player's games
+	// completed before the write failed. Before the fix, any non-zero
+	// count here is exactly what made the database error disappear.
+	assert.Positive(t, stats.LichessCallsOK, "Lichess calls really did succeed before the write failed")
+
+	status, errMsg := syncGamesOutcome(stats, err)
+	assert.Equal(t, gen.JobRunStatusFailed, status)
+	require.NotNil(t, errMsg)
 }

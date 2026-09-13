@@ -38,6 +38,9 @@ type Fake struct {
 	// a caller's graceful-degradation path (spec §7.2/§11: a Lichess
 	// failure must not be fatal) without touching the live API.
 	UserGamesErrFor map[string]error
+
+	// Err, when set, makes every call fail with it — Lichess unreachable.
+	Err error
 }
 
 // NewFake returns an empty Fake ready for a test to populate.
@@ -48,6 +51,9 @@ func NewFake() *Fake {
 var _ API = (*Fake)(nil)
 
 func (f *Fake) UsersByID(ctx context.Context, ids []string) ([]User, error) {
+	if f.Err != nil {
+		return nil, f.Err
+	}
 	var out []User
 	for _, id := range ids {
 		if u, ok := f.Users[id]; ok {
@@ -62,6 +68,9 @@ func (f *Fake) UserGames(
 	username string,
 	opts UserGamesOptions,
 ) (*GameStream, error) {
+	if f.Err != nil {
+		return nil, f.Err
+	}
 	if err := f.UserGamesErrFor[username]; err != nil {
 		return nil, err
 	}
@@ -86,6 +95,9 @@ func (f *Fake) GamesByID(
 	ctx context.Context,
 	ids []string,
 ) (*GameStream, error) {
+	if f.Err != nil {
+		return nil, f.Err
+	}
 	var games []Game
 	for _, id := range ids {
 		if g, ok := f.Games[id]; ok {
@@ -96,6 +108,9 @@ func (f *Fake) GamesByID(
 }
 
 func (f *Fake) ExportGame(ctx context.Context, gameID string) (Game, []byte, error) {
+	if f.Err != nil {
+		return Game{}, nil, f.Err
+	}
 	g, ok := f.Games[gameID]
 	if !ok {
 		return Game{}, nil, &APIError{StatusCode: 404, Message: "Not found"}

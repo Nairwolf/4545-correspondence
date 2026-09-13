@@ -864,6 +864,7 @@ For each finished game:
 - Respect Lichess rate limits. Lichess's rule is "only make one request at a time": the client serialises all outbound calls. On HTTP 429, wait at least 60 seconds before a single retry, then let the job fail and be retried by the scheduler.
 - All outbound calls go through a single client with a shared limiter, timeouts, and bounded retries with exponential backoff.
 - A Lichess outage must degrade gracefully: the site keeps serving cached data, jobs retry, and admins are alerted rather than the system silently doing nothing.
+- **How a run's outcome is recorded.** A job that makes many Lichess calls (`sync-games` makes one per white player with an unmatched pairing) records a failed call and carries on with the rest. The run is `failed` if any database write fails (the run stops at that point) or if every Lichess call it attempted failed. Otherwise it is `succeeded`; if some calls failed, the run's error text still names them, so they are visible in the job log and in `/health`'s last error without turning the health check red for a single persistently failing account. A run with nothing to fetch has made no calls and has succeeded. A `failed` run returns an error to the scheduler so it is retried. *(Decided 2026-09-13.)*
 
 ### 7.3 Matching games to pairings without a game id
 
@@ -1137,5 +1138,6 @@ These were open and are now settled. Recorded here so they are not relitigated d
 ## 15. Changelog
 
 - **2026-09-07** — Lichess API verified against the OpenAPI definition (v2.0.169). Corrected export paths and options (§3.4, §7.1); documented bulk-pairing atomicity, limits and the `pairAt` ambiguity (§6.3); added pairing-anchored game matching (§7.3) and `manual_external` semantics (§4.1); reshaped `Game` (status column, rating-at-game, acpl, inferred draw subtypes, aborted games excluded); decided unrated constant, rating-at-game, no history import, round numbering, Stats deferral, tooling (§13). Phase 1 scope updated (§12).
+- **2026-09-13** — Recorded how a job run's outcome is decided (§7.2): database failures and total Lichess failure fail the run; partial Lichess failure succeeds but is named in the run's error text.
 - **2026-09-13** — Game export no longer requests `clocks=true` (§3.4, §7.1, §7.3): per-move clock data is meaningless for correspondence games and was only bloating `raw_payload`.
 - **2026-09-07** — Simplified §5.1 base rating: any correspondence rating (provisional or not) is now used ahead of classical; the earlier rule's extra branch preferring an *established* classical rating over a *provisional* correspondence one was dropped as unwarranted complexity (§5.1, §13).

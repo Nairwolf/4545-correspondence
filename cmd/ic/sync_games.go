@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
 	"github.com/nairwolf/4545-correspondence/internal/ingest"
@@ -30,6 +30,77 @@ type syncGamesStats struct {
 	GamesFinished      int `json:"games_finished"`
 	LichessCallsOK     int `json:"lichess_calls_ok"`
 	LichessCallsFailed int `json:"lichess_calls_failed"`
+
+	// LichessErrors holds the first few failed calls' messages, so the
+	// run's own row says what went wrong rather than only a count.
+	LichessErrors []string `json:"lichess_errors,omitempty"`
+}
+
+// maxRecordedLichessErrors caps LichessErrors: when Lichess is down,
+// every white player's call fails the same way and a hundred copies of
+// one message help nobody.
+const maxRecordedLichessErrors = 10
+
+// lichessOK records one Lichess call that completed, stream included.
+// Count only calls actually made: a run with nothing to fetch has made
+// no calls, and must not look like it had a successful one.
+func (s *syncGamesStats) lichessOK() { s.LichessCallsOK++ }
+
+// lichessFailed records one Lichess call that failed. The job carries
+// on with the rest of its work (spec §7.2: a Lichess outage degrades
+// gracefully); whether the run as a whole counts as failed is decided
+// once, at the end, by syncGamesOutcome.
+func (s *syncGamesStats) lichessFailed(call string, err error) {
+	s.LichessCallsFailed++
+	slog.Warn("sync-games: lichess call failed", "call", call, "error", err)
+	if len(s.LichessErrors) < maxRecordedLichessErrors {
+		s.LichessErrors = append(s.LichessErrors, call+": "+err.Error())
+	}
+}
+
+// syncGamesOutcome decides how a run is recorded in job_runs (spec §7.2):
+//
+//   - fatal is any error that is not a Lichess call failing — a database
+//     write, a query, a mapping error. It always fails the run: the data
+//     may be half-written and someone needs to know.
+//   - if every Lichess call the run attempted failed, the run failed:
+//     Lichess is unreachable and the run achieved nothing.
+//   - otherwise the run succeeded. If some Lichess calls failed, the
+//     error text still says which, so the failure is visible on /jobs
+//     and in /health's last_error — without turning /health red for,
+//     say, one renamed account whose game list 404s every hour.
+//
+// A run that attempted no Lichess call at all (nothing pending) with no
+// fatal error has succeeded.
+func syncGamesOutcome(stats syncGamesStats, fatal error) (gen.JobRunStatus, *string) {
+	status := gen.JobRunStatusSucceeded
+	var problems []string
+
+	if fatal != nil {
+		status = gen.JobRunStatusFailed
+		problems = append(problems, fatal.Error())
+	}
+	if stats.LichessCallsFailed > 0 {
+		if stats.LichessCallsOK == 0 {
+			status = gen.JobRunStatusFailed
+		}
+		recorded := strings.Join(stats.LichessErrors, "; ")
+		if stats.LichessCallsFailed > len(stats.LichessErrors) {
+			recorded += "; …"
+		}
+		problems = append(problems, fmt.Sprintf(
+			"%d of %d Lichess calls failed: %s",
+			stats.LichessCallsFailed,
+			stats.LichessCallsFailed+stats.LichessCallsOK,
+			recorded,
+		))
+	}
+
+	if len(problems) == 0 {
+		return status, nil
+	}
+	msg := strings.Join(problems, "; ")
+	return status, &msg
 }
 
 // runSyncGames implements the hourly sync-games job (spec §3.4, §7.3):
@@ -39,32 +110,34 @@ type syncGamesStats struct {
 // already known to belong to a pairing — that's the whole point of
 // matching being pairing-anchored (spec §7.3): a member's other
 // correspondence games are never looked at.
-func runSyncGames(ctx context.Context, pool *pgxpool.Pool, client lichess.API, riverJobID *int64) error {
-	q := gen.New(pool)
+//
+// db is a pool in production; tests pass a transaction so the job_runs
+// row it writes can be read back and rolled away.
+func runSyncGames(
+	ctx context.Context,
+	db gen.DBTX,
+	client lichess.API,
+	riverJobID *int64,
+) error {
+	q := gen.New(db)
 
 	jobRun, err := q.CreateJobRun(ctx, gen.CreateJobRunParams{JobName: "sync-games", RiverJobID: riverJobID})
 	if err != nil {
 		return fmt.Errorf("sync-games: create job run: %w", err)
 	}
 
-	cfg, err := settings.Load(ctx, q)
-	if err != nil {
-		return fmt.Errorf("sync-games: load settings: %w", err)
+	// Everything after CreateJobRun ends in FinishJobRun, including a
+	// settings failure — otherwise the row would sit at "running".
+	var stats syncGamesStats
+	cfg, fatal := settings.Load(ctx, q)
+	if fatal != nil {
+		fatal = fmt.Errorf("load settings: %w", fatal)
+	} else {
+		stats, fatal = doSyncGames(ctx, q, client, cfg)
 	}
 
-	stats, jobErr := doSyncGames(ctx, q, client, cfg)
-
+	status, errMsg := syncGamesOutcome(stats, fatal)
 	detail, _ := json.Marshal(stats)
-	status := gen.JobRunStatusSucceeded
-	var errMsg *string
-	// "failed" only when nothing at all succeeded (spec §7): a job that
-	// made progress on some pairings despite one bad Lichess call is
-	// still a successful run.
-	if jobErr != nil && stats.LichessCallsOK == 0 {
-		status = gen.JobRunStatusFailed
-		msg := jobErr.Error()
-		errMsg = &msg
-	}
 	itemsProcessed := stats.GamesFinished + stats.PairingsMatched + stats.InProgressChecked
 	if finishErr := q.FinishJobRun(ctx, gen.FinishJobRunParams{
 		ID:             jobRun.ID,
@@ -76,32 +149,42 @@ func runSyncGames(ctx context.Context, pool *pgxpool.Pool, client lichess.API, r
 		slog.Error("sync-games: record job outcome", "error", finishErr)
 	}
 
-	if status == gen.JobRunStatusFailed {
-		return fmt.Errorf("sync-games: %w", jobErr)
+	// A failed run returns an error so river retries it (spec §7.2).
+	if fatal != nil {
+		return fmt.Errorf("sync-games: %w", fatal)
 	}
-	slog.Info("sync-games complete",
+	if status == gen.JobRunStatusFailed {
+		return fmt.Errorf("sync-games: %s", *errMsg)
+	}
+
+	logArgs := []any{
 		"in_progress_checked", stats.InProgressChecked,
 		"pairings_matched", stats.PairingsMatched,
 		"pairings_ambiguous", stats.PairingsAmbiguous,
 		"games_finished", stats.GamesFinished,
-	)
+		"lichess_calls_failed", stats.LichessCallsFailed,
+	}
+	if errMsg != nil {
+		slog.Warn("sync-games complete with Lichess failures", logArgs...)
+	} else {
+		slog.Info("sync-games complete", logArgs...)
+	}
 	return nil
 }
 
+// doSyncGames does the work of one run. The error it returns is always
+// fatal — a database or mapping failure, after which it stops. A Lichess
+// call failing is not returned: it is recorded on stats and the run
+// carries on with the next pairing (see syncGamesOutcome).
 func doSyncGames(ctx context.Context, q *gen.Queries, client lichess.API, cfg settings.Settings) (syncGamesStats, error) {
 	var stats syncGamesStats
 
 	if err := recheckInProgressGames(ctx, q, client, cfg, &stats); err != nil {
-		slog.Warn("sync-games: re-check in-progress games", "error", err)
-		stats.LichessCallsFailed++
-	} else {
-		stats.LichessCallsOK++
+		return stats, fmt.Errorf("re-check in-progress games: %w", err)
 	}
-
 	if err := matchPendingPairings(ctx, q, client, cfg, &stats); err != nil {
-		return stats, err
+		return stats, fmt.Errorf("match pending pairings: %w", err)
 	}
-
 	return stats, nil
 }
 
@@ -128,10 +211,14 @@ func recheckInProgressGames(ctx context.Context, q *gen.Queries, client lichess.
 		byGameID[*p.LichessGameID] = p
 		ids = append(ids, *p.LichessGameID)
 	}
+	if len(ids) == 0 {
+		return nil
+	}
 
 	stream, err := client.GamesByID(ctx, ids)
 	if err != nil {
-		return fmt.Errorf("fetch games by id: %w", err)
+		stats.lichessFailed("fetch games by id", err)
+		return nil
 	}
 	defer stream.Close()
 
@@ -160,7 +247,14 @@ func recheckInProgressGames(ctx context.Context, q *gen.Queries, client lichess.
 			stats.GamesFinished++
 		}
 	}
-	return stream.Err()
+	// A stream that breaks partway still keeps every game synced before
+	// the break; the rest are picked up next run.
+	if err := stream.Err(); err != nil {
+		stats.lichessFailed("read games by id", err)
+		return nil
+	}
+	stats.lichessOK()
+	return nil
 }
 
 // matchPendingPairings is spec §7.3 step 2: find the Lichess game for
@@ -203,8 +297,7 @@ func matchPendingPairings(ctx context.Context, q *gen.Queries, client lichess.AP
 			Finished: true,
 		})
 		if err != nil {
-			slog.Warn("sync-games: fetch games for white player", "white", whiteID, "error", err)
-			stats.LichessCallsFailed++
+			stats.lichessFailed("fetch games for "+whiteID, err)
 			stats.PairingsPending += len(pairings)
 			continue
 		}
@@ -218,12 +311,11 @@ func matchPendingPairings(ctx context.Context, q *gen.Queries, client lichess.AP
 		streamErr := stream.Err()
 		stream.Close()
 		if streamErr != nil {
-			slog.Warn("sync-games: read games for white player", "white", whiteID, "error", streamErr)
-			stats.LichessCallsFailed++
+			stats.lichessFailed("read games for "+whiteID, streamErr)
 			stats.PairingsPending += len(pairings)
 			continue
 		}
-		stats.LichessCallsOK++
+		stats.lichessOK()
 
 		matchCandidates := toMatchingCandidates(candidates)
 		byGameID := make(map[string]lichess.Game, len(candidates))

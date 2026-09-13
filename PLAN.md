@@ -390,7 +390,7 @@ Both wrap their writes in one `pgx.Tx` and validate every username up front, rep
    Games with status `aborted`/`noStart` are candidates for matching (so the pairing can be marked `failed`) but are never inserted into `games`.
 3. `ingest.Upsert(game, pairing)`: map → row, `INSERT … ON CONFLICT (lichess_game_id) DO UPDATE` (payload, status, result, finished fields); update `pairings.status` (`in_progress` / `completed` / `failed`). Idempotent — re-running on the same JSON changes nothing but `updated_at`.
 4. For every game that transitioned to `finished` in this run, recompute both players' `player_standings` (`standings.Recompute(userID)` = one SQL aggregate + last-k query + scoring). Level-up detection compares old/new `level` and sets `last_level_up_at` / `last_level_up_round`.
-5. Write the `job_runs` row: pairings checked / matched / ambiguous / still pending, games finished, errors. A Lichess error on one call is logged and counted and the job carries on; it reports `failed` only if every call failed.
+5. Write the `job_runs` row: pairings checked / matched / ambiguous / still pending, games finished, errors. A Lichess error on one call is logged and counted and the job carries on; the run reports `failed` if any database write failed or if every Lichess call failed, and a partially failed run still carries the failed calls in its `error` text (spec §7.2; as first built, the "every call failed" rule was the only rule and database errors could be swallowed — see Post-review fixes, B-2).
 
 No per-member cursor is needed: every search is anchored on a pairing's `pair_at`.
 
@@ -569,6 +569,45 @@ re-encoding. Games ingested before this fix keep their lossy payload;
 games self-heal on their next hourly poll, but finished games are never
 re-fetched and would need a one-off pass through the still-unbuilt
 `refetch-game` command if the old rows ever matter.
+
+**B-2 — `sync-games` no longer reports success when it failed.** As
+built, three things combined to hide failures: per-player Lichess errors
+were swallowed and never reached the outcome; the re-check step counted
+a successful Lichess call even when it made none; and a database error
+was discarded whenever that (possibly phantom) success count was
+non-zero. Lichess being fully down, or an upsert failing mid-run, both
+produced `status=succeeded, error=NULL`. Now (`cmd/ic/sync_games.go`):
+
+- Lichess call failures go through `stats.lichessFailed`, which counts
+  them, logs them, and keeps the first ten messages in
+  `detail.lichess_errors`. They are never returned as errors, so the
+  run carries on.
+- Every other error — a query, an upsert, a mapping failure — is
+  returned from `doSyncGames` as fatal, and the run stops there.
+- `lichessOK` is counted only after a call and its stream both
+  complete; the re-check makes no call when no pairing has a game id.
+- `syncGamesOutcome(stats, fatal)` is the single, pure place the rule in
+  spec §7.2 lives: fatal → `failed`; every attempted call failed →
+  `failed`; otherwise `succeeded`, with any failed calls still named in
+  `error`. A failed run returns an error so river retries it.
+- A `settings.Load` failure now also goes through `FinishJobRun` instead
+  of leaving the row at `running` (the `sync-games` half of REVIEW S-12).
+- `runSyncGames` takes `gen.DBTX` instead of `*pgxpool.Pool`, so an
+  integration test can pass its transaction and read the `job_runs` row
+  back.
+
+Tests: a unit table for `syncGamesOutcome` covering each branch,
+including the original bug (a database error after a successful call);
+the message cap; and three integration tests — Lichess unreachable is
+recorded as `failed` with the error text and `runSyncGames` returns an
+error; a partial Lichess failure is recorded as `succeeded` with the
+failed player named in `error`; and a real Postgres error (accuracy
+overflowing `numeric(5,2)`) after a successful re-check call is fatal.
+`lichess.Fake` gained `Err`, which makes every call fail.
+
+Not covered here: the context the final `FinishJobRun` uses can already
+be cancelled by river's job timeout (REVIEW B-3), in which case the row
+still stays at `running`. That is B-3's fix, not this one.
 
 ---
 
