@@ -251,9 +251,11 @@ type UserGamesOptions struct {
 	Sort     string // "dateAsc" | "dateDesc"; Lichess defaults to dateDesc
 }
 
-// UserGames implements API. opening, accuracy and clocks are always
-// requested; evals is deliberately never requested (spec §3.4/§7.1: no
-// metric uses the per-ply analysis array, and it bloats every response).
+// UserGames implements API. opening and accuracy are always requested;
+// evals and clocks are deliberately never requested (spec §3.4/§7.1: no
+// metric uses the per-ply analysis array, and per-move clock data is
+// meaningless for a days-per-move game — both would only bloat
+// raw_payload).
 func (c *Client) UserGames(
 	ctx context.Context,
 	username string,
@@ -276,7 +278,6 @@ func (c *Client) UserGames(
 	}
 	q.Set("opening", "true")
 	q.Set("accuracy", "true")
-	q.Set("clocks", "true")
 
 	resp, err := c.do(
 		ctx,
@@ -310,7 +311,7 @@ func (c *Client) GamesByID(
 		ids = ids[n:]
 	}
 
-	q := url.Values{"opening": {"true"}, "accuracy": {"true"}, "clocks": {"true"}}
+	q := url.Values{"opening": {"true"}, "accuracy": {"true"}}
 
 	idx := 0
 	fetch := func() (io.ReadCloser, error) {
@@ -351,7 +352,7 @@ func (c *Client) GamesByID(
 // game's id already, from a pairing or a batch export, and use GamesByID
 // instead.
 func (c *Client) ExportGame(ctx context.Context, gameID string) (Game, error) {
-	q := url.Values{"opening": {"true"}, "accuracy": {"true"}, "clocks": {"true"}}
+	q := url.Values{"opening": {"true"}, "accuracy": {"true"}}
 	resp, err := c.do(
 		ctx,
 		http.MethodGet,

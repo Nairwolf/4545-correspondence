@@ -113,7 +113,7 @@ func TestGamesByID_ChainsAcrossBatches(t *testing.T) {
 		// is why this assertion now exists.
 		assert.Equal(t, "true", r.URL.Query().Get("opening"))
 		assert.Equal(t, "true", r.URL.Query().Get("accuracy"))
-		assert.Equal(t, "true", r.URL.Query().Get("clocks"))
+		assert.Empty(t, r.URL.Query().Get("clocks"), "clocks is deliberately never requested (spec §3.4)")
 
 		body, _ := io.ReadAll(r.Body)
 		ids := strings.Split(string(body), ",")

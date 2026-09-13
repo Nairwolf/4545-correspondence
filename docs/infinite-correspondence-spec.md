@@ -185,7 +185,7 @@ Two distinct sync jobs (§7):
 - **Ongoing detection.** For each published pairing, determine whether the Lichess game exists and is in progress. When games are created via bulk pairing, the game IDs are returned by the API at creation time (`GET /api/bulk-pairing/{id}` returns the pairing with its `games` array of `{id, white, black}`), so ongoing games are known immediately without polling for discovery. Polling is only needed for fallback-path challenge games and for detecting completion.
 - **Completion sync.** Export finished games and ingest full detail. For any pairing with a known game ID, use `POST /api/games/export/_ids` (up to 300 comma-separated IDs per call, `Accept: application/x-ndjson`) — one call re-checks every in-progress game. `GET /api/bulk-pairing/{id}/games` streams the games of a bulk pairing. For a pairing **without** a game ID (fallback challenge, or an externally created game — §7.3), search `GET /api/games/user/{username}` for the white player with `perfType=correspondence&rated=true&since=<round pair_at>` and match on opponent, colour, variant and `daysPerTurn`. Single-game export, when needed, is `GET /game/export/{gameId}` (note: **not** under `/api/`).
 
-Export options: `opening=true&accuracy=true&clocks=true`. Do **not** request `evals=true` — it appends a per-ply analysis array that no metric uses; `acpl` and `accuracy` come from `players.{white,black}.analysis` without it.
+Export options: `opening=true&accuracy=true`. Do **not** request `evals=true` — it appends a per-ply analysis array that no metric uses; `acpl` and `accuracy` come from `players.{white,black}.analysis` without it. Do **not** request `clocks=true` either: it appends a per-move array of remaining time that is meaningless for correspondence games (the clock is days per move, not a running clock) and nothing in this spec reads it. Both omissions are deliberate — they keep `raw_payload` (§7.1) small without losing anything a later phase could want. *(Decided 2026-09-13.)*
 
 **Only games that match a `Pairing` are ingested.** Players play correspondence games outside the league, including against other members; a game is a league game if and only if it belongs to a pairing. Polling members' game lists without a pairing to match against is not a valid discovery mechanism.
 
@@ -852,7 +852,7 @@ Both `sync-games` and `generate-round` must also be **manually triggerable from 
 
 For each finished game:
 
-1. Fetch with `clocks=true`, `accuracy=true`, `opening=true` (not `evals`, see §3.4).
+1. Fetch with `accuracy=true`, `opening=true` (not `evals`, not `clocks` — see §3.4).
 2. Store the complete response in `Game.raw_payload`. This is non-negotiable — it allows every derived metric to be recomputed later without re-fetching, which the spreadsheet could not do.
 3. Map to the normalised `Game` columns. For a bare `draw` status, replay `moves` with a chess library to classify threefold / fifty-move / insufficient material; anything else is `draw_agreement`; an unparsable move list yields `draw_other`.
 4. Upsert on `lichess_game_id`. In-progress games are stored too (`status = in_progress`, result null) so the Overview page and the `ongoing` count read from the same table; the row is updated in place when the game finishes.
@@ -869,7 +869,7 @@ For each finished game:
 
 A pairing can lack a `lichess_game_id` in two cases: a fallback challenge (§3.3) that has not yet been accepted, and a `manual_external` pairing — in particular every pairing imported from the spreadsheet during the transition (§12, Phase 1), when the league is still being paired by the sheet and games are still being created by hand.
 
-For each such pairing, `sync-games` fetches the **white** player's games with `GET /api/games/user/{white}?perfType=correspondence&rated=true&since=<round.pair_at − 1 day>&ongoing=true&finished=true&opening=true&accuracy=true&clocks=true` and keeps candidates where:
+For each such pairing, `sync-games` fetches the **white** player's games with `GET /api/games/user/{white}?perfType=correspondence&rated=true&since=<round.pair_at − 1 day>&ongoing=true&finished=true&opening=true&accuracy=true` and keeps candidates where:
 
 - `players.white.user.id` is the pairing's white player and `players.black.user.id` its black player (colours must match — a game with reversed colours is not this pairing),
 - `variant = standard`, `rated = true`, `daysPerTurn = pairing.days_per_move`,
@@ -1137,4 +1137,5 @@ These were open and are now settled. Recorded here so they are not relitigated d
 ## 15. Changelog
 
 - **2026-09-07** — Lichess API verified against the OpenAPI definition (v2.0.169). Corrected export paths and options (§3.4, §7.1); documented bulk-pairing atomicity, limits and the `pairAt` ambiguity (§6.3); added pairing-anchored game matching (§7.3) and `manual_external` semantics (§4.1); reshaped `Game` (status column, rating-at-game, acpl, inferred draw subtypes, aborted games excluded); decided unrated constant, rating-at-game, no history import, round numbering, Stats deferral, tooling (§13). Phase 1 scope updated (§12).
+- **2026-09-13** — Game export no longer requests `clocks=true` (§3.4, §7.1, §7.3): per-move clock data is meaningless for correspondence games and was only bloating `raw_payload`.
 - **2026-09-07** — Simplified §5.1 base rating: any correspondence rating (provisional or not) is now used ahead of classical; the earlier rule's extra branch preferring an *established* classical rating over a *provisional* correspondence one was dropped as unwarranted complexity (§5.1, §13).
