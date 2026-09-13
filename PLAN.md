@@ -422,8 +422,11 @@ The "match pending pairings" path (`GET /api/games/user/{username}`) could not b
 `serve` now starts the two long-running concerns and blocks until a
 signal: the river job runner and an HTTP server. `signal.NotifyContext`
 (SIGINT/SIGTERM) cancels the root context; shutdown then drains the HTTP
-server and stops river under a fresh 30s-bounded context so a running
-job gets to finish. Verified locally end to end: `ic serve` against the
+server and stops river under a fresh 30s-bounded context. *(Corrected
+2026-09-13, REVIEW B-3: as first built this did not let a running job
+finish — with no `SoftStopTimeout`, cancelling river's start context
+cancelled the job immediately. River now soft-stops with a 20s grace; see
+"Post-review fixes".)* Verified locally end to end: `ic serve` against the
 dev Postgres logs `River client started` and `http listening`, `GET
 /healthz` returns 200 (`pool.Ping`) / 404 for anything else, and a
 SIGTERM produces a clean `River client stopped` with exit 0.
@@ -605,9 +608,61 @@ failed player named in `error`; and a real Postgres error (accuracy
 overflowing `numeric(5,2)`) after a successful re-check call is fatal.
 `lichess.Fake` gained `Err`, which makes every call fail.
 
-Not covered here: the context the final `FinishJobRun` uses can already
-be cancelled by river's job timeout (REVIEW B-3), in which case the row
-still stays at `running`. That is B-3's fix, not this one.
+The context the final `FinishJobRun` uses could still be cancelled by
+river's job timeout, leaving the row at `running`; that is fixed under
+B-3 below.
+
+**B-3 — timed-out and interrupted runs are recorded, not left `running`.**
+River v0.47 defaults `JobTimeout` to one minute, and a single 429 costs a
+60s wait on its own, so real `sync-games` runs would have been cancelled
+mid-flight. Every job body then wrote its outcome on that cancelled
+context, the write failed, and the `job_runs` row stayed `running`
+forever — `/health` never went red and `/jobs` showed a row that never
+resolved. The same happened on every SIGTERM: without a `SoftStopTimeout`
+river treats cancelling its start context as `StopAndCancel`, so the 30s
+drain Step 7 described never applied to jobs. Now:
+
+- `internal/jobs` sets `JobTimeout = 15 * time.Minute` (exported) — a
+  429 wait plus full 300-id batches for several white players, with
+  headroom — and `softStopTimeout = 20s`, under serve's 30s shutdown
+  deadline because the grace runs concurrently with the HTTP drain. River
+  derives its stuck-job rescue window from `JobTimeout`, so nothing else
+  is configured.
+- All three job bodies call `FinishJobRun(context.WithoutCancel(ctx), …)`.
+  That is three identical sites with the same comment — one more argument
+  for REVIEW S-11's single `runJob` wrapper, which stays a separate change.
+- `runRecompute` loads settings inside the region that always ends in
+  `FinishJobRun`, like `runSyncGames` already did (the `recompute` half of
+  REVIEW S-12), and takes `gen.DBTX` so a test can pass its transaction.
+- `runSyncGames` treats a cancelled context as fatal (`interrupted: …`).
+  Not in the original plan for this fix, found by its integration test: a
+  cancellation after one successful Lichess call turned every remaining
+  call into a "context canceled" failure, which `syncGamesOutcome` then
+  forgave as a partial Lichess failure and recorded as `succeeded` — with
+  pairings left unprocessed.
+- The Lichess client's 429 wait selects on `ctx.Done()` and returns
+  without retrying when the context ends. `WithSleepFunc` keeps its
+  signature. `Retry-After` (REVIEW N-11) and the flat HTTP client timeout
+  (S-13) are untouched.
+- `serve` runs a new `FailInterruptedJobRuns` query after opening the pool
+  and before starting river: any row still `running` belonged to a process
+  that died, and is marked `failed` with "interrupted: the server restarted
+  before this run finished" (logged at Warn with the count). Known
+  limitation: a one-shot `ic sync-games` that happens to be running when
+  `serve` starts has its row marked failed too — operator error, and rare.
+  No "running too long" rule was added to `/health`: with the above, a row
+  can only stay `running` while the process is alive if the database write
+  itself fails, which `/health` already reports through `pool.Ping`.
+
+Tests: a unit test that a 429 wait of an hour returns within a second
+when the context's 50ms deadline passes, with `context.DeadlineExceeded`
+and no retry; and three integration tests — `runSyncGames` whose context
+is cancelled at its first user-games call (after a successful re-check
+call) records `failed` with "interrupted: context canceled"; the startup
+sweep marks a `running` row failed with the message and `finished_at` set
+while leaving a `succeeded` row alone; and a malformed `pairing.last_k`
+setting makes `runRecompute` record `failed` with "load settings" instead
+of leaving the row `running`.
 
 ---
 

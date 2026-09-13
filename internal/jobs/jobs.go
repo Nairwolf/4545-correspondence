@@ -9,6 +9,12 @@
 // the Phase 4 pairing scheduler, not these sync workers, and wall-clock
 // alignment ("nightly", "daily") arrives with that scheduler; a plain
 // interval from process start is enough to keep standings fresh now.
+//
+// A job that overruns JobTimeout has its context cancelled; the handler
+// records the run as failed with that reason and river retries it up to
+// MaxAttempts. Shutdown is soft: cancelling the context passed to Start
+// gives a running job softStopTimeout to finish before its own context
+// is cancelled, and it still records an outcome either way.
 package jobs
 
 import (
@@ -21,6 +27,25 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 )
+
+// JobTimeout bounds a single run. River's own default is one minute,
+// which a real sync-games run can exceed without anything being wrong:
+// a 429 costs a 60s wait on its own, and a full 300-id batch streams for
+// 10-15s at Lichess's 20-30 games/s, once per white player with an
+// unmatched pairing. Fifteen minutes is the worst plausible run with
+// headroom; past it something is genuinely stuck and the run should be
+// recorded as failed rather than held open. It is exported so serve's
+// startup sweep can explain itself in the same terms.
+const JobTimeout = 15 * time.Minute
+
+// softStopTimeout is the grace a running job gets when the context
+// passed to Start is cancelled (serve's SIGTERM). Without it river
+// cancels the work context immediately, which is StopAndCancel in all
+// but name. It must stay well under serve's 30s shutdown deadline: the
+// grace runs concurrently with the HTTP drain, and what follows it — the
+// job's context being cancelled, its outcome row written, Stop
+// returning — has to fit in what's left.
+const softStopTimeout = 20 * time.Second
 
 // Handler runs one periodic job to completion. It receives river's own
 // job ID so the handler can record it on the job_runs row
@@ -49,7 +74,10 @@ func (recomputeArgs) Kind() string      { return "recompute-aggregates" }
 
 // NewClient builds the river client `serve` runs: one queue, one worker
 // at a time (Lichess wants a single request at a time — spec §3.4), and
-// the three periodic jobs. The caller starts and stops it.
+// the three periodic jobs. The caller starts and stops it. Runs are
+// bounded by JobTimeout and shutdown is soft (see both constants);
+// river derives its own stuck-job rescue window from JobTimeout, so
+// RescueStuckJobsAfter needs no separate setting.
 func NewClient(pool *pgxpool.Pool, h Handlers, logger *slog.Logger) (*river.Client[pgx.Tx], error) {
 	workers := river.NewWorkers()
 	river.AddWorker(workers, workerFor(h.SyncGames, syncGamesArgs{}))
@@ -57,8 +85,10 @@ func NewClient(pool *pgxpool.Pool, h Handlers, logger *slog.Logger) (*river.Clie
 	river.AddWorker(workers, workerFor(h.Recompute, recomputeArgs{}))
 
 	return river.NewClient(riverpgxv5.New(pool), &river.Config{
-		Logger:      logger,
-		MaxAttempts: 3,
+		Logger:          logger,
+		MaxAttempts:     3,
+		JobTimeout:      JobTimeout,
+		SoftStopTimeout: softStopTimeout,
 		Queues: map[string]river.QueueConfig{
 			river.QueueDefault: {MaxWorkers: 1},
 		},

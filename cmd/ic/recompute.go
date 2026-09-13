@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
 	"github.com/nairwolf/4545-correspondence/internal/settings"
 	"github.com/nairwolf/4545-correspondence/internal/standings"
@@ -18,20 +16,26 @@ import (
 // from the games table, as a self-healing backstop against any drift in
 // the incremental recompute sync-games does. It reads nothing from
 // Lichess.
-func runRecompute(ctx context.Context, pool *pgxpool.Pool, riverJobID *int64) error {
-	q := gen.New(pool)
+//
+// db is a pool in production; tests pass a transaction so the job_runs
+// row it writes can be read back and rolled away.
+func runRecompute(ctx context.Context, db gen.DBTX, riverJobID *int64) error {
+	q := gen.New(db)
 
 	jobRun, err := q.CreateJobRun(ctx, gen.CreateJobRunParams{JobName: "recompute-aggregates", RiverJobID: riverJobID})
 	if err != nil {
 		return fmt.Errorf("recompute-aggregates: create job run: %w", err)
 	}
 
-	cfg, err := settings.Load(ctx, q)
-	if err != nil {
-		return fmt.Errorf("recompute-aggregates: load settings: %w", err)
+	// Everything after CreateJobRun ends in FinishJobRun, including a
+	// settings failure — otherwise the row would sit at "running".
+	var count int
+	cfg, jobErr := settings.Load(ctx, q)
+	if jobErr != nil {
+		jobErr = fmt.Errorf("load settings: %w", jobErr)
+	} else {
+		count, jobErr = standings.RecomputeAll(ctx, q, cfg)
 	}
-
-	count, jobErr := standings.RecomputeAll(ctx, q, cfg)
 
 	detail, _ := json.Marshal(map[string]int{"players_recomputed": count})
 	status := gen.JobRunStatusSucceeded
@@ -41,7 +45,11 @@ func runRecompute(ctx context.Context, pool *pgxpool.Pool, riverJobID *int64) er
 		msg := jobErr.Error()
 		errMsg = &msg
 	}
-	if finishErr := q.FinishJobRun(ctx, gen.FinishJobRunParams{
+	// The outcome row is written under a context that cannot be
+	// cancelled: the work may have ended *because* ctx was cancelled
+	// (river's job timeout, or shutdown), and a run that leaves its row
+	// at "running" is exactly the silent failure spec §7 rules out.
+	if finishErr := q.FinishJobRun(context.WithoutCancel(ctx), gen.FinishJobRunParams{
 		ID:             jobRun.ID,
 		Status:         status,
 		ItemsProcessed: int32(count),

@@ -168,6 +168,29 @@ func TestDo_RetriesOnce429ThenSucceeds(t *testing.T) {
 	assert.Equal(t, "ok", users[0].ID)
 }
 
+func TestDo_429WaitAbortsWhenContextIsCancelled(t *testing.T) {
+	// The wait is an hour, so only a context-aware sleep can return
+	// promptly — and it must not spend a second attempt on a context
+	// that is already done.
+	calls := 0
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusTooManyRequests)
+	}, WithRetryWait(time.Hour))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := client.UsersByID(ctx, []string{"x"})
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Equal(t, 1, calls, "the retry must not be attempted")
+	assert.Less(t, elapsed, time.Second, "the wait must abort on cancellation")
+}
+
 func TestDo_ReturnsAPIErrorOnNon2xx(t *testing.T) {
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

@@ -37,7 +37,11 @@ func runRefreshRatings(ctx context.Context, pool *pgxpool.Pool, client lichess.A
 		msg := jobErr.Error()
 		errMsg = &msg
 	}
-	if finishErr := q.FinishJobRun(ctx, gen.FinishJobRunParams{
+	// The outcome row is written under a context that cannot be
+	// cancelled: the work may have ended *because* ctx was cancelled
+	// (river's job timeout, or shutdown), and a run that leaves its row
+	// at "running" is exactly the silent failure spec §7 rules out.
+	if finishErr := q.FinishJobRun(context.WithoutCancel(ctx), gen.FinishJobRunParams{
 		ID:             jobRun.ID,
 		Status:         status,
 		ItemsProcessed: int32(inserted),

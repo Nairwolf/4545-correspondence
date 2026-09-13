@@ -358,3 +358,56 @@ func TestDoSyncGames_DatabaseErrorAfterASuccessfulLichessCallIsFatal(t *testing.
 	assert.Equal(t, gen.JobRunStatusFailed, status)
 	require.NotNil(t, errMsg)
 }
+
+// cancellingLichess cancels the job's context the moment the job makes
+// its first Lichess call — the shape of river's job timeout firing, or a
+// SIGTERM arriving, mid-run.
+type cancellingLichess struct {
+	lichess.API
+	cancel context.CancelFunc
+}
+
+func (c cancellingLichess) UserGames(
+	ctx context.Context,
+	username string,
+	opts lichess.UserGamesOptions,
+) (*lichess.GameStream, error) {
+	c.cancel()
+	return nil, ctx.Err()
+}
+
+func TestRunSyncGames_CancelledContextStillRecordsTheOutcome(t *testing.T) {
+	// Before the B-3 fix FinishJobRun ran on the cancelled context, failed,
+	// and left the row at "running" — visible forever on /health and /jobs.
+	// The transaction itself is opened on context.Background(), so what this
+	// proves is the context.WithoutCancel around the final write.
+	//
+	// The re-check call succeeds before the cancellation, so the run is
+	// also proven to be failed rather than forgiven as a partial Lichess
+	// failure: it stopped with pairings left unprocessed.
+	tx := testTx(t)
+	q := gen.New(tx)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	white := createUser(t, q, "cancelsyncwhite")
+	black := createUser(t, q, "cancelsyncblack")
+	knownID := "cancelsync1"
+	createPendingPairing(t, q, 80020, white, black, &knownID)
+	createPendingPairing(t, q, 80021, white, black, nil)
+
+	fake := lichess.NewFake()
+	fake.Games[knownID] = fakeGame(knownID, white, black, lichess.StatusStarted, "")
+	client := cancellingLichess{API: fake, cancel: cancel}
+
+	riverJobID := time.Now().UnixNano()
+	err := runSyncGames(ctx, tx, client, &riverJobID)
+	require.Error(t, err, "a cancelled run must return an error so river retries it")
+
+	status, errText, detail := recordedRun(t, tx, riverJobID)
+	assert.Equal(t, "failed", status)
+	require.NotNil(t, errText)
+	assert.Contains(t, *errText, "interrupted: context canceled")
+	assert.Positive(t, detail.LichessCallsOK)
+	assert.Positive(t, detail.LichessCallsFailed)
+}

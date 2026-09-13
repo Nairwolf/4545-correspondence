@@ -69,7 +69,11 @@ type Client struct {
 	// ever tripping a 429 in the first place.
 	mu sync.Mutex
 
-	sleep     func(time.Duration) // injected in tests to avoid a real 60s wait
+	// sleep is how the client waits out a 429. It takes a context and
+	// returns its error on cancellation so a shutdown — or river's job
+	// timeout — doesn't have to wait a full minute for a retry nobody
+	// is going to use. Tests inject a no-op that records the duration.
+	sleep     func(ctx context.Context, d time.Duration) error
 	retryWait time.Duration
 }
 
@@ -86,7 +90,15 @@ func WithHTTPClient(hc *http.Client) Option { return func(c *Client) { c.httpCli
 
 // WithSleepFunc overrides how the client waits out a 429 — tests inject
 // a no-op that just records the requested duration instead of sleeping.
-func WithSleepFunc(f func(time.Duration)) Option { return func(c *Client) { c.sleep = f } }
+// A test wait is instantaneous, so f needs no context and cannot fail.
+func WithSleepFunc(f func(time.Duration)) Option {
+	return func(c *Client) {
+		c.sleep = func(_ context.Context, d time.Duration) error {
+			f(d)
+			return nil
+		}
+	}
+}
 
 // WithRetryWait overrides how long the client waits after a 429 before
 // retrying once (default 60s, per spec §7.2).
@@ -100,13 +112,26 @@ func New(token string, opts ...Option) *Client {
 		baseURL:    defaultBaseURL,
 		token:      token,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
-		sleep:      time.Sleep,
+		sleep:      sleepUnlessCancelled,
 		retryWait:  60 * time.Second,
 	}
 	for _, opt := range opts {
 		opt(c)
 	}
 	return c
+}
+
+// sleepUnlessCancelled is the default 429 wait: d, or ctx's error if the
+// context is done first.
+func sleepUnlessCancelled(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 var _ API = (*Client)(nil)
@@ -175,7 +200,12 @@ func (c *Client) do(
 
 	if resp.StatusCode == http.StatusTooManyRequests {
 		resp.Body.Close()
-		c.sleep(c.retryWait)
+		if err := c.sleep(ctx, c.retryWait); err != nil {
+			return nil, fmt.Errorf(
+				"lichess: %s %s (waiting to retry after 429): %w",
+				method, path, err,
+			)
+		}
 		resp, err = attempt()
 		if err != nil {
 			return nil, fmt.Errorf(

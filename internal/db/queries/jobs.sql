@@ -31,3 +31,12 @@ SELECT * FROM job_runs
 WHERE job_name = $1 AND status = 'succeeded'
 ORDER BY started_at DESC
 LIMIT 1;
+
+-- name: FailInterruptedJobRuns :execrows
+-- Run once at serve startup: any row still 'running' belongs to a process
+-- that died (or a one-shot `ic <job>` killed mid-run) — nothing else can
+-- leave a row unfinished now that the outcome is written under a
+-- non-cancelled context. Without this, /health reports "running" forever.
+UPDATE job_runs
+SET status = 'failed', finished_at = now(), error = $1
+WHERE status = 'running';

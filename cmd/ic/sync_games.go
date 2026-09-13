@@ -135,11 +135,23 @@ func runSyncGames(
 	} else {
 		stats, fatal = doSyncGames(ctx, q, client, cfg)
 	}
+	// A run cut short by its context (river's job timeout, or shutdown)
+	// left pairings unprocessed however many Lichess calls succeeded
+	// first, and the calls it did not get to show up only as failures
+	// with "context canceled" — which syncGamesOutcome would otherwise
+	// forgive once any call had succeeded.
+	if fatal == nil && ctx.Err() != nil {
+		fatal = fmt.Errorf("interrupted: %w", ctx.Err())
+	}
 
 	status, errMsg := syncGamesOutcome(stats, fatal)
 	detail, _ := json.Marshal(stats)
 	itemsProcessed := stats.GamesFinished + stats.PairingsMatched + stats.InProgressChecked
-	if finishErr := q.FinishJobRun(ctx, gen.FinishJobRunParams{
+	// The outcome row is written under a context that cannot be
+	// cancelled: the work may have ended *because* ctx was cancelled
+	// (river's job timeout, or shutdown), and a run that leaves its row
+	// at "running" is exactly the silent failure spec §7 rules out.
+	if finishErr := q.FinishJobRun(context.WithoutCancel(ctx), gen.FinishJobRunParams{
 		ID:             jobRun.ID,
 		Status:         status,
 		ItemsProcessed: int32(itemsProcessed),

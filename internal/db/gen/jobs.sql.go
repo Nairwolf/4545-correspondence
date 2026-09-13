@@ -40,6 +40,24 @@ func (q *Queries) CreateJobRun(ctx context.Context, arg CreateJobRunParams) (Job
 	return i, err
 }
 
+const failInterruptedJobRuns = `-- name: FailInterruptedJobRuns :execrows
+UPDATE job_runs
+SET status = 'failed', finished_at = now(), error = $1
+WHERE status = 'running'
+`
+
+// Run once at serve startup: any row still 'running' belongs to a process
+// that died (or a one-shot `ic <job>` killed mid-run) — nothing else can
+// leave a row unfinished now that the outcome is written under a
+// non-cancelled context. Without this, /health reports "running" forever.
+func (q *Queries) FailInterruptedJobRuns(ctx context.Context, error *string) (int64, error) {
+	result, err := q.db.Exec(ctx, failInterruptedJobRuns, error)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const finishJobRun = `-- name: FinishJobRun :exec
 UPDATE job_runs SET
   status          = $2,
