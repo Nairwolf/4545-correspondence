@@ -97,7 +97,7 @@ func New(ctx context.Context, deps Deps) (*Server, error) {
 // transaction-scoped db and *gen.Queries (so nothing is committed to the
 // real database) while still passing the real pool that /health pings.
 func newServer(deps Deps, db txBeginner, q *gen.Queries, cfg settings.Settings) (*Server, error) {
-	pages := []string{"home", "standings", "levels", "player", "jobs", "join", "account", "auth_error"}
+	pages := []string{"home", "standings", "levels", "player", "jobs", "join", "account", "auth_error", "admin_registrations"}
 	templates := make(map[string]*template.Template, len(pages))
 	for _, name := range pages {
 		t, err := template.New("layout.html").Funcs(funcs).ParseFS(
@@ -162,7 +162,7 @@ func serverError(w http.ResponseWriter, err error) {
 // the nav and title without each handler restating them.
 type base struct {
 	Title   string
-	Nav     string    // which top-nav item is active: "home" | "standings" | "levels" | "jobs" | "account"
+	Nav     string    // active top-nav item: "home" | "standings" | "levels" | "account" | "admin" | "jobs"
 	User    *gen.User // signed-in user, nil for a visitor
 	IsAdmin bool
 }

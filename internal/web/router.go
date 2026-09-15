@@ -30,13 +30,23 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/levels", s.handleLevels)
 		r.Get("/players/{username}", s.handlePlayer)
 		r.Get("/health", s.handleHealth)
-		r.Get("/jobs", s.handleJobs)
 
 		r.With(s.authLimiter.middleware).Get("/join", s.handleJoin)
 		r.With(s.authLimiter.middleware).Post("/join", s.handleJoinPost)
 		r.With(s.authLimiter.middleware).Get("/login", s.handleLogin)
 		r.Post("/logout", s.handleLogout)
 		r.With(s.requireUser).Get("/account", s.handleAccount)
+
+		// Everything under /admin is behind the role check (spec §11),
+		// so a route added here later cannot forget it.
+		r.Route("/admin", func(r chi.Router) {
+			r.Use(s.requireAdmin)
+			r.Get("/", s.handleAdminIndex)
+			r.Get("/registrations", s.handleRegistrations)
+			r.Post("/registrations/approve", s.handleApproveRegistrations)
+			r.Post("/registrations/{id}/reject", s.handleRejectRegistration)
+			r.Get("/jobs", s.handleJobs)
+		})
 	})
 
 	// The callback sits outside the logged group on purpose: chi's

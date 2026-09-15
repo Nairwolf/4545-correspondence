@@ -16,7 +16,10 @@
         <a href="/" class="hover:text-zinc-100 {{if eq $nav "home"}}text-zinc-100{{end}}">Overview</a>
         <a href="/standings" class="hover:text-zinc-100 {{if eq $nav "standings"}}text-zinc-100{{end}}">Standings</a>
         <a href="/levels" class="hover:text-zinc-100 {{if eq $nav "levels"}}text-zinc-100{{end}}">Levels</a>
-        <a href="/jobs" class="hover:text-zinc-100 {{if eq $nav "jobs"}}text-zinc-100{{end}}">Jobs</a>
+        {{- if .IsAdmin}}
+        <a href="/admin/registrations" class="hover:text-zinc-100 {{if eq $nav "admin"}}text-zinc-100{{end}}">Admin</a>
+        <a href="/admin/jobs" class="hover:text-zinc-100 {{if eq $nav "jobs"}}text-zinc-100{{end}}">Jobs</a>
+        {{- end}}
       </nav>
       <nav class="ml-auto flex items-center gap-4 text-zinc-400">
         {{- if .User}}

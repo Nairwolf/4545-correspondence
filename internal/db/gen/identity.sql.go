@@ -109,37 +109,6 @@ func (q *Queries) GetOAuthToken(ctx context.Context, userID pgtype.UUID) (OauthT
 	return i, err
 }
 
-const listLookalikeCandidates = `-- name: ListLookalikeCandidates :many
-SELECT id, lichess_username FROM users WHERE status <> 'rejected'
-`
-
-type ListLookalikeCandidatesRow struct {
-	ID              pgtype.UUID `json:"id"`
-	LichessUsername string      `json:"lichess_username"`
-}
-
-// Every name an applicant's could be confused with. The comparison
-// itself is in Go (internal/web), where it can be unit-tested.
-func (q *Queries) ListLookalikeCandidates(ctx context.Context) ([]ListLookalikeCandidatesRow, error) {
-	rows, err := q.db.Query(ctx, listLookalikeCandidates)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListLookalikeCandidatesRow
-	for rows.Next() {
-		var i ListLookalikeCandidatesRow
-		if err := rows.Scan(&i.ID, &i.LichessUsername); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listUsersByStatus = `-- name: ListUsersByStatus :many
 SELECT id, lichess_username, lichess_user_id, role, status, created_at, approved_at, approved_by, rejection_reason, lichess_profile, lichess_profile_fetched_at, fair_play_agreed_at FROM users WHERE status = $1 ORDER BY created_at ASC
 `

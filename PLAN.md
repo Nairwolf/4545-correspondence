@@ -246,7 +246,7 @@ sync):
 | Rated games | `count.rated` (absent → "—") |
 | Closed / TOS-flagged | `disabled` / `tosViolation` — either one is a red banner |
 | Ratings | `perfs.correspondence` / `perfs.classical` with a `prov` badge |
-| Looks like an existing member | pure function `lookalikes(candidate, members)`: normalised names (lowercase, strip `_`, `-`, digits) equal, or Levenshtein ≤ 1, against every non-rejected member. Table-tested. |
+| ~~Looks like an existing member~~ | **Dropped (decided 2026-09-15 during step 4).** The username is never typed — it comes from `GET /api/account` after OAuth, so impersonation is impossible and Lichess already guarantees uniqueness. The only residual use (spotting a second account) was not worth the code. §8.2's "whether the username resembles an existing member's" is removed. |
 | Applied | `created_at`; `fair_play_agreed_at` shown as "agreed" |
 
 **Approve** (single or bulk, one transaction): `status=approved`,
@@ -339,10 +339,8 @@ sets it yet; by hand in psql until §8.5 player management).
 
 sqlc queries added (`internal/db/queries/`): `identity.sql` —
 `CreatePendingUser`, `ApproveUser`, `RejectUser`, `PromoteToAdmin`,
-`RenameUser`, `UpdateUserLichessProfile`, `ListRegistrations` (by status,
-with profile row), `LookalikeCandidates` (id + username of every
-non-rejected member — the matching is in Go), `UpsertOAuthToken`,
-`GetOAuthToken`; `sessions.sql` — `CreateSession`, `GetSessionUser` (join
+`RenameUser`, `UpdateUserLichessProfile`, `ListUsersByStatus`,
+`UpsertOAuthToken`, `GetOAuthToken`; `sessions.sql` — `CreateSession`, `GetSessionUser` (join
 `users`, only unexpired), `TouchSession`, `DeleteSession`,
 `DeleteExpiredSessions`. `CreateApprovedUser` stays for `seed-players`.
 
@@ -374,7 +372,7 @@ internal/session/               Manager{q, secure bool}: Create, Load, Touch, De
 internal/web/auth.go            /join, /login, callback, /logout, /account; oauth-state cookie (HMAC).
 internal/web/middleware.go      withUser, requireUser, requireAdmin; CrossOriginProtection wiring.
 internal/web/ratelimit.go       per-IP token bucket middleware.
-internal/web/admin.go           /admin/registrations + actions; signals; lookalikes().
+internal/web/admin.go           /admin/registrations + actions; signals.
 internal/web/templates/         join.html, registered.html, auth_error.html, account.html,
                                 admin_registrations.html; layout.html nav becomes user-aware.
 internal/db/migrations/00010_identity.sql
@@ -467,10 +465,10 @@ Each step is a self-contained commit point (the maintainer commits; see
    cookie sign/verify/expiry.
    Suggested: `feat(web): Lichess sign-in, registration and sessions`.
 
-4. **Admin registration queue** — `/admin/*` routes, signals,
-   `lookalikes()` table test (`MilsBees` vs `milsbees_` vs `M1lsBees`;
-   unrelated names don't match), approve / reject / bulk approve, `/jobs`
-   → `/admin/jobs` (decision 8). Integration tests: approve sets the
+4. **Admin registration queue** — `/admin/*` routes, signals, approve /
+   reject / bulk approve (the per-row button posts one id to the same
+   `ids` endpoint as "approve selected", so there is a single atomic
+   handler), `/jobs` → `/admin/jobs` (decision 8). Integration tests: approve sets the
    three columns, writes audit and a `player_standings` row (the player
    now appears in `GetStandings`); reject requires a reason; bulk approve
    is atomic (one bad id → nothing changes); non-admin → 403; anonymous →
@@ -504,7 +502,8 @@ dependencies beyond `x/oauth2`).
   `fair_play_agreed_at`. New `Session` entity (`token_hash`, `user_id`,
   `created_at`, `last_seen_at`, `expires_at`).
 - **§8.2** — reorder the flow (agreement on the join page, before the
-  redirect); drop the timezone field; `msg:write` is requested by
+  redirect); drop the timezone field; drop the "resembles an existing
+  member" signal (the name comes from Lichess, not the applicant); `msg:write` is requested by
   re-authorisation in Phase 5, not at registration; add: existing
   members sign in through the same flow; the bootstrap-admin rule;
   rejected applicants can't re-apply themselves; the approval
