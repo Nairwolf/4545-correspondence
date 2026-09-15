@@ -257,9 +257,34 @@ periodic jobs restart from process start, so anchor the run to
 
 ---
 
+## What was built (2026-09-15)
+
+Steps 1 and 2 landed as planned, with these notes:
+
+- **No deviation in scope or schema.** Four queries in `profile.sql`,
+  one settings key, `dashboard.go`, the rewritten `account.html`, the
+  `/account` route group. `handleAccount` moved out of `auth.go`.
+- **A write that changes nothing writes nothing** — including no audit
+  row. The handlers compare the submitted value with the current
+  profile first, so a double-submit or an unchanged form is a plain
+  redirect. Resume relies on `ClearAutoPause`'s row count for the same
+  effect.
+- **The capacity sentence is a pure function** (`capacityFor`) with a
+  table test, so the wording is pinned without a database.
+- **Three Phase 2 session tests were fixed on the way**
+  (`test(web): scope session assertions to the test's own user`): they
+  counted every row of `sessions`, and the dev database now holds the
+  maintainer's live sessions outside the test transaction.
+- `html/template` escapes the apostrophe in the dynamic sentence
+  (`you&#39;ll`); the integration test matches the escaped form.
+
+Automated verification, green at the end of step 2: `go build`,
+`go vet` (both tags), gofmt, `make test`, `make test-integration`
+(every package, including the new dashboard tests).
+
 ## Verification (end of Phase 3)
 
-Filled in when built. Planned live checks, by hand:
+Live checks, by hand, still to be run by the maintainer:
 
 1. `make test`, `make test-integration` green; `make css` output committed.
 2. `make run`; sign in; `/account` shows the dashboard with the live

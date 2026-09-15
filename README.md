@@ -19,9 +19,11 @@ make run               # run the server (HTTP site + background jobs)
 ```
 
 `serve` runs the site (public pages `/`, `/standings`, `/levels`,
-`/players/{name}`, `/health`; sign-in and registration under `/join`,
-`/login`, `/account`; the admin area under `/admin`) and the river job
-runner together; it shuts down cleanly on SIGINT/SIGTERM.
+`/players/{name}`, `/health`; sign-in and registration under `/join` and
+`/login`; the player dashboard at `/account` — activity, game limit,
+double games, my games, authorisation status; the admin area under
+`/admin`) and the river job runner together; it shuts down cleanly on
+SIGINT/SIGTERM.
 
 ### Configuration for `serve`
 
@@ -47,7 +49,13 @@ the agreement and continue — Lichess shows a consent screen for
 "Create, accept, decline challenges", then you land on `/account` as a
 pending applicant. Sign in with an account listed in
 `ADMIN_LICHESS_USERNAMES` (it is created approved and admin on its first
-join) and approve the application at `/admin/registrations`.
+join) and approve the application at `/admin/registrations`. The new
+member's `/account` then shows the dashboard: pause/resume, an optional
+limit on games in progress, the double-game opt-out and their games.
+
+The integration tests run against the dev database inside a transaction
+that is rolled back, so real rows (your own sessions, for instance) stay
+put and tests must scope their assertions to the rows they created.
 
 `sqlc` and `goose` are pulled in as `go tool` dependencies — no global
 install needed. The CSS is built with the **Tailwind standalone binary**

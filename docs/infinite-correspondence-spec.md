@@ -2,7 +2,7 @@
 
 Replacement web application for the "Lichess4545 - Infinite Correspondence" Google Sheets system.
 
-**Status:** specification for implementation — Phase 1 amendments applied 2026-09-07, Phase 2 amendments applied 2026-09-15 (see §15 changelog)
+**Status:** specification for implementation — Phase 1 amendments applied 2026-09-07, Phase 2 and Phase 3 amendments applied 2026-09-15 (see §15 changelog)
 **Source of truth for existing behaviour:** the `Lichess4545 - Infinite Correspondence` spreadsheet (sheets: `Overview`, `Standings`, `Standings_Backend`, `Levels`, `Pairing_Maker`, `Pairing_Maker_Backend`, `Perf_Rating_Backend`, `RawData`, `Stats`)
 
 > **Out of scope:** the spreadsheet's `Awards` / `Awards_Backend` sheets are **not** being ported. The award metrics depend on a "compensation / sound sacrifice" detection rule whose implementation was lost, and the maintainers have confirmed the feature will not be carried over.
@@ -964,6 +964,8 @@ Since the search is anchored on a pairing, games members play against each other
 
 ### 8.3 Player dashboard (auth required)
 
+*(Built 2026-09-15, Phase 3, at `/account`.)* Pending applicants already see and may set the preferences below; they take effect once approved. Rejected applicants see their status only. Every control is a plain form submission with an inline validation message, and every change writes to `AuditLog` with the field's previous and new value.
+
 - **Activity toggle.** "I'm playing" / "Pause my quest". Pausing takes effect for the next round; existing games are unaffected and must still be finished.
 - **Concurrent games limit.** Presented as an optional setting, off by default, not a number the player must reason about on day one.
 
@@ -981,10 +983,10 @@ Since the search is anchored on a pairing, games members play against each other
   If the player sets a cap below their current ongoing count, show a calm explanation rather than an error: *"You're above your new limit. You won't get new pairings until you're back under it. Nothing happens to your current games."*
 - **My games.** Ongoing (with links and days-since-last-move) and completed.
 - **Double games.** A toggle, **on by default**, so byes stay rare without anyone having to opt in: *"If there's an odd number of players some week, I'm happy to play two games instead of someone sitting out."* State that it happens occasionally rather than weekly, that it respects any cap they've set (it needs two free slots), and that they get one white and one black. Show how many times they've absorbed a double game. Turning it off is always allowed and carries no penalty.
-- **Bye history.** If the player received a bye, show it on their dashboard for that round with plain-language reasoning: *"Odd number of players this week and nobody was free for a double game, so you sat out. You're first in line to avoid the next one."*
+- **Bye history.** If the player received a bye, show it on their dashboard for that round with plain-language reasoning: *"Odd number of players this week and nobody was free for a double game, so you sat out. You're first in line to avoid the next one."* *(The bye history, the double-game count and the "why didn't I get a game" explanation from `RoundExclusion` arrive with Phase 4, which creates those tables; the dashboard has the slot.)*
 - **My standing.** Rating, record, last-5 performance, level and XP progress.
-- **Lichess authorisation status.** Green if valid; if revoked or expired, a prominent re-authorise button explaining that games cannot be created automatically without it.
-- **Resume quest.** Visible only when auto-paused, clearing `auto_paused_at`.
+- **Lichess authorisation status.** Green if valid; if revoked or expired, a prominent re-authorise button explaining that games cannot be created automatically without it. *(Until `validate-tokens` ships in Phase 5, "valid" means stored and not past `expires_at`; a revocation made on Lichess's side is not detected yet, and the copy says the token was checked at sign-in.)*
+- **Resume quest.** Visible only when auto-paused, clearing `auto_paused_at`. A player paused by an admin sees the reason and no button: that pause is the admin's to lift (§8.5).
 
 Every change writes to `AuditLog`.
 
@@ -1084,6 +1086,8 @@ Notes:
 - The OAuth callback verifies `state` (from an HMAC-signed, 10-minute cookie carrying the PKCE verifier) before anything else, and is kept out of the request log so the one-time code never appears there.
 - Token revocation on account deletion, and a documented deletion path (GDPR — a European user base is likely given the existing roster). The data footprint is deliberately small: a Lichess username, an encrypted token, and game history. No email addresses are held.
 
+  **The deletion path is a precondition of opening registration to the public, built in Phase 6 against the final schema** *(decided 2026-09-15)*. Every later phase adds per-user tables, so a path written earlier would be re-opened in each of them or silently miss one. Until then the roster is the maintainers' test accounts and the documented path is an admin deleting the rows by hand. Design intent, to be implemented then: revoke the token on Lichess, delete the token, sessions, rating snapshots, profile and standing, anonymise the `User` row (username, Lichess id, profile) and **keep the `Game` rows** — opponents' results, XP and performance ratings are computed from them, and the games are public on Lichess regardless. Tables carrying a `user_id` today, the checklist for that work: `player_profiles`, `rating_snapshots`, `oauth_tokens`, `sessions`, `player_standings`, `pairings` (white/black), `games` (white/black), `audit_log` (actor, and `entity_id` for user actions), `settings.updated_by`, `users.approved_by`. Phases 4 and 5 extend this list as they add tables.
+
 **Performance.** Public pages read from materialised `PlayerStanding` and cached aggregate tables, never computing rolling performance ratings per request. Standings and stats pages should render in well under a second at 200+ players and 10,000+ games.
 
 **Testing.**
@@ -1109,17 +1113,17 @@ Database schema, migrations, Lichess client, scoring module (§5), the `sync-gam
 **Phase 2 — Identity.** *(Built 2026-09-15.)*
 Lichess OAuth (PKCE, §3.1), the registration flow and account page (§8.2), server-side sessions, roles with the bootstrap-admin rule, and the admin registration queue (§8.5). `/jobs` moves to `/admin/jobs` now that a role exists to gate it; `/health` stays public. `seed-players` remains as a dev/testing tool. Not in Phase 2: the player dashboard (Phase 3), notifications including "registration approved" (Phase 5), `validate-tokens` and token-health display (Phase 3/5), admin player management beyond the queue, the settings UI, and the GDPR deletion path (Phase 3).
 
-**Phase 3 — Self-service.**
-Player dashboard: activity toggle, concurrent-games cap, token status, my games.
+**Phase 3 — Self-service.** *(Built 2026-09-15.)*
+Player dashboard at `/account` (§8.3): activity toggle, the opt-in concurrent-games cap with the live in-progress count, double-game opt-out, resume-quest, my standing, my games and the stored authorisation status. UI only: no schema change, no new job, no new Lichess call; `player.max_concurrent_ceiling` becomes the first non-scoring setting read. Not in Phase 3: `validate-tokens` and revocation detection (Phase 5, with the rest of the token automation); bye / double-game history (Phase 4, with the tables); the deletion path (Phase 6, see §11).
 
 **Phase 4 — Pairing.**
 Pairing engine, round model, scheduled generation, draft/review window, admin round management and diagnostics. Run it in shadow mode for one or two weeks — generate rounds without publishing, and compare against what the spreadsheet would have produced.
 
 **Phase 5 — Automation.**
-Bulk pairing game creation, challenge fallback, ongoing sync, missed-start tracking and auto-pause, notifications.
+Bulk pairing game creation, challenge fallback, ongoing sync, missed-start tracking and auto-pause, notifications, `validate-tokens` (§7) with the grace-day deactivation (§3.3).
 
 **Phase 6 — Polish.**
-Admin settings UI, editable rules content, system health page, Discord integration.
+Admin settings UI, editable rules content, system health page, Discord integration, and the account deletion path (§11) — the last is a hard gate before registration is opened publicly.
 
 **Phase 7 — Optional.**
 Historical data migration (§9), only if confirmed.
@@ -1157,6 +1161,10 @@ These were open and are now settled. Recorded here so they are not relitigated d
 | Perf-rating deltas | The **FIDE `dp` table**, indexed by score percentage so any `k` works (§5.3). |
 | Job frequency | Deliberately slow. One hourly job; everything else daily or weekly (§7). |
 | Awards page | Not ported. Out of scope. |
+| Deletion path (GDPR) | Built in **Phase 6**, against the final schema, as a precondition of public registration; anonymise the user, keep game rows (§11). |
+| `validate-tokens` | **Phase 5**, with the other token automation; the dashboard shows stored token state until then (§8.3). |
+| Dashboard URL | `/account`, grown from the Phase 2 account page. |
+| Preferences before approval | Pending applicants may set them; they take effect on approval (§8.3). |
 
 ---
 
@@ -1173,6 +1181,7 @@ These were open and are now settled. Recorded here so they are not relitigated d
 
 ## 15. Changelog
 
+- **2026-09-15** — Phase 3 amendments. Dashboard recorded as built with its scope notes (§8.3); the deletion path made a Phase 6 launch gate with its design intent and a `user_id` table checklist (§11); `validate-tokens` moved to Phase 5 and the Phase 3/5/6 paragraphs updated (§12); decisions recorded (§13).
 - **2026-09-15** — Phase 2 amendments. Lichess OAuth verified (v2.0.171): PKCE `S256`, public clients only, no client secret, no refresh tokens, `POST /api/token/test` and `DELETE /api/token` recorded (§3.1); `LICHESS_CLIENT_SECRET` removed (§2.2). `OAuthToken` loses `refresh_token`, gains `issued_at`; `User` gains `lichess_profile`, `lichess_profile_fetched_at`, `fair_play_agreed_at`; `Session` entity added (§4.1). Registration reordered — agreement before the redirect, timezone dropped (§8.2, §14.4); sign-in, bootstrap-admin and rejected-applicant rules written down; the username-lookalike signal dropped (§8.2). Security mechanisms named (§11). `/jobs` moved under `/admin` (§12). Decisions recorded (§13).
 - **2026-09-07** — Lichess API verified against the OpenAPI definition (v2.0.169). Corrected export paths and options (§3.4, §7.1); documented bulk-pairing atomicity, limits and the `pairAt` ambiguity (§6.3); added pairing-anchored game matching (§7.3) and `manual_external` semantics (§4.1); reshaped `Game` (status column, rating-at-game, acpl, inferred draw subtypes, aborted games excluded); decided unrated constant, rating-at-game, no history import, round numbering, Stats deferral, tooling (§13). Phase 1 scope updated (§12).
 - **2026-09-13** — Recorded how a job run's outcome is decided (§7.2): database failures and total Lichess failure fail the run; partial Lichess failure succeeds but is named in the run's error text.

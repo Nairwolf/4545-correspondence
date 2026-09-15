@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-Phases 1 and 2 (spec §12) are implemented. Phase 1, read-only parity:
+Phases 1–3 (spec §12) are implemented. Phase 1, read-only parity:
 schema/migrations, the Lichess client, `sync-games`/`refresh-ratings`/
 `recompute` as both river-scheduled jobs and one-shot `ic` subcommands,
 the pure scoring module, and the public web pages (`/`, `/standings`,
@@ -13,6 +13,13 @@ OAuth with PKCE (`internal/lichess/oauth.go`), tokens encrypted at rest
 (`internal/tokencrypt`), server-side sessions (`internal/session`), the
 join / sign-in / account flow and the admin registration queue
 (`internal/web/auth.go`, `admin.go`); `/jobs` now lives at `/admin/jobs`.
+Phase 3, self-service: the player dashboard at `/account`
+(`internal/web/dashboard.go`, queries in `internal/db/queries/profile.sql`)
+— activity, the optional concurrent-games cap (NULL = unlimited, bounded
+by the `player.max_concurrent_ceiling` setting), double-game opt-out,
+resume-quest, my games and stored authorisation status. Not built yet:
+`validate-tokens` (Phase 5) and the GDPR deletion path (Phase 6, a gate
+before public registration — see spec §11).
 `docs/infinite-correspondence-spec.md`
 is still the source of truth for behaviour; read it before changing
 anything under `internal/`, and update it when a decision changes rather
@@ -34,8 +41,8 @@ make psql               # psql shell on the dev database
 
 See `README.md` for the full command list (including `make tailwind` /
 `make css` and the one-shot `ic` admin subcommands) and `PLAN.md`'s build
-order for what's done and what's next (the player dashboard, Phase 3,
-and the pairing engine onward, Phase 4+, are not built yet).
+order for what's done and what's next (the pairing engine onward,
+Phase 4+, is not built yet).
 
 ## What the system does
 
