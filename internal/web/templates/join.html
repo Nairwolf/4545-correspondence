@@ -1,0 +1,38 @@
+{{define "content"}}
+<div class="mx-auto max-w-xl">
+  <h1 class="mb-3 text-lg font-semibold text-zinc-100">Join the league</h1>
+
+  <p class="mb-4 leading-relaxed text-zinc-400">
+    Infinite Correspondence is an open-ended correspondence ladder on Lichess.
+    Every Monday, every active member gets one new game against another member,
+    created for you on Lichess automatically. There are no seasons and nothing to
+    sign up for each week — you play, and the standings, performance rating and
+    levels take care of themselves.
+  </p>
+
+  <h2 class="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-500">How joining works</h2>
+  <ol class="mb-6 list-decimal space-y-1 pl-5 text-zinc-400">
+    <li>You continue to Lichess and allow the league to create your games (the <em>challenge:write</em> permission — nothing else).</li>
+    <li>An admin reviews your application, usually within a few days.</li>
+    <li>Once approved you're paired in the next round. You can pause from your account page at any time.</li>
+  </ol>
+
+  <h2 class="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-500">Fair play</h2>
+  <ul class="mb-6 list-disc space-y-1 pl-5 text-zinc-400">
+    <li>Play your own moves. Opening books and databases are allowed, as on Lichess correspondence; engines and any other move assistance are not.</li>
+    <li>Play your games out. Two weeks in a row without starting a game pauses your quest until you resume it.</li>
+    <li>Be a decent opponent: the league runs on Lichess's terms of service and the Lichess4545 community norms.</li>
+  </ul>
+
+  {{/* hx-boost=false: this form answers with a redirect to lichess.org, which an htmx request could not follow. */}}
+  <form method="post" action="/join" hx-boost="false" class="rounded border border-zinc-800 p-4">
+    {{if .Error}}<p class="mb-3 text-sm text-red-400">{{.Error}}</p>{{end}}
+    <label class="flex items-start gap-3 text-zinc-300">
+      <input type="checkbox" name="agree" class="mt-1" required>
+      <span>I agree to the fair-play rules above and to play my league games on my own.</span>
+    </label>
+    <button type="submit" class="mt-4 rounded bg-zinc-100 px-4 py-2 font-medium text-zinc-900 hover:bg-white">Continue with Lichess</button>
+    <p class="mt-3 text-xs text-zinc-500">You'll see a Lichess consent screen naming the permission. Nothing is stored until you approve it there.</p>
+  </form>
+</div>
+{{end}}

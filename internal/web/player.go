@@ -84,7 +84,7 @@ func (s *Server) handlePlayer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := playerData{
-		base:        base{Title: header.LichessUsername, Nav: ""},
+		base:        s.page(r, header.LichessUsername, ""),
 		Header:      header,
 		Unrated:     header.IsUnrated != nil && *header.IsUnrated,
 		Games:       resolveGames(user.ID, games),

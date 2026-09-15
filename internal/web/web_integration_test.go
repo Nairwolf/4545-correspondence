@@ -18,7 +18,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
+	"github.com/nairwolf/4545-correspondence/internal/lichess"
 	"github.com/nairwolf/4545-correspondence/internal/settings"
+	"github.com/nairwolf/4545-correspondence/internal/tokencrypt"
 )
 
 // testServer wires a Server whose page queries run inside a transaction
@@ -40,11 +42,28 @@ func testServer(t *testing.T) (*Server, *gen.Queries, pgx.Tx) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = tx.Rollback(ctx) })
 
-	q := gen.New(tx)
-	srv, err := newServer(pool, q, settings.Defaults())
+	key, err := tokencrypt.ParseKey(strings.Repeat("ab", 32))
 	require.NoError(t, err)
+	fake := lichess.NewFake()
+	deps := Deps{
+		Pool:           pool,
+		Lichess:        fake,
+		Auth:           fake,
+		TokenKey:       key,
+		StateSecret:    []byte(strings.Repeat("s", 32)),
+		AdminUsernames: []string{"Boss"},
+	}
+
+	q := gen.New(tx)
+	srv, err := newServer(deps, tx, q, settings.Defaults())
+	require.NoError(t, err)
+	// The limiter has its own unit test; page tests shouldn't trip it.
+	srv.authLimiter = newRateLimiter(6000, 1000)
 	return srv, q, tx
 }
+
+// testFake is the Fake behind both Lichess dependencies of a testServer.
+func testFake(srv *Server) *lichess.Fake { return srv.lichess.(*lichess.Fake) }
 
 func addPlayer(t *testing.T, q *gen.Queries, tx pgx.Tx, name string, active bool, rating, xp, powerRating, last5perf int32, last5 string) gen.User {
 	t.Helper()

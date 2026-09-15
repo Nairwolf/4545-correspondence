@@ -215,7 +215,7 @@ func (s *Server) handleStandings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.render(w, "standings", standingsData{
-		base:   base{Title: "Standings", Nav: "standings"},
+		base:   s.page(r, "Standings", "standings"),
 		Rows:   rows,
 		Params: p,
 		Total:  len(raw),
@@ -249,7 +249,7 @@ func (s *Server) handleLevels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.render(w, "levels", levelsData{
-		base: base{Title: "Levels", Nav: "levels"},
+		base: s.page(r, "Levels", "levels"),
 		Rows: rows,
 		Win:  s.cfg.XPWeights.Win,
 		Draw: s.cfg.XPWeights.Draw,

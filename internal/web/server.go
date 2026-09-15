@@ -1,10 +1,10 @@
-// Package web serves the public, no-auth pages (spec §8.1): home,
-// standings, levels, player profiles, plus the operational /health and
-// /jobs endpoints. It is read-only — every page renders from the
-// materialised player_standings / games tables the background jobs
-// maintain, never by computing scoring numbers per request.
+// Package web serves the site: the public pages (spec §8.1: home,
+// standings, levels, player profiles, /health, /jobs), registration and
+// sign-in (spec §8.2, auth.go) and the account page. Public pages render
+// from the materialised player_standings / games tables the background
+// jobs maintain, never by computing scoring numbers per request.
 //
-// Player and admin areas (spec §8.2–§8.5) are later phases.
+// The player dashboard and admin panel (spec §8.3–§8.5) are later phases.
 package web
 
 import (
@@ -20,11 +20,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
+	"github.com/nairwolf/4545-correspondence/internal/lichess"
+	"github.com/nairwolf/4545-correspondence/internal/session"
 	"github.com/nairwolf/4545-correspondence/internal/settings"
+	"github.com/nairwolf/4545-correspondence/internal/tokencrypt"
 )
 
 //go:embed templates/*.html
@@ -33,34 +37,67 @@ var templatesFS embed.FS
 //go:embed static
 var staticFS embed.FS
 
+// Deps is everything the server needs from the outside world.
+type Deps struct {
+	Pool    *pgxpool.Pool
+	Lichess lichess.API
+	Auth    lichess.Auth
+	// TokenKey encrypts player tokens at rest (TOKEN_ENCRYPTION_KEY).
+	TokenKey tokencrypt.Key
+	// StateSecret signs the OAuth-state cookie (SESSION_SECRET).
+	StateSecret []byte
+	// AdminUsernames is the bootstrap admin list (ADMIN_LICHESS_USERNAMES).
+	AdminUsernames []string
+	// SecureCookies marks every cookie Secure; true when served over https.
+	SecureCookies bool
+}
+
+// txBeginner is the one thing the sign-in flow needs from the database
+// beyond queries: a transaction. Both *pgxpool.Pool and pgx.Tx (which
+// nests via a savepoint) satisfy it, so tests can run the whole flow
+// inside their rolled-back transaction.
+type txBeginner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
 // Server holds the dependencies shared by every handler. It is built
 // once at startup; settings are read once here rather than per request
-// because Phase 1 has no admin UI to change them at runtime (spec §4.2
+// because there is no admin UI to change them at runtime yet (spec §4.2
 // editing is Phase 6).
 type Server struct {
 	pool      *pgxpool.Pool
+	db        txBeginner
 	q         *gen.Queries
 	cfg       settings.Settings
 	templates map[string]*template.Template
 	started   time.Time
+
+	lichess       lichess.API
+	auth          lichess.Auth
+	tokenKey      tokencrypt.Key
+	stateSecret   []byte
+	adminIDs      map[string]bool // Lichess ids (lowercase usernames)
+	secureCookies bool
+	sessions      *session.Manager
+	authLimiter   *rateLimiter
 }
 
 // New builds the server, parsing every page template up front so a
 // malformed template fails startup rather than the first request.
-func New(ctx context.Context, pool *pgxpool.Pool) (*Server, error) {
-	q := gen.New(pool)
+func New(ctx context.Context, deps Deps) (*Server, error) {
+	q := gen.New(deps.Pool)
 	cfg, err := settings.Load(ctx, q)
 	if err != nil {
 		return nil, fmt.Errorf("web: load settings: %w", err)
 	}
-	return newServer(pool, q, cfg)
+	return newServer(deps, deps.Pool, q, cfg)
 }
 
 // newServer is the shared constructor. Tests use it directly to inject a
-// transaction-scoped *gen.Queries (so page data never touches the real
-// database) while still passing the real pool that /health pings.
-func newServer(pool *pgxpool.Pool, q *gen.Queries, cfg settings.Settings) (*Server, error) {
-	pages := []string{"home", "standings", "levels", "player", "jobs"}
+// transaction-scoped db and *gen.Queries (so nothing is committed to the
+// real database) while still passing the real pool that /health pings.
+func newServer(deps Deps, db txBeginner, q *gen.Queries, cfg settings.Settings) (*Server, error) {
+	pages := []string{"home", "standings", "levels", "player", "jobs", "join", "account", "auth_error"}
 	templates := make(map[string]*template.Template, len(pages))
 	for _, name := range pages {
 		t, err := template.New("layout.html").Funcs(funcs).ParseFS(
@@ -74,7 +111,27 @@ func newServer(pool *pgxpool.Pool, q *gen.Queries, cfg settings.Settings) (*Serv
 		templates[name] = t
 	}
 
-	return &Server{pool: pool, q: q, cfg: cfg, templates: templates, started: time.Now()}, nil
+	adminIDs := make(map[string]bool, len(deps.AdminUsernames))
+	for _, name := range deps.AdminUsernames {
+		adminIDs[strings.ToLower(name)] = true
+	}
+
+	return &Server{
+		pool:          deps.Pool,
+		db:            db,
+		q:             q,
+		cfg:           cfg,
+		templates:     templates,
+		started:       time.Now(),
+		lichess:       deps.Lichess,
+		auth:          deps.Auth,
+		tokenKey:      deps.TokenKey,
+		stateSecret:   deps.StateSecret,
+		adminIDs:      adminIDs,
+		secureCookies: deps.SecureCookies,
+		sessions:      session.New(q, deps.SecureCookies),
+		authLimiter:   newRateLimiter(10, 10),
+	}, nil
 }
 
 // render executes a page template through the shared layout, buffering
@@ -104,8 +161,21 @@ func serverError(w http.ResponseWriter, err error) {
 // base is embedded by every page's data struct so the layout can render
 // the nav and title without each handler restating them.
 type base struct {
-	Title string
-	Nav   string // which top-nav item is active: "home" | "standings" | "levels" | "jobs"
+	Title   string
+	Nav     string    // which top-nav item is active: "home" | "standings" | "levels" | "jobs" | "account"
+	User    *gen.User // signed-in user, nil for a visitor
+	IsAdmin bool
+}
+
+// page builds the base for a request: title, active nav item, and who
+// is signed in.
+func (s *Server) page(r *http.Request, title, nav string) base {
+	b := base{Title: title, Nav: nav}
+	if u, ok := currentUser(r); ok {
+		b.User = &u
+		b.IsAdmin = u.Role == gen.UserRoleAdmin
+	}
+	return b
 }
 
 // --- template helpers -------------------------------------------------

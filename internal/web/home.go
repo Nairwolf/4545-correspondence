@@ -56,7 +56,7 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.render(w, "home", homeData{
-		base:        base{Title: "Infinite Correspondence", Nav: "home"},
+		base:        s.page(r, "Infinite Correspondence", "home"),
 		Ongoing:     ongoing,
 		Recent:      recent,
 		Top:         top,

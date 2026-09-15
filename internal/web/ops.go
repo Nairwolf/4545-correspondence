@@ -108,7 +108,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.render(w, "jobs", jobsData{
-		base:      base{Title: "Jobs", Nav: "jobs"},
+		base:      s.page(r, "Jobs", "jobs"),
 		Runs:      views,
 		Ambiguous: ambiguous,
 	})

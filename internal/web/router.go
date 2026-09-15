@@ -9,21 +9,43 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 )
 
-// Handler is the fully wired HTTP handler for the public site.
+// Handler is the fully wired HTTP handler for the site.
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Logger)
-	r.Use(middleware.Timeout(15 * time.Second))
+	// CSRF (spec §11): every non-safe request must be same-origin, judged
+	// by Sec-Fetch-Site or Origin vs Host. With SameSite=Lax cookies this
+	// is the whole defence — no per-form token.
+	r.Use(http.NewCrossOriginProtection().Handler)
+	r.Use(s.withUser)
 
-	r.Get("/", s.handleHome)
-	r.Get("/standings", s.handleStandings)
-	r.Get("/levels", s.handleLevels)
-	r.Get("/players/{username}", s.handlePlayer)
-	r.Get("/health", s.handleHealth)
-	r.Get("/jobs", s.handleJobs)
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.Logger)
+		r.Use(middleware.Timeout(15 * time.Second))
+
+		r.Get("/", s.handleHome)
+		r.Get("/standings", s.handleStandings)
+		r.Get("/levels", s.handleLevels)
+		r.Get("/players/{username}", s.handlePlayer)
+		r.Get("/health", s.handleHealth)
+		r.Get("/jobs", s.handleJobs)
+
+		r.With(s.authLimiter.middleware).Get("/join", s.handleJoin)
+		r.With(s.authLimiter.middleware).Post("/join", s.handleJoinPost)
+		r.With(s.authLimiter.middleware).Get("/login", s.handleLogin)
+		r.Post("/logout", s.handleLogout)
+		r.With(s.requireUser).Get("/account", s.handleAccount)
+	})
+
+	// The callback sits outside the logged group on purpose: chi's
+	// Logger prints the full request URI, which here carries the
+	// one-time authorisation code. The handler logs its own outcome
+	// line instead. It also gets a longer timeout — it makes two
+	// Lichess calls in sequence.
+	r.With(s.authLimiter.middleware, middleware.Timeout(60*time.Second)).
+		Get("/auth/lichess/callback", s.handleCallback)
 
 	static, _ := fs.Sub(staticFS, "static")
 	r.Handle("/static/*", http.StripPrefix("/static/", cacheControl(http.FileServer(http.FS(static)))))

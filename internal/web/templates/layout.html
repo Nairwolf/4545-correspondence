@@ -18,6 +18,16 @@
         <a href="/levels" class="hover:text-zinc-100 {{if eq $nav "levels"}}text-zinc-100{{end}}">Levels</a>
         <a href="/jobs" class="hover:text-zinc-100 {{if eq $nav "jobs"}}text-zinc-100{{end}}">Jobs</a>
       </nav>
+      <nav class="ml-auto flex items-center gap-4 text-zinc-400">
+        {{- if .User}}
+        <a href="/account" class="hover:text-zinc-100 {{if eq $nav "account"}}text-zinc-100{{end}}">{{.User.LichessUsername}}</a>
+        <form method="post" action="/logout"><button type="submit" class="hover:text-zinc-100">Sign out</button></form>
+        {{- else}}
+        {{- /* hx-boost=false: /login answers with a redirect to lichess.org, which an htmx request could not follow. */}}
+        <a href="/login" hx-boost="false" class="hover:text-zinc-100">Sign in</a>
+        <a href="/join" class="rounded bg-zinc-100 px-3 py-1 font-medium text-zinc-900 hover:bg-white">Join</a>
+        {{- end}}
+      </nav>
     </div>
   </header>
   <main class="mx-auto max-w-5xl px-4 py-6">
