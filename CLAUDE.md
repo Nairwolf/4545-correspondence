@@ -4,11 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-Phase 1 (spec §12: read-only parity) is implemented — schema/migrations,
-the Lichess client, `sync-games`/`refresh-ratings`/`recompute` as both
-river-scheduled jobs and one-shot `ic` subcommands, the pure scoring
-module, and the public web pages (`/`, `/standings`, `/levels`,
-`/players/{name}`, `/health`, `/jobs`). `docs/infinite-correspondence-spec.md`
+Phases 1 and 2 (spec §12) are implemented. Phase 1, read-only parity:
+schema/migrations, the Lichess client, `sync-games`/`refresh-ratings`/
+`recompute` as both river-scheduled jobs and one-shot `ic` subcommands,
+the pure scoring module, and the public web pages (`/`, `/standings`,
+`/levels`, `/players/{name}`, `/health`). Phase 2, identity: Lichess
+OAuth with PKCE (`internal/lichess/oauth.go`), tokens encrypted at rest
+(`internal/tokencrypt`), server-side sessions (`internal/session`), the
+join / sign-in / account flow and the admin registration queue
+(`internal/web/auth.go`, `admin.go`); `/jobs` now lives at `/admin/jobs`.
+`docs/infinite-correspondence-spec.md`
 is still the source of truth for behaviour; read it before changing
 anything under `internal/`, and update it when a decision changes rather
 than letting code and spec diverge. `PLAN.md` records what was actually
@@ -29,8 +34,8 @@ make psql               # psql shell on the dev database
 
 See `README.md` for the full command list (including `make tailwind` /
 `make css` and the one-shot `ic` admin subcommands) and `PLAN.md`'s build
-order for what's done and what's next (pairing engine onward — Phase 4+
-in spec §12 — is not built yet).
+order for what's done and what's next (the player dashboard, Phase 3,
+and the pairing engine onward, Phase 4+, are not built yet).
 
 ## What the system does
 

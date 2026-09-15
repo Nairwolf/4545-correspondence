@@ -516,9 +516,44 @@ dependencies beyond `x/oauth2`).
 
 ---
 
+## What was built (2026-09-15)
+
+Steps 1–4 landed as planned, with these deviations, all recorded in the
+spec on the same day:
+
+- **Username lookalike signal dropped** (decided during step 4): the name
+  is never typed — it comes from `GET /api/account` — so Lichess's own
+  uniqueness is the identity check. `ListLookalikeCandidates` and the
+  `lookalikes()` function were removed before commit.
+- **One approve endpoint, not two.** The per-row Approve button posts a
+  single id to `POST /admin/registrations/approve`, the same handler as
+  "approve selected"; both run in one transaction.
+- **`ListUsersByStatus` instead of `ListRegistrations`** — the queue's
+  signals come from `users.lichess_profile`, so no profile join was
+  needed. `UpsertOAuthToken` is a plain upsert; the caller reads the
+  existing row first to choose between the `auth.sign_in` and
+  `auth.reauthorise` audit actions.
+- **`SnapshotParams` lives in `internal/standings`**, not
+  `internal/lichess`, to keep the Lichess package free of database types.
+- **`GET /login` for a listed bootstrap admin with no row** is "not a
+  member yet" like anyone else; only `/join` creates them (decision 5).
+- `x/oauth2` was already an indirect dependency (v0.36.0 via another
+  module); it is now direct at v0.37.0. `go.sum` grew by two lines.
+
+Automated verification, all green at the end of step 4: `go build`,
+`go vet` (with and without the `integration` tag), `make test`,
+`make test-integration`; migration `00010` applied, reverted and
+re-applied on the dev database; a smoke run of the real binary (join page
+200, `/login` → 302 to `lichess.org/oauth` with the S256 challenge,
+`/account` anonymous → `/login`, callback without cookie → 400,
+cross-site `POST /logout` → 403, no `code=` in the log; `serve` without
+the auth variables lists all four problems at once).
+
 ## Verification (end of Phase 2)
 
-Live, against lichess.org, by hand — not in tests:
+Live, against lichess.org, by hand — not in tests. Items 3 and 5–8 were
+run by the maintainer on 2026-09-15 with a real Lichess account and
+passed; item 4 turned out not to be reachable by hand (see below).
 
 1. `make migrate` from the Phase 1 schema applies `00010`; `make
    migrate-down` reverses it.
@@ -529,7 +564,10 @@ Live, against lichess.org, by hand — not in tests:
    "Create, accept, decline challenges"; lands on `/account` as pending; `users`, `oauth_tokens`
    (ciphertext, not `lio_…`), `rating_snapshots`, `audit_log` rows
    present; nothing token-like and no `code=` in the server log.
-4. Cancel on the Lichess consent screen → the friendly page, zero rows.
+4. ~~Cancel on the Lichess consent screen → the friendly page, zero rows.~~
+   Not testable by hand: Lichess's consent page has no cancel button
+   (observed 2026-09-15). The `error=access_denied` path is exercised by
+   the integration test instead.
 5. Join with a username listed in `ADMIN_LICHESS_USERNAMES` → approved
    at once, "Admin" in the nav; `/admin/registrations` shows the other
    applicant with age, rated-game count and ratings matching their

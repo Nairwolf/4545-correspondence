@@ -2,7 +2,7 @@
 
 Replacement web application for the "Lichess4545 - Infinite Correspondence" Google Sheets system.
 
-**Status:** specification for implementation — Phase 1 amendments applied 2026-09-07 (see §15 changelog)
+**Status:** specification for implementation — Phase 1 amendments applied 2026-09-07, Phase 2 amendments applied 2026-09-15 (see §15 changelog)
 **Source of truth for existing behaviour:** the `Lichess4545 - Infinite Correspondence` spreadsheet (sheets: `Overview`, `Standings`, `Standings_Backend`, `Levels`, `Pairing_Maker`, `Pairing_Maker_Backend`, `Perf_Rating_Backend`, `RawData`, `Stats`)
 
 > **Out of scope:** the spreadsheet's `Awards` / `Awards_Backend` sheets are **not** being ported. The award metrics depend on a "compensation / sound sacrifice" detection rule whose implementation was lost, and the maintainers have confirmed the feature will not be carried over.
@@ -98,16 +98,17 @@ Notes on the choices that carry real weight:
 
 ```
 DATABASE_URL
-LICHESS_CLIENT_ID
-LICHESS_CLIENT_SECRET          # if using confidential client
-LICHESS_REDIRECT_URI
+LICHESS_CLIENT_ID              # self-chosen public client id (e.g. the site's hostname); nothing is registered on Lichess
+LICHESS_REDIRECT_URI           # absolute callback URL; its scheme also decides whether cookies are Secure
 LICHESS_ORG_TOKEN              # organiser token, scope: challenge:bulk
-TOKEN_ENCRYPTION_KEY           # for encrypting stored player OAuth tokens at rest
-SESSION_SECRET
+TOKEN_ENCRYPTION_KEY           # 32 bytes, hex-encoded: AES-256-GCM key for stored player OAuth tokens
+SESSION_SECRET                 # >= 32 chars: signs the short-lived OAuth-state cookie
 ADMIN_LICHESS_USERNAMES        # comma-separated bootstrap admin list
 DISCORD_WEBHOOK_URL            # optional, league-wide announcements
 LICHESS_MSG_ENABLED            # optional, send notifications as Lichess PMs
 ```
+
+There is no `LICHESS_CLIENT_SECRET`: Lichess has no confidential clients (§3.1). Rotating `TOKEN_ENCRYPTION_KEY` makes every stored token unreadable, so every player re-authorises. *(Amended 2026-09-15.)*
 
 ---
 
@@ -122,6 +123,16 @@ LICHESS_MSG_ENABLED            # optional, send notifications as Lichess PMs
 | Each player | `msg:write` *(optional)* | Send notifications as Lichess private messages (§10) |
 
 Bulk pairing requires the organiser's `challenge:bulk` token **plus a `challenge:write` token for every player in the pairing**.
+
+**How Lichess OAuth actually works** (verified against the `lichess-org/api` OpenAPI sources, v2.0.171, 2026-09-15):
+
+- Authorization Code flow **with PKCE, `S256` only**. Lichess "supports unregistered and public clients (no client authentication, choose any unique client id)" — there is no client secret and nothing to register. `client_id` is an arbitrary string we choose.
+- `GET /oauth` takes `response_type=code`, `client_id`, `redirect_uri`, `code_challenge_method=S256`, `code_challenge`, plus optional `scope` (space-separated) and `state`; the redirect back carries `code` and `state`, or `error` (`access_denied` when the user cancels), `error_description` and `state`.
+- `POST /api/token` (form-encoded `grant_type=authorization_code`, `code`, `code_verifier`, `redirect_uri`, `client_id`) returns `{token_type, access_token, expires_in}`.
+- **Access tokens are long-lived (about a year) and there are no refresh tokens.** The remedy for an expired or revoked token is signing in again; nothing refreshes anything.
+- `GET /api/account` with the new token identifies the player (`id`, `username`, `perfs`, `createdAt`, `disabled`, `tosViolation`, `count.rated`, …) — the registration queue's signals (§8.2) come from this one call, stored raw on the `User`.
+- `POST /api/token/test` (up to 1000 tokens) reports each token's `userId`, `scopes` and `expires`, or `null` if invalid: the token-health probe for §3.3 and `validate-tokens` (§7). `DELETE /api/token` revokes the bearer token — used for a token obtained but not kept, and on account deletion (§11).
+- **Consent is all-or-nothing** for the requested scope string. A player cannot decline `msg:write` on the Lichess screen, so any optional scope is a choice made on *our* side before the redirect. Phase 2 requests exactly `challenge:write`; `msg:write` is requested by re-authorisation when notifications ship (Phase 5).
 
 **Players do nothing technical.** The token is obtained transparently during registration through a standard OAuth consent screen — the same experience as any "Sign in with Google" button:
 
@@ -206,17 +217,28 @@ User
   status                enum(pending, approved, rejected, banned)
   created_at            timestamptz
   approved_at           timestamptz nullable
-  approved_by           uuid nullable fk -> User
+  approved_by           uuid nullable fk -> User    # NULL = the bootstrap-admin rule
   rejection_reason      text nullable
+  lichess_profile       jsonb nullable   # raw GET /api/account body from the last sign-in (§8.2 signals)
+  lichess_profile_fetched_at timestamptz nullable
+  fair_play_agreed_at   timestamptz nullable   # set at application; NULL for seeded users
 
-OAuthToken
+OAuthToken                                 # one per user, replaced on every sign-in
   user_id               uuid pk fk -> User
-  access_token          bytea            # encrypted at rest
-  refresh_token         bytea nullable   # encrypted at rest
-  scopes                text[]
-  expires_at            timestamptz nullable
+  access_token          bytea            # AES-256-GCM, nonce-prefixed; key from TOKEN_ENCRYPTION_KEY
+  scopes                text[]           # as granted: {challenge:write}, later also msg:write
+  issued_at             timestamptz
+  expires_at            timestamptz nullable   # issued_at + expires_in
   revoked_at            timestamptz nullable
   last_validated_at     timestamptz
+  # No refresh_token: Lichess issues none (§3.1). Amended 2026-09-15.
+
+Session
+  token_hash            bytea pk         # sha256 of the cookie value
+  user_id               uuid fk -> User
+  created_at            timestamptz
+  last_seen_at          timestamptz      # refreshed at most hourly
+  expires_at            timestamptz      # 30 days after creation, absolute
 
 PlayerProfile
   user_id               uuid pk fk -> User
@@ -925,15 +947,20 @@ Since the search is anchored on a pairing, games members play against each other
 1. Visitor clicks "Join the league".
 2. Redirected to Lichess OAuth, requesting `challenge:write` (and optionally `msg:write`, which the player may decline).
 3. On callback: create `User` with `status = pending`, store the encrypted token, capture Lichess profile data (username, ratings, account creation date, whether flagged/closed).
-4. Visitor completes a short form: timezone and explicit agreement to the fair-play rules. Nothing else is required — no email, and no game limit, since unlimited is the default (§5.8).
-5. Confirmation screen explaining that an admin will review the application, and what happens next.
-6. Admin approves or rejects (§8.5). On approval the player becomes eligible for the next round and receives a notification.
+4. Account page explaining that an admin will review the application, and what happens next.
+5. Admin approves or rejects (§8.5). On approval the player becomes eligible for the next round and receives a notification (Phase 5; until then the status is visible on the account page).
 
-**Why OAuth rather than a username field:** it proves the applicant controls the account, and it collects the `challenge:write` token needed for automated game creation in the same step. A plain username form would let anyone register as anyone.
+*(Reordered 2026-09-15.)* The fair-play agreement is a single checkbox on the join page, ticked **before** the redirect to Lichess, so the callback creates a complete application in one transaction — there is never a half-registered user and the token is never held between two requests. The earlier design's post-callback form is gone, and with it the timezone field (§14.4: nothing used it). Nothing else is asked — no email, and no game limit, since unlimited is the default (§5.8).
 
-**Signals to surface to the reviewing admin:** account age, number of rated games, whether the account is marked TOS-violating or closed, current correspondence and classical ratings, whether the username resembles an existing member's.
+**Why OAuth rather than a username field:** it proves the applicant controls the account, and it collects the `challenge:write` token needed for automated game creation in the same step. A plain username form would let anyone register as anyone. The username is never typed: it is whatever `GET /api/account` returns for the token Lichess issued, so Lichess's own uniqueness is the only identity check needed. *(An earlier draft also flagged usernames resembling an existing member's; dropped 2026-09-15 as redundant for that reason.)*
 
-**Sessions:** server-side sessions with httpOnly, secure, SameSite cookies. The Lichess token is used only for API calls, never as a session credential.
+**Signals to surface to the reviewing admin:** account age, number of rated games, whether the account is marked TOS-violating or closed, current correspondence and classical ratings.
+
+**Signing in.** Existing members use the same OAuth flow ("Sign in"); the callback matches on the stable Lichess `id`, follows a rename, refreshes the stored profile and replaces the stored token — this is also §3.1's one-click re-authorisation. A non-member who signs in rather than joins is told so and their fresh token is revoked; a banned account gets no session. A rejected applicant cannot re-apply themselves — signing in shows the rejection reason; an admin can still approve from the queue's rejected tab.
+
+**Bootstrap admins.** Accounts listed in `ADMIN_LICHESS_USERNAMES` are made admins when they sign in; a listed account with no row yet goes through "Join" like anyone else and is created approved and admin (the first admin has nobody to approve them). Granting or revoking admin from the UI is §8.5 player management.
+
+**Sessions:** server-side sessions with httpOnly, secure, SameSite=Lax cookies (Lax, because the OAuth callback is a top-level navigation from lichess.org). The cookie carries a random id; only its SHA-256 is stored, with a 30-day absolute lifetime. The Lichess token is used only for API calls, never as a session credential.
 
 ### 8.3 Player dashboard (auth required)
 
@@ -972,7 +999,7 @@ This replaces the admin manually flipping the `active` column.
 
 ### 8.5 Admin panel (role = admin)
 
-- **Registration queue.** Pending applications with the Lichess signals from §8.2, approve/reject with reason, bulk actions.
+- **Registration queue.** Pending applications with the Lichess signals from §8.2, approve/reject with reason, bulk actions. Approving several at once is one transaction — if any selected application has changed state meanwhile, none are approved. Approval also computes the player's first `PlayerStanding` row so they appear on the standings at once. A rejected tab lists past rejections and allows approval from there. *(Built 2026-09-15.)*
 - **Player management.** Search, view, edit any profile; pause/unpause; adjust `max_concurrent_games`; grant/revoke admin; ban.
 - **Round management.** List rounds with state; view the current draft with the full pairing table; edit a pairing (swap opponents, flip colours, remove a pairing); publish now; cancel; regenerate. Every edit is attributed in `AuditLog` and flagged on the pairing.
 - **Pairing diagnostics.** For a draft round: which constraints were relaxed, per-pair rating gap, colour balance impact, and any player excluded from the pool with the reason. This makes an unexpected pairing explainable instead of mysterious.
@@ -1050,10 +1077,11 @@ Notes:
 
 **Reliability.** Every background job is idempotent and retryable. Job outcomes are persisted and surfaced in the admin health page. Failures alert admins actively rather than waiting to be noticed.
 
-**Security.**
-- Player OAuth tokens encrypted at rest with a key held outside the database; never logged, never returned by any API response, never rendered in any template.
-- Admin routes behind role checks enforced server-side on every request, not merely hidden in the UI.
-- CSRF protection on all state-changing requests; rate limiting on registration and auth endpoints.
+**Security.** *(Mechanisms fixed 2026-09-15, Phase 2.)*
+- Player OAuth tokens encrypted at rest (AES-256-GCM, key from `TOKEN_ENCRYPTION_KEY`, held outside the database); never logged, never returned by any API response, never rendered in any template. In code the plaintext is a distinct `Secret` type that prints as `[redacted]`.
+- Admin routes behind role checks enforced server-side on every request, not merely hidden in the UI — one `/admin` route group with the check as middleware.
+- CSRF protection on all state-changing requests via the standard library's cross-origin protection (`Sec-Fetch-Site` / `Origin` vs `Host`) plus SameSite=Lax cookies; no per-form token. Rate limiting on registration and auth endpoints: an in-memory per-IP token bucket (10 per minute).
+- The OAuth callback verifies `state` (from an HMAC-signed, 10-minute cookie carrying the PKCE verifier) before anything else, and is kept out of the request log so the one-time code never appears there.
 - Token revocation on account deletion, and a documented deletion path (GDPR — a European user base is likely given the existing roster). The data footprint is deliberately small: a Lichess username, an encrypted token, and game history. No email addresses are held.
 
 **Performance.** Public pages read from materialised `PlayerStanding` and cached aggregate tables, never computing rolling performance ratings per request. Standings and stats pages should render in well under a second at 200+ players and 10,000+ games.
@@ -1078,8 +1106,8 @@ Each phase should be independently deployable and useful.
 **Phase 1 — Read-only parity.**
 Database schema, migrations, Lichess client, scoring module (§5), the `sync-games` / `refresh-ratings` / `recompute-aggregates` jobs with persisted outcomes, and the home / standings / levels / player profile pages. Because registration (Phase 2) and the pairing engine (Phase 4) do not exist yet, Phase 1 also ships two admin CLI commands: `seed-players` (create approved players from a username list) and `import-pairings` (create a round and its `manual_external` pairings from a CSV taken from the spreadsheet), which is what lets `sync-games` find the league's games (§7.3). A read-only `/jobs` page and `/health` make job outcomes visible before the admin panel exists. The Stats page is deferred (§8.1). With no history import, correctness is validated with hand-built fixtures and by spot-checking live players against the sheet.
 
-**Phase 2 — Identity.**
-Lichess OAuth, registration flow, admin registration queue, sessions, roles.
+**Phase 2 — Identity.** *(Built 2026-09-15.)*
+Lichess OAuth (PKCE, §3.1), the registration flow and account page (§8.2), server-side sessions, roles with the bootstrap-admin rule, and the admin registration queue (§8.5). `/jobs` moves to `/admin/jobs` now that a role exists to gate it; `/health` stays public. `seed-players` remains as a dev/testing tool. Not in Phase 2: the player dashboard (Phase 3), notifications including "registration approved" (Phase 5), `validate-tokens` and token-health display (Phase 3/5), admin player management beyond the queue, the settings UI, and the GDPR deletion path (Phase 3).
 
 **Phase 3 — Self-service.**
 Player dashboard: activity toggle, concurrent-games cap, token status, my games.
@@ -1118,6 +1146,14 @@ These were open and are now settled. Recorded here so they are not relitigated d
 | League-game discovery | **Pairing-anchored only** (§7.3). Members' other correspondence games are never ingested. |
 | Stats page | Deferred until after Phase 4 (§8.1). |
 | Templating / migrations | `html/template` and `goose`. |
+| Registration form | **One checkbox** (fair-play agreement) on the join page, before the Lichess redirect; no timezone field (§8.2, §14.4). |
+| `msg:write` | Not requested at registration; asked for by re-authorisation when notifications ship, Phase 5 (§3.1). |
+| Existing members | Sign in through the same OAuth flow; the roster is not seeded at public launch (§8.2). |
+| Bootstrap admins | `ADMIN_LICHESS_USERNAMES`, applied at sign-in; a listed newcomer joins normally and is created approved + admin (§8.2). |
+| Rejected applicants | Cannot re-apply themselves; an admin can approve from the rejected tab (§8.2, §8.5). |
+| Registration | Open to any Lichess account, subject to admin approval (§8.2). |
+| `/jobs` | Admin-only from Phase 2 (§12). |
+| Username lookalike signal | Dropped — the name comes from Lichess, not the applicant (§8.2). |
 | Perf-rating deltas | The **FIDE `dp` table**, indexed by score percentage so any `k` works (§5.3). |
 | Job frequency | Deliberately slow. One hourly job; everything else daily or weekly (§7). |
 | Awards page | Not ported. Out of scope. |
@@ -1129,7 +1165,7 @@ These were open and are now settled. Recorded here so they are not relitigated d
 1. ~~History import~~ — **resolved: no** (§9, §13).
 2. ~~Round numbering~~ — **resolved: continue the sheet's sequence** via the imported open pairings (§9).
 3. **Organiser account** — which Lichess account holds the `challenge:bulk` token, and who has access to it? This is a single point of failure and needs a named owner. *(Needed before Phase 5.)*
-4. **Timezone field** — registration currently collects a timezone, but nothing in this spec uses it. Either find a use (displaying deadlines in local time) or drop it and make registration a single click. *(Needed before Phase 2.)*
+4. ~~Timezone field~~ — **resolved: dropped** (§8.2, §13). Registration is a single screen; the unused `PlayerProfile.timezone` column stays nullable in case a "deadlines in local time" feature ever wants it.
 5. ~~League median for unrated players~~ — **resolved: fixed constant** (§5.1, §13).
 6. **Game analysis** — accuracy and centipawn loss exist only for games analysed on Lichess, and the public API cannot request analysis. Did the old Python script request it some other way, or were those columns sparsely populated in the sheet? *(Affects the Stats page, after Phase 4.)*
 
@@ -1137,6 +1173,7 @@ These were open and are now settled. Recorded here so they are not relitigated d
 
 ## 15. Changelog
 
+- **2026-09-15** — Phase 2 amendments. Lichess OAuth verified (v2.0.171): PKCE `S256`, public clients only, no client secret, no refresh tokens, `POST /api/token/test` and `DELETE /api/token` recorded (§3.1); `LICHESS_CLIENT_SECRET` removed (§2.2). `OAuthToken` loses `refresh_token`, gains `issued_at`; `User` gains `lichess_profile`, `lichess_profile_fetched_at`, `fair_play_agreed_at`; `Session` entity added (§4.1). Registration reordered — agreement before the redirect, timezone dropped (§8.2, §14.4); sign-in, bootstrap-admin and rejected-applicant rules written down; the username-lookalike signal dropped (§8.2). Security mechanisms named (§11). `/jobs` moved under `/admin` (§12). Decisions recorded (§13).
 - **2026-09-07** — Lichess API verified against the OpenAPI definition (v2.0.169). Corrected export paths and options (§3.4, §7.1); documented bulk-pairing atomicity, limits and the `pairAt` ambiguity (§6.3); added pairing-anchored game matching (§7.3) and `manual_external` semantics (§4.1); reshaped `Game` (status column, rating-at-game, acpl, inferred draw subtypes, aborted games excluded); decided unrated constant, rating-at-game, no history import, round numbering, Stats deferral, tooling (§13). Phase 1 scope updated (§12).
 - **2026-09-13** — Recorded how a job run's outcome is decided (§7.2): database failures and total Lichess failure fail the run; partial Lichess failure succeeds but is named in the run's error text.
 - **2026-09-13** — Game export no longer requests `clocks=true` (§3.4, §7.1, §7.3): per-move clock data is meaningless for correspondence games and was only bloating `raw_payload`.

@@ -1,3 +1,9 @@
+# Local, git-ignored overrides — in particular the sign-in variables
+# `serve` needs (see README). Every variable is exported so `go run`
+# below sees them.
+-include .env
+export
+
 DATABASE_URL ?= postgres://ic:ic@localhost:55432/ic?sslmode=disable
 TEST_DATABASE_URL ?= $(DATABASE_URL)
 
