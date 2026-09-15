@@ -1,0 +1,8 @@
+{{define "content"}}
+<div class="mx-auto max-w-xl">
+  <h1 class="mb-3 text-lg font-semibold text-zinc-100">{{.Heading}}</h1>
+  <p class="mb-6 leading-relaxed text-zinc-400">{{.Message}}</p>
+  {{/* hx-boost=false in case the link is /login, which redirects to lichess.org. */}}
+  <a href="{{.LinkHref}}" hx-boost="false" class="rounded bg-zinc-100 px-4 py-2 font-medium text-zinc-900 hover:bg-white">{{.LinkText}}</a>
+</div>
+{{end}}

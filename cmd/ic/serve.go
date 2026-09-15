@@ -16,6 +16,7 @@ import (
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
 	"github.com/nairwolf/4545-correspondence/internal/jobs"
 	"github.com/nairwolf/4545-correspondence/internal/lichess"
+	"github.com/nairwolf/4545-correspondence/internal/tokencrypt"
 	"github.com/nairwolf/4545-correspondence/internal/web"
 )
 
@@ -24,6 +25,16 @@ import (
 // SIGINT/SIGTERM drains in-flight requests and gives a running job a
 // bounded grace to finish and record its outcome before exiting.
 func runServe(ctx context.Context, cfg config.Config) error {
+	// Only serve needs the sign-in configuration; the one-shot
+	// subcommands run with DATABASE_URL alone.
+	if err := cfg.Auth.Validate(); err != nil {
+		return err
+	}
+	tokenKey, err := tokencrypt.ParseKey(cfg.Auth.TokenEncryptionKey)
+	if err != nil {
+		return err
+	}
+
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -69,7 +80,15 @@ func runServe(ctx context.Context, cfg config.Config) error {
 		return fmt.Errorf("serve: start job runner: %w", err)
 	}
 
-	handler, err := web.New(ctx, pool)
+	handler, err := web.New(ctx, web.Deps{
+		Pool:           pool,
+		Lichess:        client,
+		Auth:           lichess.NewOAuth(cfg.Auth.LichessClientID, cfg.Auth.LichessRedirectURI),
+		TokenKey:       tokenKey,
+		StateSecret:    []byte(cfg.Auth.SessionSecret),
+		AdminUsernames: cfg.Auth.AdminLichessUsernames,
+		SecureCookies:  cfg.Auth.SecureCookies(),
+	})
 	if err != nil {
 		return fmt.Errorf("serve: build web handler: %w", err)
 	}
