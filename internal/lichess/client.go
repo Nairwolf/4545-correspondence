@@ -1,8 +1,9 @@
 // Package lichess is the one place in this application that speaks HTTP
 // to lichess.org (spec §3.2: "wrap all of this in a single LichessClient
-// module so the rest of the app never touches HTTP directly"). It
-// implements only what Phase 1 needs: reading public user ratings and
-// game history. Bulk pairing, challenges and OAuth are later phases.
+// module so the rest of the app never touches HTTP directly"): reading
+// public user ratings and game history (Phase 1), and the sign-in calls
+// that act on behalf of one player (Phase 2, see oauth.go). Bulk pairing
+// and challenges are later phases.
 package lichess
 
 import (
@@ -18,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nairwolf/4545-correspondence/internal/tokencrypt"
 )
 
 const defaultBaseURL = "https://lichess.org"
@@ -55,6 +58,16 @@ type API interface {
 	// ExportGame fetches one game by id, returning both the decoded game
 	// and the exact response bytes (see GameStream.Raw for why).
 	ExportGame(ctx context.Context, gameID string) (Game, []byte, error)
+
+	// Account fetches the profile of whoever bearer belongs to — the
+	// step after a token exchange that tells us who just signed in. The
+	// raw bytes are returned too, for users.lichess_profile.
+	Account(ctx context.Context, bearer tokencrypt.Secret) (Account, []byte, error)
+
+	// RevokeToken invalidates bearer on Lichess's side. Used for a token
+	// we obtained but will not keep (a sign-in by a non-member, or a
+	// banned account) and, later, for account deletion (spec §11).
+	RevokeToken(ctx context.Context, bearer tokencrypt.Secret) error
 }
 
 // Client is the real, HTTP-backed implementation of API.
@@ -155,14 +168,17 @@ func (e *APIError) Error() string {
 // do issues one request, retrying exactly once after a 429 (spec §7.2:
 // wait at least 60s, retry once, then let the caller's job fail and be
 // retried by the scheduler — this function only owns the one retry, not
-// the job-level retry). The caller must close the returned response
-// body on success.
+// the job-level retry). bearer is the token the call is made as: the
+// app's own for the read-only polling, a player's for the calls that
+// act on their behalf; empty sends no Authorization header. The caller
+// must close the returned response body on success.
 func (c *Client) do(
 	ctx context.Context,
 	method, path string,
 	query url.Values,
 	body []byte,
 	contentType, accept string,
+	bearer string,
 ) (*http.Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -187,8 +203,8 @@ func (c *Client) do(
 		if accept != "" {
 			req.Header.Set("Accept", accept)
 		}
-		if c.token != "" {
-			req.Header.Set("Authorization", "Bearer "+c.token)
+		if bearer != "" {
+			req.Header.Set("Authorization", "Bearer "+bearer)
 		}
 		return c.httpClient.Do(req)
 	}
@@ -255,6 +271,7 @@ func (c *Client) UsersByID(ctx context.Context, ids []string) ([]User, error) {
 			[]byte(strings.Join(batch, ",")),
 			"text/plain",
 			"application/json",
+			c.token,
 		)
 		if err != nil {
 			return nil, err
@@ -318,6 +335,7 @@ func (c *Client) UserGames(
 		nil,
 		"",
 		"application/x-ndjson",
+		c.token,
 	)
 	if err != nil {
 		return nil, err
@@ -359,6 +377,7 @@ func (c *Client) GamesByID(
 			[]byte(strings.Join(batch, ",")),
 			"text/plain",
 			"application/x-ndjson",
+			c.token,
 		)
 		if err != nil {
 			return nil, err
@@ -392,6 +411,7 @@ func (c *Client) ExportGame(ctx context.Context, gameID string) (Game, []byte, e
 		nil,
 		"",
 		"application/json",
+		c.token,
 	)
 	if err != nil {
 		return Game{}, nil, err
@@ -406,6 +426,52 @@ func (c *Client) ExportGame(ctx context.Context, gameID string) (Game, []byte, e
 		return Game{}, nil, fmt.Errorf("lichess: decode game export: %w", err)
 	}
 	return g, raw, nil
+}
+
+// Account implements API.
+func (c *Client) Account(ctx context.Context, bearer tokencrypt.Secret) (Account, []byte, error) {
+	resp, err := c.do(
+		ctx,
+		http.MethodGet,
+		"/api/account",
+		nil,
+		nil,
+		"",
+		"application/json",
+		string(bearer),
+	)
+	if err != nil {
+		return Account{}, nil, err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxGameBytes))
+	if err != nil {
+		return Account{}, nil, fmt.Errorf("lichess: read account: %w", err)
+	}
+	var a Account
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return Account{}, nil, fmt.Errorf("lichess: decode account: %w", err)
+	}
+	return a, raw, nil
+}
+
+// RevokeToken implements API.
+func (c *Client) RevokeToken(ctx context.Context, bearer tokencrypt.Secret) error {
+	resp, err := c.do(
+		ctx,
+		http.MethodDelete,
+		"/api/token",
+		nil,
+		nil,
+		"",
+		"",
+		string(bearer),
+	)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
 }
 
 // GameStream reads newline-delimited games one at a time, mirroring

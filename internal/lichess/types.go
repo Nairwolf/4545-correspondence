@@ -29,6 +29,24 @@ type User struct {
 	} `json:"perfs"`
 }
 
+// Account is the signed-in user's own profile from GET /api/account
+// (verified UserExtended schema): everything User has, plus the fields
+// the registration queue shows an admin (spec §8.2 "signals"). Disabled
+// and TOSViolation are absent from the JSON unless true, like Perf.Provisional.
+type Account struct {
+	User
+	CreatedAt    int64 `json:"createdAt"` // epoch ms
+	Disabled     bool  `json:"disabled"`
+	TOSViolation bool  `json:"tosViolation"`
+	Verified     bool  `json:"verified"`
+	Count        struct {
+		All   int `json:"all"`
+		Rated int `json:"rated"`
+	} `json:"count"`
+}
+
+func (a Account) CreatedAtTime() time.Time { return time.UnixMilli(a.CreatedAt) }
+
 // GamePlayerUser identifies the human side of a GamePlayer. It's a
 // pointer on GamePlayer because an AI opponent has no user at all
 // (GamePlayerAi in the spec's schema) — not a shape this league's bulk

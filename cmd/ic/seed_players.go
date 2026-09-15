@@ -15,6 +15,7 @@ import (
 
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
 	"github.com/nairwolf/4545-correspondence/internal/lichess"
+	"github.com/nairwolf/4545-correspondence/internal/standings"
 )
 
 // runSeedPlayers implements `ic seed-players <file>` (spec §12 Phase 1):
@@ -95,7 +96,7 @@ func runSeedPlayers(ctx context.Context, pool *pgxpool.Pool, client lichess.API,
 		if _, err := q.CreatePlayerProfile(ctx, user.ID); err != nil {
 			return fmt.Errorf("seed-players: create profile for %s: %w", username, err)
 		}
-		if _, err := q.InsertRatingSnapshot(ctx, ratingSnapshotParams(user.ID, lu)); err != nil {
+		if _, err := q.InsertRatingSnapshot(ctx, standings.SnapshotParams(user.ID, lu)); err != nil {
 			return fmt.Errorf("seed-players: insert rating snapshot for %s: %w", username, err)
 		}
 

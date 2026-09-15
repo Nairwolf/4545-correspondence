@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -272,4 +273,58 @@ func TestGameStream_SkipsBlankKeepAliveLines(t *testing.T) {
 	}
 	require.NoError(t, stream.Err())
 	assert.Equal(t, []string{"g1", "g2"}, ids)
+}
+
+func TestAccount_DecodesFixtureAndSendsTheGivenBearer(t *testing.T) {
+	fixture, err := os.ReadFile("testdata/user_thibault_live.json")
+	require.NoError(t, err)
+
+	var authHeader string
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/account", r.URL.Path)
+		authHeader = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(fixture)
+	})
+	client.token = "app-token" // must NOT be what /api/account is called with
+
+	a, raw, err := client.Account(context.Background(), "lio_player")
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer lio_player", authHeader)
+	assert.Equal(t, fixture, raw, "raw must be Lichess's bytes, untouched")
+
+	assert.Equal(t, "thibault", a.ID)
+	assert.Equal(t, 2010, a.CreatedAtTime().UTC().Year())
+	assert.False(t, a.Disabled, "absent in the fixture → false")
+	assert.False(t, a.TOSViolation)
+	assert.True(t, a.Verified)
+	assert.Equal(t, 21328, a.Count.Rated)
+	require.NotNil(t, a.Perfs.Correspondence)
+	assert.Equal(t, 1942, a.Perfs.Correspondence.Rating)
+}
+
+func TestAccount_FlagsPresentWhenTrue(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"x","username":"X","disabled":true,"tosViolation":true,"count":{"all":3}}`)
+	})
+	a, _, err := client.Account(context.Background(), "t")
+	require.NoError(t, err)
+	assert.True(t, a.Disabled)
+	assert.True(t, a.TOSViolation)
+	assert.Equal(t, 0, a.Count.Rated, "absent rated count decodes as 0")
+}
+
+func TestRevokeToken_SendsDeleteAsTheGivenBearer(t *testing.T) {
+	var method, authHeader string
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/token", r.URL.Path)
+		method, authHeader = r.Method, r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	client.token = "app-token"
+
+	require.NoError(t, client.RevokeToken(context.Background(), "lio_player"))
+	assert.Equal(t, http.MethodDelete, method)
+	assert.Equal(t, "Bearer lio_player", authHeader)
 }
