@@ -515,35 +515,3 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	http.Redirect(w, r, "/", http.StatusFound)
 }
-
-type accountData struct {
-	base
-	User      gen.User
-	Token     *gen.OauthToken // nil when none stored
-	TokenOK   bool            // stored, not revoked, not expired
-	ExpiresOn string
-}
-
-// handleAccount is the Phase 2 account page: application status in
-// plain words, and the state of the Lichess authorisation. Phase 3
-// grows it into the dashboard.
-func (s *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
-	user, _ := currentUser(r)
-	data := accountData{base: s.page(r, "Your account", "account"), User: user}
-
-	tok, err := s.q.GetOAuthToken(r.Context(), user.ID)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		// seeded member who has never signed in before: no token yet
-	case err != nil:
-		serverError(w, err)
-		return
-	default:
-		data.Token = &tok
-		data.TokenOK = !tok.RevokedAt.Valid && (!tok.ExpiresAt.Valid || tok.ExpiresAt.Time.After(time.Now()))
-		if tok.ExpiresAt.Valid {
-			data.ExpiresOn = tok.ExpiresAt.Time.UTC().Format("2 January 2006")
-		}
-	}
-	s.render(w, "account", data)
-}

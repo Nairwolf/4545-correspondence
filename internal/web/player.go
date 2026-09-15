@@ -22,6 +22,7 @@ type playerGame struct {
 	InProgress bool
 	Opening    string
 	Accuracy   pgtype.Numeric
+	LastMoveAt pgtype.Timestamptz // the dashboard shows days since, for ongoing games
 }
 
 type playerData struct {
@@ -119,6 +120,7 @@ func resolveGames(userID pgtype.UUID, rows []gen.ListGamesForUserRow) []playerGa
 			Round:      g.RoundNumber,
 			InProgress: g.Status == gen.GameStatusInProgress,
 			Result:     resultWord(g.Result, playedWhite),
+			LastMoveAt: g.LastMoveAt,
 		}
 		if playedWhite {
 			pg.Color = "white"

@@ -35,7 +35,17 @@ func (s *Server) Handler() http.Handler {
 		r.With(s.authLimiter.middleware).Post("/join", s.handleJoinPost)
 		r.With(s.authLimiter.middleware).Get("/login", s.handleLogin)
 		r.Post("/logout", s.handleLogout)
-		r.With(s.requireUser).Get("/account", s.handleAccount)
+
+		// The player dashboard (spec §8.3), one group behind requireUser
+		// for the same reason /admin is one group behind requireAdmin.
+		r.Route("/account", func(r chi.Router) {
+			r.Use(s.requireUser)
+			r.Get("/", s.handleAccount)
+			r.Post("/activity", s.handleSetActivity)
+			r.Post("/capacity", s.handleSetCapacity)
+			r.Post("/double-games", s.handleSetDoubleGames)
+			r.Post("/resume", s.handleResume)
+		})
 
 		// Everything under /admin is behind the role check (spec §11),
 		// so a route added here later cannot forget it.

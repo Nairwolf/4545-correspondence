@@ -370,6 +370,17 @@ func TestAccount_RequiresSignIn(t *testing.T) {
 	assert.Equal(t, "/login", rec.Header().Get("Location"))
 }
 
+// sessionsOf counts the sessions of one Lichess account. Scoped to the
+// user on purpose: the integration database is the dev database, which
+// holds the maintainer's own live sessions outside this transaction.
+func sessionsOf(t *testing.T, tx pgx.Tx, lichessID string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, tx.QueryRow(context.Background(),
+		"SELECT count(*) FROM sessions s JOIN users u ON u.id = s.user_id WHERE u.lichess_user_id = $1", lichessID).Scan(&n))
+	return n
+}
+
 func TestLogout(t *testing.T) {
 	srv, _, tx := testServer(t)
 	grant(srv, "code-1", "lio_newbie", account("newbie", "Newbie"))
@@ -400,9 +411,7 @@ func TestLogout(t *testing.T) {
 		require.NotNil(t, cleared)
 		assert.Less(t, cleared.MaxAge, 0)
 
-		var n int
-		require.NoError(t, tx.QueryRow(context.Background(), "SELECT count(*) FROM sessions").Scan(&n))
-		assert.Equal(t, 0, n, "session row gone")
+		assert.Equal(t, 0, sessionsOf(t, tx, "newbie"), "session row gone")
 		assert.Equal(t, http.StatusFound, getAs(t, srv, session, "/account").Code, "old cookie no longer works")
 	})
 }
@@ -414,9 +423,11 @@ func TestSession_ExpiryAndTouch(t *testing.T) {
 	session := cookieNamed(signIn(t, srv, intentJoin, "code-1"), "ic_session")
 	require.NotNil(t, session)
 
+	// Every query below is scoped to this test's user (see sessionsOf).
+	const mine = "user_id = (SELECT id FROM users WHERE lichess_user_id = 'newbie')"
 	lastSeen := func() time.Time {
 		var ts time.Time
-		require.NoError(t, tx.QueryRow(ctx, "SELECT last_seen_at FROM sessions").Scan(&ts))
+		require.NoError(t, tx.QueryRow(ctx, "SELECT last_seen_at FROM sessions WHERE "+mine).Scan(&ts))
 		return ts
 	}
 
@@ -427,7 +438,7 @@ func TestSession_ExpiryAndTouch(t *testing.T) {
 	})
 
 	t.Run("an hour-old last_seen_at is refreshed", func(t *testing.T) {
-		_, err := tx.Exec(ctx, "UPDATE sessions SET last_seen_at = now() - interval '2 hours'")
+		_, err := tx.Exec(ctx, "UPDATE sessions SET last_seen_at = now() - interval '2 hours' WHERE "+mine)
 		require.NoError(t, err)
 		before := lastSeen()
 		require.Equal(t, http.StatusOK, getAs(t, srv, session, "/account").Code)
@@ -435,7 +446,7 @@ func TestSession_ExpiryAndTouch(t *testing.T) {
 	})
 
 	t.Run("an expired session is not loaded", func(t *testing.T) {
-		_, err := tx.Exec(ctx, "UPDATE sessions SET expires_at = now() - interval '1 hour'")
+		_, err := tx.Exec(ctx, "UPDATE sessions SET expires_at = now() - interval '1 hour' WHERE "+mine)
 		require.NoError(t, err)
 		assert.Equal(t, http.StatusFound, getAs(t, srv, session, "/account").Code)
 	})
@@ -453,7 +464,5 @@ func TestBannedMidSessionIsSignedOut(t *testing.T) {
 
 	rec := getAs(t, srv, session, "/account")
 	assert.Equal(t, http.StatusFound, rec.Code, "treated as anonymous")
-	var n int
-	require.NoError(t, tx.QueryRow(ctx, "SELECT count(*) FROM sessions").Scan(&n))
-	assert.Equal(t, 0, n, "session destroyed")
+	assert.Equal(t, 0, sessionsOf(t, tx, "newbie"), "session destroyed")
 }
