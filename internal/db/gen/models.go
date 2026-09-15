@@ -506,6 +506,16 @@ type JobRun struct {
 	Detail         []byte             `json:"detail"`
 }
 
+type OauthToken struct {
+	UserID          pgtype.UUID        `json:"user_id"`
+	AccessToken     []byte             `json:"access_token"`
+	Scopes          []string           `json:"scopes"`
+	IssuedAt        pgtype.Timestamptz `json:"issued_at"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt       pgtype.Timestamptz `json:"revoked_at"`
+	LastValidatedAt pgtype.Timestamptz `json:"last_validated_at"`
+}
+
 type Pairing struct {
 	ID             pgtype.UUID        `json:"id"`
 	RoundID        int32              `json:"round_id"`
@@ -579,6 +589,14 @@ type Round struct {
 	Notes         *string            `json:"notes"`
 }
 
+type Session struct {
+	TokenHash  []byte             `json:"token_hash"`
+	UserID     pgtype.UUID        `json:"user_id"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	LastSeenAt pgtype.Timestamptz `json:"last_seen_at"`
+	ExpiresAt  pgtype.Timestamptz `json:"expires_at"`
+}
+
 type Setting struct {
 	Key       string             `json:"key"`
 	Value     []byte             `json:"value"`
@@ -587,13 +605,16 @@ type Setting struct {
 }
 
 type User struct {
-	ID              pgtype.UUID        `json:"id"`
-	LichessUsername string             `json:"lichess_username"`
-	LichessUserID   string             `json:"lichess_user_id"`
-	Role            UserRole           `json:"role"`
-	Status          UserStatus         `json:"status"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	ApprovedAt      pgtype.Timestamptz `json:"approved_at"`
-	ApprovedBy      pgtype.UUID        `json:"approved_by"`
-	RejectionReason *string            `json:"rejection_reason"`
+	ID                      pgtype.UUID        `json:"id"`
+	LichessUsername         string             `json:"lichess_username"`
+	LichessUserID           string             `json:"lichess_user_id"`
+	Role                    UserRole           `json:"role"`
+	Status                  UserStatus         `json:"status"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	ApprovedAt              pgtype.Timestamptz `json:"approved_at"`
+	ApprovedBy              pgtype.UUID        `json:"approved_by"`
+	RejectionReason         *string            `json:"rejection_reason"`
+	LichessProfile          []byte             `json:"lichess_profile"`
+	LichessProfileFetchedAt pgtype.Timestamptz `json:"lichess_profile_fetched_at"`
+	FairPlayAgreedAt        pgtype.Timestamptz `json:"fair_play_agreed_at"`
 }
