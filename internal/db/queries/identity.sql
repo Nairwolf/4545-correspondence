@@ -50,11 +50,6 @@ RETURNING *;
 -- person who has waited longest is at the top.
 SELECT * FROM users WHERE status = $1 ORDER BY created_at ASC;
 
--- name: ListLookalikeCandidates :many
--- Every name an applicant's could be confused with. The comparison
--- itself is in Go (internal/web), where it can be unit-tested.
-SELECT id, lichess_username FROM users WHERE status <> 'rejected';
-
 -- name: UpsertOAuthToken :exec
 -- Every sign-in replaces the stored token: the new one is what Lichess
 -- currently honours, and clearing revoked_at is what makes a
