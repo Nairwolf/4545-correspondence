@@ -4,8 +4,9 @@
 // and the (future) admin UI only ever needs to store what an admin
 // actually changed.
 //
-// Only the keys Phase 1 actually reads are included so far (scoring
-// inputs, used by internal/standings): the pairing-engine-only keys
+// Only the keys something actually reads are included: the scoring
+// inputs (Phase 1, used by internal/standings) and the dashboard's
+// capacity ceiling (Phase 3). The pairing-engine-only keys
 // (color_weight, repeat_penalty, odd_pool_strategy, ...) are added when
 // Phase 4 builds their first consumer, not speculatively now.
 package settings
@@ -39,6 +40,11 @@ type Settings struct {
 	// correspondence time control every league game uses, and one of
 	// the filters a candidate game must match (spec §7.3).
 	DaysPerMove int
+	// MaxConcurrentCeiling is player.max_concurrent_ceiling (default
+	// 20): the highest cap a player may set on their dashboard, if they
+	// set one at all (spec §4.2, §8.3). It bounds the input, not the
+	// default — the default stays unlimited (NULL, spec §5.8).
+	MaxConcurrentCeiling int
 }
 
 // Defaults are the spec §4.2 values, for a database with no override
@@ -50,6 +56,8 @@ func Defaults() Settings {
 		XPWeights:       scoring.DefaultXPWeights,
 		UnratedDefault:  1500,
 		DaysPerMove:     2,
+
+		MaxConcurrentCeiling: 20,
 	}
 }
 
@@ -62,6 +70,8 @@ const (
 	keyXPLoss          = "xp.loss"
 	keyUnratedDefault  = "rating.unrated_default"
 	keyDaysPerMove     = "pairing.days_per_move"
+
+	keyMaxConcurrentCeiling = "player.max_concurrent_ceiling"
 )
 
 // Load returns Defaults() with every stored override applied. An
@@ -97,6 +107,8 @@ func applyOverride(s *Settings, key string, value []byte) error {
 		return json.Unmarshal(value, &s.UnratedDefault)
 	case keyDaysPerMove:
 		return json.Unmarshal(value, &s.DaysPerMove)
+	case keyMaxConcurrentCeiling:
+		return json.Unmarshal(value, &s.MaxConcurrentCeiling)
 	default:
 		return nil // unknown key: not this package's concern yet
 	}
