@@ -14,7 +14,7 @@ import (
 const createApprovedUser = `-- name: CreateApprovedUser :one
 INSERT INTO users (lichess_username, lichess_user_id, status, approved_at)
 VALUES ($1, $2, 'approved', now())
-RETURNING id, lichess_username, lichess_user_id, role, status, created_at, approved_at, approved_by, rejection_reason
+RETURNING id, lichess_username, lichess_user_id, role, status, created_at, approved_at, approved_by, rejection_reason, lichess_profile, lichess_profile_fetched_at, fair_play_agreed_at
 `
 
 type CreateApprovedUserParams struct {
@@ -38,6 +38,9 @@ func (q *Queries) CreateApprovedUser(ctx context.Context, arg CreateApprovedUser
 		&i.ApprovedAt,
 		&i.ApprovedBy,
 		&i.RejectionReason,
+		&i.LichessProfile,
+		&i.LichessProfileFetchedAt,
+		&i.FairPlayAgreedAt,
 	)
 	return i, err
 }
@@ -111,7 +114,7 @@ func (q *Queries) GetPlayerProfile(ctx context.Context, userID pgtype.UUID) (Pla
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, lichess_username, lichess_user_id, role, status, created_at, approved_at, approved_by, rejection_reason FROM users WHERE id = $1
+SELECT id, lichess_username, lichess_user_id, role, status, created_at, approved_at, approved_by, rejection_reason, lichess_profile, lichess_profile_fetched_at, fair_play_agreed_at FROM users WHERE id = $1
 `
 
 func (q *Queries) GetUserByID(ctx context.Context, id pgtype.UUID) (User, error) {
@@ -127,12 +130,15 @@ func (q *Queries) GetUserByID(ctx context.Context, id pgtype.UUID) (User, error)
 		&i.ApprovedAt,
 		&i.ApprovedBy,
 		&i.RejectionReason,
+		&i.LichessProfile,
+		&i.LichessProfileFetchedAt,
+		&i.FairPlayAgreedAt,
 	)
 	return i, err
 }
 
 const getUserByLichessUserID = `-- name: GetUserByLichessUserID :one
-SELECT id, lichess_username, lichess_user_id, role, status, created_at, approved_at, approved_by, rejection_reason FROM users WHERE lichess_user_id = $1
+SELECT id, lichess_username, lichess_user_id, role, status, created_at, approved_at, approved_by, rejection_reason, lichess_profile, lichess_profile_fetched_at, fair_play_agreed_at FROM users WHERE lichess_user_id = $1
 `
 
 func (q *Queries) GetUserByLichessUserID(ctx context.Context, lichessUserID string) (User, error) {
@@ -148,12 +154,15 @@ func (q *Queries) GetUserByLichessUserID(ctx context.Context, lichessUserID stri
 		&i.ApprovedAt,
 		&i.ApprovedBy,
 		&i.RejectionReason,
+		&i.LichessProfile,
+		&i.LichessProfileFetchedAt,
+		&i.FairPlayAgreedAt,
 	)
 	return i, err
 }
 
 const getUserByUsername = `-- name: GetUserByUsername :one
-SELECT id, lichess_username, lichess_user_id, role, status, created_at, approved_at, approved_by, rejection_reason FROM users WHERE lower(lichess_username) = lower($1)
+SELECT id, lichess_username, lichess_user_id, role, status, created_at, approved_at, approved_by, rejection_reason, lichess_profile, lichess_profile_fetched_at, fair_play_agreed_at FROM users WHERE lower(lichess_username) = lower($1)
 `
 
 // Case-insensitive, matching the users_username_ci unique index.
@@ -170,6 +179,9 @@ func (q *Queries) GetUserByUsername(ctx context.Context, lower string) (User, er
 		&i.ApprovedAt,
 		&i.ApprovedBy,
 		&i.RejectionReason,
+		&i.LichessProfile,
+		&i.LichessProfileFetchedAt,
+		&i.FairPlayAgreedAt,
 	)
 	return i, err
 }
@@ -218,7 +230,7 @@ func (q *Queries) InsertRatingSnapshot(ctx context.Context, arg InsertRatingSnap
 }
 
 const listApprovedUsers = `-- name: ListApprovedUsers :many
-SELECT id, lichess_username, lichess_user_id, role, status, created_at, approved_at, approved_by, rejection_reason FROM users WHERE status = 'approved' ORDER BY lichess_username
+SELECT id, lichess_username, lichess_user_id, role, status, created_at, approved_at, approved_by, rejection_reason, lichess_profile, lichess_profile_fetched_at, fair_play_agreed_at FROM users WHERE status = 'approved' ORDER BY lichess_username
 `
 
 func (q *Queries) ListApprovedUsers(ctx context.Context) ([]User, error) {
@@ -240,6 +252,9 @@ func (q *Queries) ListApprovedUsers(ctx context.Context) ([]User, error) {
 			&i.ApprovedAt,
 			&i.ApprovedBy,
 			&i.RejectionReason,
+			&i.LichessProfile,
+			&i.LichessProfileFetchedAt,
+			&i.FairPlayAgreedAt,
 		); err != nil {
 			return nil, err
 		}
