@@ -4,7 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net/url"
+
+	"github.com/nairwolf/4545-correspondence/internal/tokencrypt"
 )
 
 // Fake is an in-memory implementation of API for tests: no network, no
@@ -41,14 +45,32 @@ type Fake struct {
 
 	// Err, when set, makes every call fail with it — Lichess unreachable.
 	Err error
+
+	// Codes maps an authorization code to the token Exchange hands back
+	// for it; an unknown code is refused the way Lichess refuses one.
+	// Together with Accounts (token → profile) and Revoked (every token
+	// RevokeToken was called with) this lets one Fake stand behind the
+	// whole sign-in callback.
+	Codes    map[string]tokencrypt.Secret
+	Accounts map[tokencrypt.Secret]Account
+	Revoked  []tokencrypt.Secret
 }
 
 // NewFake returns an empty Fake ready for a test to populate.
 func NewFake() *Fake {
-	return &Fake{Users: map[string]User{}, Games: map[string]Game{}, RawGames: map[string][]byte{}}
+	return &Fake{
+		Users:    map[string]User{},
+		Games:    map[string]Game{},
+		RawGames: map[string][]byte{},
+		Codes:    map[string]tokencrypt.Secret{},
+		Accounts: map[tokencrypt.Secret]Account{},
+	}
 }
 
-var _ API = (*Fake)(nil)
+var (
+	_ API  = (*Fake)(nil)
+	_ Auth = (*Fake)(nil)
+)
 
 func (f *Fake) UsersByID(ctx context.Context, ids []string) ([]User, error) {
 	if f.Err != nil {
@@ -140,4 +162,64 @@ func (f *Fake) gameSliceStream(games []Game) *GameStream {
 		buf.WriteByte('\n')
 	}
 	return newGameStream(io.NopCloser(&buf))
+}
+
+// AuthCodeURL implements Auth. The URL is not Lichess's, but it carries
+// the same query so a test can check what the browser would be sent.
+func (f *Fake) AuthCodeURL(state, verifier string, scopes []string) string {
+	q := url.Values{
+		"state":     {state},
+		"scope":     {joinScopes(scopes)},
+		"challenge": {verifier},
+	}
+	return "https://lichess.example/oauth?" + q.Encode()
+}
+
+func joinScopes(scopes []string) string {
+	var b bytes.Buffer
+	for i, s := range scopes {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(s)
+	}
+	return b.String()
+}
+
+// Exchange implements Auth.
+func (f *Fake) Exchange(ctx context.Context, code, verifier string) (Token, error) {
+	if f.Err != nil {
+		return Token{}, f.Err
+	}
+	tok, ok := f.Codes[code]
+	if !ok {
+		return Token{}, &ExchangeError{Code: "invalid_grant", Description: "unknown code"}
+	}
+	return Token{AccessToken: tok}, nil
+}
+
+// Account implements API. An unknown token is a 401, as Lichess answers
+// for a revoked or made-up one.
+func (f *Fake) Account(ctx context.Context, bearer tokencrypt.Secret) (Account, []byte, error) {
+	if f.Err != nil {
+		return Account{}, nil, f.Err
+	}
+	a, ok := f.Accounts[bearer]
+	if !ok {
+		return Account{}, nil, &APIError{StatusCode: 401, Message: "No such token"}
+	}
+	raw, err := json.Marshal(a)
+	if err != nil {
+		return Account{}, nil, fmt.Errorf("fake: encode account: %w", err)
+	}
+	return a, raw, nil
+}
+
+// RevokeToken implements API by recording the call.
+func (f *Fake) RevokeToken(ctx context.Context, bearer tokencrypt.Secret) error {
+	if f.Err != nil {
+		return f.Err
+	}
+	f.Revoked = append(f.Revoked, bearer)
+	return nil
 }

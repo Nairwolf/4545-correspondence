@@ -10,6 +10,7 @@ import (
 
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
 	"github.com/nairwolf/4545-correspondence/internal/lichess"
+	"github.com/nairwolf/4545-correspondence/internal/standings"
 )
 
 // runRefreshRatings implements the daily refresh-ratings job (spec §7):
@@ -92,7 +93,7 @@ func doRefreshRatings(ctx context.Context, q *gen.Queries, client lichess.API) (
 			continue
 		}
 
-		params := ratingSnapshotParams(u.ID, lu)
+		params := standings.SnapshotParams(u.ID, lu)
 		if _, err := q.InsertRatingSnapshot(ctx, params); err != nil {
 			return inserted, fmt.Errorf("insert rating snapshot for %s: %w", u.LichessUsername, err)
 		}
