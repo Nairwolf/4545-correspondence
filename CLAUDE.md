@@ -79,6 +79,7 @@ Key modules and their properties:
 - **`repeat_penalty` is a large finite number (1e6), not infinity** — infinity makes the matching unsolvable rather than merely expensive.
 - **Byes are never selected by rating, level, XP, or results** — longest time since last bye, then fewest byes, then user id. A bye must never look like punishment.
 - **Capacity skips are not an inactivity signal.** They must never feed missed starts, auto-pause, or the inactivity check-in.
+- **After `make sqlc`, check the generated struct for any query with a subquery, a derived table (a joined `SELECT ...` or CTE), or a `CASE`/cast expression in its column list.** sqlc will silently type a genuinely nullable result (e.g. `MAX()` over a group that can be empty) as a plain, non-nullable Go field instead of a pointer — no warning, no error, and adding a cast makes it *more* confident of the wrong answer, not less. This is the same failure shape as the `max_concurrent_games` NULL bug above, just introduced by the codegen step instead of application code. The fix is to restructure the query — a separate single-purpose lookup, or a genuine base-table `LEFT JOIN` rather than a joined subquery — until the generated field is the pointer type the nullability actually requires, not to trust that a clean `sqlc generate` run means the types are right.
 - **No email anywhere.** No SMTP, no address collected or stored. Notifications are on-site (always), optional Lichess PM, optional Discord webhook.
 
 ## Behaviour that is configuration, not code

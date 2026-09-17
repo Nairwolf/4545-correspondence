@@ -88,6 +88,34 @@ func createPendingPairing(t *testing.T, q *gen.Queries, roundNumber int32, white
 	return pairing
 }
 
+// createDraftPairing is createPendingPairing's counterpart for a round
+// that is still a draft (spec §7.3, Phase 4, 2026-09-17): sync-games
+// must never touch its pairings, since the round is not published yet
+// and, with pair_at as the search cutoff, a false-positive match could
+// attach a real Lichess game to a round that does not exist yet.
+func createDraftPairing(t *testing.T, q *gen.Queries, roundNumber int32, white, black gen.User, gameID *string) gen.Pairing {
+	t.Helper()
+	ctx := context.Background()
+	ts := pgtype.Timestamptz{Time: time.Now(), Valid: true}
+	round, err := q.CreateRound(ctx, gen.CreateRoundParams{
+		Number:      roundNumber,
+		State:       gen.RoundStateDraft,
+		PublishAt:   ts,
+		PairAt:      ts,
+		GeneratedBy: gen.RoundSourceManual,
+	})
+	require.NoError(t, err)
+	pairing, err := q.UpsertManualPairing(ctx, gen.UpsertManualPairingParams{
+		RoundID:        round.ID,
+		WhiteUserID:    white.ID,
+		BlackUserID:    black.ID,
+		CreationMethod: gen.PairingMethodManualExternal,
+		LichessGameID:  gameID,
+	})
+	require.NoError(t, err)
+	return pairing
+}
+
 func fakeGame(id string, white, black gen.User, status, winner string) lichess.Game {
 	g := lichess.Game{
 		ID:          id,
@@ -184,6 +212,55 @@ func TestDoSyncGames_MatchesAnUnmatchedPairing(t *testing.T) {
 	blackStanding, err := q.GetPlayerStanding(ctx, black.ID)
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), blackStanding.Wins)
+}
+
+func TestDoSyncGames_NeverRechecksADraftRoundsPairing(t *testing.T) {
+	// Phase 4, 2026-09-17: a draft's pairings are not real games yet.
+	// ListPairingsToRecheck must not return them, so no Lichess call is
+	// made for a round nobody has published.
+	q := testQueries(t)
+	ctx := context.Background()
+
+	white := createUser(t, q, "draftrecheckwhite")
+	black := createUser(t, q, "draftrecheckblack")
+	gameID := "draftrecheck1"
+	createDraftPairing(t, q, 80007, white, black, &gameID)
+
+	fake := lichess.NewFake()
+	fake.Games[gameID] = fakeGame(gameID, white, black, lichess.StatusResign, "white")
+
+	stats, err := doSyncGames(ctx, q, fake, settings.Defaults())
+	require.NoError(t, err)
+	assert.Equal(t, 0, stats.InProgressChecked)
+	assert.Equal(t, 0, stats.GamesFinished)
+
+	games, err := q.ListFinishedGamesForUser(ctx, white.ID)
+	require.NoError(t, err)
+	assert.Empty(t, games, "a draft round's game must never be ingested")
+}
+
+func TestDoSyncGames_NeverMatchesADraftRoundsPairing(t *testing.T) {
+	// Same rule as above, for the discovery path (spec §7.3): a draft
+	// pairing with no game id yet must not be offered any candidate,
+	// even one that would otherwise match exactly.
+	q := testQueries(t)
+	ctx := context.Background()
+
+	white := createUser(t, q, "draftmatchwhite")
+	black := createUser(t, q, "draftmatchblack")
+	createDraftPairing(t, q, 80008, white, black, nil)
+
+	fake := lichess.NewFake()
+	fake.Games["draftmatch1"] = fakeGame("draftmatch1", white, black, lichess.StatusMate, "black")
+
+	stats, err := doSyncGames(ctx, q, fake, settings.Defaults())
+	require.NoError(t, err)
+	assert.Equal(t, 0, stats.PairingsChecked)
+	assert.Equal(t, 0, stats.PairingsMatched)
+	assert.Equal(t, 0, stats.GamesFinished)
+
+	_, err = q.GetPlayerStanding(ctx, black.ID)
+	assert.Error(t, err, "a draft round must never reach standings recompute")
 }
 
 func TestDoSyncGames_AmbiguousMatchFlagsThePairingAndAttachesNothing(t *testing.T) {

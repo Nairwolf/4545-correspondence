@@ -11,19 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const countOngoingGamesForUser = `-- name: CountOngoingGamesForUser :one
-SELECT count(*) FROM games
-WHERE status = 'in_progress' AND (white_user_id = $1 OR black_user_id = $1)
-`
-
-// spec §5.8's ongoing_games(player).
-func (q *Queries) CountOngoingGamesForUser(ctx context.Context, whiteUserID pgtype.UUID) (int64, error) {
-	row := q.db.QueryRow(ctx, countOngoingGamesForUser, whiteUserID)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
-}
-
 const deleteGame = `-- name: DeleteGame :exec
 DELETE FROM games WHERE lichess_game_id = $1
 `

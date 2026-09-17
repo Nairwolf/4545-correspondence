@@ -29,7 +29,7 @@ func (q *Queries) AttachGameToPairing(ctx context.Context, arg AttachGameToPairi
 const createRound = `-- name: CreateRound :one
 INSERT INTO rounds (number, state, publish_at, published_at, pair_at, generated_by)
 VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes
+RETURNING id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used
 `
 
 type CreateRoundParams struct {
@@ -66,14 +66,21 @@ func (q *Queries) CreateRound(ctx context.Context, arg CreateRoundParams) (Round
 		&i.GeneratedBy,
 		&i.BulkPairingID,
 		&i.Notes,
+		&i.PoolSize,
+		&i.OddPool,
+		&i.RepeatPairings,
+		&i.SettingsUsed,
 	)
 	return i, err
 }
 
 const getRoundByNumber = `-- name: GetRoundByNumber :one
-SELECT id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes FROM rounds WHERE number = $1
+SELECT id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used FROM rounds WHERE number = $1 AND state <> 'cancelled'
 `
 
+// A cancelled round's number is no longer unique (rounds_number_live,
+// spec §14.2, Phase 4): excluding cancelled rows keeps this :one query
+// honest instead of returning an arbitrary one of two matches.
 func (q *Queries) GetRoundByNumber(ctx context.Context, number int32) (Round, error) {
 	row := q.db.QueryRow(ctx, getRoundByNumber, number)
 	var i Round
@@ -88,6 +95,10 @@ func (q *Queries) GetRoundByNumber(ctx context.Context, number int32) (Round, er
 		&i.GeneratedBy,
 		&i.BulkPairingID,
 		&i.Notes,
+		&i.PoolSize,
+		&i.OddPool,
+		&i.RepeatPairings,
+		&i.SettingsUsed,
 	)
 	return i, err
 }
@@ -128,7 +139,8 @@ SELECT
   p.black_user_id
 FROM pairings p
 JOIN rounds r ON r.id = p.round_id
-WHERE p.lichess_game_id IS NOT NULL
+WHERE r.state = 'published'
+  AND p.lichess_game_id IS NOT NULL
   AND p.status NOT IN ('completed', 'failed', 'cancelled')
 `
 
@@ -148,7 +160,9 @@ type ListPairingsToRecheckRow struct {
 // import time — e.g. from the CSV's optional game_id column — but has
 // never been fetched at all yet, so no games row exists for it.
 // Matching (ListUnmatchedPairings) only ever handles the OTHER case:
-// no game id known yet.
+// no game id known yet. Restricted to PUBLISHED rounds (Phase 4,
+// 2026-09-17): a draft's pairings are not real yet and must never
+// reach Lichess.
 func (q *Queries) ListPairingsToRecheck(ctx context.Context) ([]ListPairingsToRecheckRow, error) {
 	rows, err := q.db.Query(ctx, listPairingsToRecheck)
 	if err != nil {
@@ -189,7 +203,8 @@ FROM pairings p
 JOIN rounds r ON r.id = p.round_id
 JOIN users wu ON wu.id = p.white_user_id
 JOIN users bu ON bu.id = p.black_user_id
-WHERE p.lichess_game_id IS NULL
+WHERE r.state = 'published'
+  AND p.lichess_game_id IS NULL
   AND p.status = 'pending'
   AND NOT p.match_ambiguous
 `
@@ -209,7 +224,11 @@ type ListUnmatchedPairingsRow struct {
 // §7.3 step 2): no game id yet, still pending, and not already flagged
 // for an admin to resolve. Joins in exactly what matching.Match needs
 // (the round's pair_at, and both players' Lichess ids) so the caller
-// makes no further per-pairing queries.
+// makes no further per-pairing queries. Restricted to PUBLISHED rounds
+// (Phase 4, 2026-09-17): without this, the pair_at-1day cutoff would
+// let the hourly job attach a real Lichess game the two draft opponents
+// happen to have started into a round that has not been published yet,
+// and the resulting games row would block the draft's regeneration.
 func (q *Queries) ListUnmatchedPairings(ctx context.Context) ([]ListUnmatchedPairingsRow, error) {
 	rows, err := q.db.Query(ctx, listUnmatchedPairings)
 	if err != nil {
@@ -262,7 +281,7 @@ INSERT INTO pairings (round_id, white_user_id, black_user_id, creation_method, l
 VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (round_id, white_user_id, black_user_id) DO UPDATE SET
   lichess_game_id = COALESCE(pairings.lichess_game_id, EXCLUDED.lichess_game_id)
-RETURNING id, round_id, white_user_id, black_user_id, creation_method, lichess_game_id, status, match_ambiguous, created_at, edited_by
+RETURNING id, round_id, white_user_id, black_user_id, creation_method, lichess_game_id, status, match_ambiguous, created_at, edited_by, position, rating_gap, color_penalty, repeat_of_round
 `
 
 type UpsertManualPairingParams struct {
@@ -299,6 +318,10 @@ func (q *Queries) UpsertManualPairing(ctx context.Context, arg UpsertManualPairi
 		&i.MatchAmbiguous,
 		&i.CreatedAt,
 		&i.EditedBy,
+		&i.Position,
+		&i.RatingGap,
+		&i.ColorPenalty,
+		&i.RepeatOfRound,
 	)
 	return i, err
 }

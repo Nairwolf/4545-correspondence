@@ -11,6 +11,54 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type ExclusionReason string
+
+const (
+	ExclusionReasonAtCapacity      ExclusionReason = "at_capacity"
+	ExclusionReasonInactive        ExclusionReason = "inactive"
+	ExclusionReasonPaused          ExclusionReason = "paused"
+	ExclusionReasonAutoPaused      ExclusionReason = "auto_paused"
+	ExclusionReasonNoValidToken    ExclusionReason = "no_valid_token"
+	ExclusionReasonBye             ExclusionReason = "bye"
+	ExclusionReasonPendingApproval ExclusionReason = "pending_approval"
+	ExclusionReasonRemovedByAdmin  ExclusionReason = "removed_by_admin"
+)
+
+func (e *ExclusionReason) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = ExclusionReason(s)
+	case string:
+		*e = ExclusionReason(s)
+	default:
+		return fmt.Errorf("unsupported scan type for ExclusionReason: %T", src)
+	}
+	return nil
+}
+
+type NullExclusionReason struct {
+	ExclusionReason ExclusionReason `json:"exclusion_reason"`
+	Valid           bool            `json:"valid"` // Valid is true if ExclusionReason is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullExclusionReason) Scan(value interface{}) error {
+	if value == nil {
+		ns.ExclusionReason, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.ExclusionReason.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullExclusionReason) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.ExclusionReason), nil
+}
+
 type GameResult string
 
 const (
@@ -187,6 +235,49 @@ func (ns NullJobRunStatus) Value() (driver.Value, error) {
 		return nil, nil
 	}
 	return string(ns.JobRunStatus), nil
+}
+
+type OddPoolOutcome string
+
+const (
+	OddPoolOutcomeEven       OddPoolOutcome = "even"
+	OddPoolOutcomeDoubleGame OddPoolOutcome = "double_game"
+	OddPoolOutcomeBye        OddPoolOutcome = "bye"
+)
+
+func (e *OddPoolOutcome) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = OddPoolOutcome(s)
+	case string:
+		*e = OddPoolOutcome(s)
+	default:
+		return fmt.Errorf("unsupported scan type for OddPoolOutcome: %T", src)
+	}
+	return nil
+}
+
+type NullOddPoolOutcome struct {
+	OddPoolOutcome OddPoolOutcome `json:"odd_pool_outcome"`
+	Valid          bool           `json:"valid"` // Valid is true if OddPoolOutcome is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullOddPoolOutcome) Scan(value interface{}) error {
+	if value == nil {
+		ns.OddPoolOutcome, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.OddPoolOutcome.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullOddPoolOutcome) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.OddPoolOutcome), nil
 }
 
 type PairingMethod string
@@ -461,6 +552,20 @@ type AuditLog struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type Bye struct {
+	ID        int64              `json:"id"`
+	RoundID   int32              `json:"round_id"`
+	UserID    pgtype.UUID        `json:"user_id"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+type DoubleGame struct {
+	ID        int64              `json:"id"`
+	RoundID   int32              `json:"round_id"`
+	UserID    pgtype.UUID        `json:"user_id"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
 type Game struct {
 	LichessGameID     string             `json:"lichess_game_id"`
 	PairingID         pgtype.UUID        `json:"pairing_id"`
@@ -527,6 +632,10 @@ type Pairing struct {
 	MatchAmbiguous bool               `json:"match_ambiguous"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	EditedBy       pgtype.UUID        `json:"edited_by"`
+	Position       *int32             `json:"position"`
+	RatingGap      *int32             `json:"rating_gap"`
+	ColorPenalty   *int32             `json:"color_penalty"`
+	RepeatOfRound  *int32             `json:"repeat_of_round"`
 }
 
 type PlayerProfile struct {
@@ -577,16 +686,30 @@ type RatingSnapshot struct {
 }
 
 type Round struct {
-	ID            int32              `json:"id"`
-	Number        int32              `json:"number"`
-	State         RoundState         `json:"state"`
-	GeneratedAt   pgtype.Timestamptz `json:"generated_at"`
-	PublishAt     pgtype.Timestamptz `json:"publish_at"`
-	PublishedAt   pgtype.Timestamptz `json:"published_at"`
-	PairAt        pgtype.Timestamptz `json:"pair_at"`
-	GeneratedBy   RoundSource        `json:"generated_by"`
-	BulkPairingID *string            `json:"bulk_pairing_id"`
-	Notes         *string            `json:"notes"`
+	ID             int32              `json:"id"`
+	Number         int32              `json:"number"`
+	State          RoundState         `json:"state"`
+	GeneratedAt    pgtype.Timestamptz `json:"generated_at"`
+	PublishAt      pgtype.Timestamptz `json:"publish_at"`
+	PublishedAt    pgtype.Timestamptz `json:"published_at"`
+	PairAt         pgtype.Timestamptz `json:"pair_at"`
+	GeneratedBy    RoundSource        `json:"generated_by"`
+	BulkPairingID  *string            `json:"bulk_pairing_id"`
+	Notes          *string            `json:"notes"`
+	PoolSize       *int32             `json:"pool_size"`
+	OddPool        *OddPoolOutcome    `json:"odd_pool"`
+	RepeatPairings *int32             `json:"repeat_pairings"`
+	SettingsUsed   []byte             `json:"settings_used"`
+}
+
+type RoundExclusion struct {
+	ID                 int64              `json:"id"`
+	RoundID            int32              `json:"round_id"`
+	UserID             pgtype.UUID        `json:"user_id"`
+	Reason             ExclusionReason    `json:"reason"`
+	OngoingGames       *int32             `json:"ongoing_games"`
+	MaxConcurrentGames *int32             `json:"max_concurrent_games"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
 }
 
 type Session struct {

@@ -1,5 +1,8 @@
 -- name: GetRoundByNumber :one
-SELECT * FROM rounds WHERE number = $1;
+-- A cancelled round's number is no longer unique (rounds_number_live,
+-- spec §14.2, Phase 4): excluding cancelled rows keeps this :one query
+-- honest instead of returning an arbitrary one of two matches.
+SELECT * FROM rounds WHERE number = $1 AND state <> 'cancelled';
 
 -- name: CreateRound :one
 -- published_at is accepted explicitly (rather than left to default)
@@ -19,7 +22,9 @@ RETURNING *;
 -- import time — e.g. from the CSV's optional game_id column — but has
 -- never been fetched at all yet, so no games row exists for it.
 -- Matching (ListUnmatchedPairings) only ever handles the OTHER case:
--- no game id known yet.
+-- no game id known yet. Restricted to PUBLISHED rounds (Phase 4,
+-- 2026-09-17): a draft's pairings are not real yet and must never
+-- reach Lichess.
 SELECT
   p.id AS pairing_id,
   p.lichess_game_id,
@@ -28,7 +33,8 @@ SELECT
   p.black_user_id
 FROM pairings p
 JOIN rounds r ON r.id = p.round_id
-WHERE p.lichess_game_id IS NOT NULL
+WHERE r.state = 'published'
+  AND p.lichess_game_id IS NOT NULL
   AND p.status NOT IN ('completed', 'failed', 'cancelled');
 
 -- name: ListUnmatchedPairings :many
@@ -36,7 +42,11 @@ WHERE p.lichess_game_id IS NOT NULL
 -- §7.3 step 2): no game id yet, still pending, and not already flagged
 -- for an admin to resolve. Joins in exactly what matching.Match needs
 -- (the round's pair_at, and both players' Lichess ids) so the caller
--- makes no further per-pairing queries.
+-- makes no further per-pairing queries. Restricted to PUBLISHED rounds
+-- (Phase 4, 2026-09-17): without this, the pair_at-1day cutoff would
+-- let the hourly job attach a real Lichess game the two draft opponents
+-- happen to have started into a round that has not been published yet,
+-- and the resulting games row would block the draft's regeneration.
 SELECT
   p.id AS pairing_id,
   p.round_id,
@@ -50,7 +60,8 @@ FROM pairings p
 JOIN rounds r ON r.id = p.round_id
 JOIN users wu ON wu.id = p.white_user_id
 JOIN users bu ON bu.id = p.black_user_id
-WHERE p.lichess_game_id IS NULL
+WHERE r.state = 'published'
+  AND p.lichess_game_id IS NULL
   AND p.status = 'pending'
   AND NOT p.match_ambiguous;
 

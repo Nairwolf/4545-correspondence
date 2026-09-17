@@ -37,7 +37,7 @@ type dashboardData struct {
 	Unrated  bool
 	LevelPct int
 
-	Ongoing  int // live count of games in progress (spec §5.8's ongoing_games)
+	Ongoing  int // live in-flight game count (spec §5.8's ongoing_games, amended 2026-09-17)
 	Capacity capacityView
 	Ceiling  int // player.max_concurrent_ceiling
 
@@ -133,7 +133,7 @@ func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, status 
 	data.Unrated = header.IsUnrated != nil && *header.IsUnrated
 	data.LevelPct = levelProgress(header.Xp, header.Level, header.XpToNextLevel)
 
-	ongoing, err := s.q.CountOngoingGamesForUser(ctx, user.ID)
+	ongoing, err := s.q.CountInFlightGamesForUser(ctx, user.ID)
 	if err != nil {
 		serverError(w, err)
 		return

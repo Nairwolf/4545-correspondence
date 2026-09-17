@@ -51,9 +51,9 @@ func Recompute(ctx context.Context, q *gen.Queries, userID pgtype.UUID, cfg sett
 	level, xpToNext := scoring.Level(xp)
 	wins, draws, losses := countResults(finished)
 
-	ongoing, err := q.CountOngoingGamesForUser(ctx, userID)
+	ongoing, err := q.CountInFlightGamesForUser(ctx, userID)
 	if err != nil {
-		return false, fmt.Errorf("standings: count ongoing games: %w", err)
+		return false, fmt.Errorf("standings: count in-flight games: %w", err)
 	}
 
 	profile, err := q.GetPlayerProfile(ctx, userID)

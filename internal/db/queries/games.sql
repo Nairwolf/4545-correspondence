@@ -56,8 +56,3 @@ DELETE FROM games WHERE lichess_game_id = $1;
 SELECT * FROM games
 WHERE status = 'finished' AND (white_user_id = $1 OR black_user_id = $1)
 ORDER BY finished_at DESC;
-
--- name: CountOngoingGamesForUser :one
--- spec §5.8's ongoing_games(player).
-SELECT count(*) FROM games
-WHERE status = 'in_progress' AND (white_user_id = $1 OR black_user_id = $1);
