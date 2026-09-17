@@ -49,13 +49,24 @@ func addGame(t *testing.T, q *gen.Queries, round int32, white, black gen.User, i
 		StartedAt: pgtype.Timestamptz{Time: lastMove.Add(-72 * time.Hour), Valid: true}, LastMoveAt: ts,
 		RawPayload: []byte(`{}`),
 	}
+	pairingStatus := gen.PairingStatusInProgress
 	if result != nil {
 		termination := gen.GameTerminationResign
 		params.Status, params.LichessStatus, params.FinishedAt = gen.GameStatusFinished, "resign", ts
 		params.Result, params.Termination = result, &termination
+		pairingStatus = gen.PairingStatusCompleted
 	}
 	_, err = q.UpsertGame(ctx, params)
 	require.NoError(t, err)
+
+	// As sync-games does: a pairing left pending with no game id counts
+	// as a game in flight (spec §5.8, decided 2026-09-17), so the
+	// fixture would otherwise show every game twice.
+	require.NoError(t, q.AttachGameToPairing(ctx, gen.AttachGameToPairingParams{
+		ID:            pairing.ID,
+		LichessGameID: &id,
+		Status:        pairingStatus,
+	}))
 }
 
 func TestDashboard_Guards(t *testing.T) {

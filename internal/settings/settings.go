@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
 	"github.com/nairwolf/4545-correspondence/internal/scoring"
@@ -145,6 +146,23 @@ const (
 	keyOddPoolStrategy   = "pairing.odd_pool_strategy"
 	keyRated             = "pairing.rated"
 )
+
+// keys is every setting this package reads. Load ignores an
+// unrecognised key on purpose — a setting a future Phase adds must not
+// break this one — which would make a mistyped key at the command line
+// a silent no-op, so `ic setting` checks against this list first.
+var keys = []string{
+	keyLastK, keyMinGamesForPerf, keyXPWin, keyXPDraw, keyXPLoss,
+	keyUnratedDefault, keyDaysPerMove, keyMaxConcurrentCeiling,
+	keyPairingCron, keyPairingMode, keyReviewWindowHours,
+	keyAvoidRecentRounds, keyColorWeight, keyRepeatPenalty,
+	keyOddPoolStrategy, keyRated,
+}
+
+// Known reports whether key is a setting this package understands.
+func Known(key string) bool {
+	return slices.Contains(keys, key)
+}
 
 // Load returns Defaults() with every stored override applied. An
 // unrecognised key is ignored (forward-compatible with settings a

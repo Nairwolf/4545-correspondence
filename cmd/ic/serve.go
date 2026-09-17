@@ -11,11 +11,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/riverqueue/river"
+
 	"github.com/nairwolf/4545-correspondence/internal/config"
 	"github.com/nairwolf/4545-correspondence/internal/db"
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
 	"github.com/nairwolf/4545-correspondence/internal/jobs"
 	"github.com/nairwolf/4545-correspondence/internal/lichess"
+	"github.com/nairwolf/4545-correspondence/internal/settings"
 	"github.com/nairwolf/4545-correspondence/internal/tokencrypt"
 	"github.com/nairwolf/4545-correspondence/internal/web"
 )
@@ -62,7 +66,21 @@ func runServe(ctx context.Context, cfg config.Config) error {
 
 	client := lichess.New(cfg.LichessToken)
 
-	riverClient, err := jobs.NewClient(pool, jobs.Handlers{
+	// pairing.cron is read once, here: river's periodic schedule is
+	// fixed at construction, so changing the setting takes a restart
+	// until the Phase 6 settings UI can reconfigure it live. A cron
+	// expression the scheduler cannot parse fails start-up rather than
+	// leaving the league quietly unpaired.
+	league, err := settings.Load(ctx, gen.New(pool))
+	if err != nil {
+		return fmt.Errorf("serve: load settings: %w", err)
+	}
+
+	// The generate-round handler needs the client it is being
+	// registered on, so it reads the variable rather than a copy: by
+	// the time a job runs, NewClient has long since assigned it.
+	var riverClient *river.Client[pgx.Tx]
+	riverClient, err = jobs.NewClient(pool, jobs.Handlers{
 		SyncGames: func(ctx context.Context, id int64) error {
 			return runSyncGames(ctx, pool, client, &id)
 		},
@@ -72,7 +90,16 @@ func runServe(ctx context.Context, cfg config.Config) error {
 		Recompute: func(ctx context.Context, id int64) error {
 			return runRecompute(ctx, pool, &id)
 		},
-	}, slog.Default())
+		GenerateRound: func(ctx context.Context, id int64) error {
+			return runGenerateRound(ctx, pool, gen.RoundSourceSchedule, jobs.NewScheduler(riverClient), &id)
+		},
+		PublishRound: func(ctx context.Context, roundID int32, id int64) error {
+			return runPublishRound(ctx, pool, roundID, &id)
+		},
+		PublishSweep: func(ctx context.Context, id int64) error {
+			return runPublishSweep(ctx, pool, &id)
+		},
+	}, league.PairingCron, slog.Default())
 	if err != nil {
 		return fmt.Errorf("serve: build job runner: %w", err)
 	}

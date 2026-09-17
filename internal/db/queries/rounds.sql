@@ -172,6 +172,17 @@ INSERT INTO rounds (
 )
 RETURNING *;
 
+-- name: RefreshGeneratedRound :one
+-- Regeneration (spec §8.5) runs the engine again into the round row
+-- that already exists, so an admin who rejects a draft keeps its
+-- number and its review window: only the generation's own facts are
+-- replaced. Guarded on state='draft' like every other edit path.
+UPDATE rounds SET
+  generated_at = now(), generated_by = $2, pool_size = $3, odd_pool = $4,
+  repeat_pairings = $5, settings_used = $6
+WHERE id = $1 AND state = 'draft'
+RETURNING *;
+
 -- name: InsertGeneratedPairing :one
 -- Every engine-generated pairing starts manual_external/pending — the
 -- shape `import-pairings` already produces (spec §6.3: Phase 4 makes
@@ -265,8 +276,11 @@ RETURNING *;
 -- review window has already ended, for the case its scheduled
 -- publish-round job was lost to a restart or a failed enqueue, or was
 -- never scheduled at all (a round generated from the CLI, which has no
--- river client to enqueue with).
-SELECT * FROM rounds WHERE state = 'draft' AND publish_at <= now();
+-- river client to enqueue with). "Now" is the caller's, like every
+-- other timestamp the rounds service writes: now() here would be the
+-- transaction's start time, which is not the same instant and is not
+-- something a test can control.
+SELECT * FROM rounds WHERE state = 'draft' AND publish_at <= $1;
 
 -- name: GetLatestPublishedRound :one
 SELECT * FROM rounds WHERE state = 'published' ORDER BY number DESC LIMIT 1;

@@ -114,6 +114,16 @@ func upsertFinishedGame(
 		RawPayload:        []byte(`{}`),
 	})
 	require.NoError(t, err)
+
+	// Ingestion always attaches the game to its pairing (sync-games),
+	// and a pairing left pending with no game id is counted as a game
+	// in flight (spec §5.8, decided 2026-09-17) — so a fixture that
+	// skipped this step would make a finished game look ongoing.
+	require.NoError(t, q.AttachGameToPairing(context.Background(), gen.AttachGameToPairingParams{
+		ID:            pairing.ID,
+		LichessGameID: &gameID,
+		Status:        gen.PairingStatusCompleted,
+	}))
 }
 
 func TestRecompute_ComputesFromFinishedGames(t *testing.T) {

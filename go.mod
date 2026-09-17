@@ -8,6 +8,7 @@ require (
 	github.com/pressly/goose/v3 v3.28.0
 	github.com/riverqueue/river v0.47.0
 	github.com/riverqueue/river/riverdriver/riverpgxv5 v0.47.0
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/oauth2 v0.37.0
 )

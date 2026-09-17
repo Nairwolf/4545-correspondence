@@ -10,8 +10,14 @@ import (
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
 )
 
-// jobNames are the background jobs /health reports on, in display order.
-var jobNames = []string{"sync-games", "refresh-ratings", "recompute-aggregates"}
+// jobNames are the background jobs /health reports on, in display
+// order. A generate-round run that failed because a draft was already
+// waiting shows up here too: that is the point of recording it as a
+// failure rather than a silent no-op (spec §6.1).
+var jobNames = []string{
+	"sync-games", "refresh-ratings", "recompute-aggregates",
+	"generate-round", "publish-round", "publish-round-sweep",
+}
 
 type healthJob struct {
 	LastStatus  string  `json:"last_status"` // "succeeded" | "failed" | "running" | "never_run"

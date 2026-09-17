@@ -819,16 +819,19 @@ func (q *Queries) ListDoubleGamesForRound(ctx context.Context, roundID int32) ([
 }
 
 const listDraftsDue = `-- name: ListDraftsDue :many
-SELECT id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used FROM rounds WHERE state = 'draft' AND publish_at <= now()
+SELECT id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used FROM rounds WHERE state = 'draft' AND publish_at <= $1
 `
 
 // The hourly publish-round-sweep's input (spec §7): a draft whose
 // review window has already ended, for the case its scheduled
 // publish-round job was lost to a restart or a failed enqueue, or was
 // never scheduled at all (a round generated from the CLI, which has no
-// river client to enqueue with).
-func (q *Queries) ListDraftsDue(ctx context.Context) ([]Round, error) {
-	rows, err := q.db.Query(ctx, listDraftsDue)
+// river client to enqueue with). "Now" is the caller's, like every
+// other timestamp the rounds service writes: now() here would be the
+// transaction's start time, which is not the same instant and is not
+// something a test can control.
+func (q *Queries) ListDraftsDue(ctx context.Context, publishAt pgtype.Timestamptz) ([]Round, error) {
+	rows, err := q.db.Query(ctx, listDraftsDue, publishAt)
 	if err != nil {
 		return nil, err
 	}
@@ -1242,6 +1245,56 @@ type PublishRoundParams struct {
 // the games players go on to create.
 func (q *Queries) PublishRound(ctx context.Context, arg PublishRoundParams) (Round, error) {
 	row := q.db.QueryRow(ctx, publishRound, arg.ID, arg.PublishedAt)
+	var i Round
+	err := row.Scan(
+		&i.ID,
+		&i.Number,
+		&i.State,
+		&i.GeneratedAt,
+		&i.PublishAt,
+		&i.PublishedAt,
+		&i.PairAt,
+		&i.GeneratedBy,
+		&i.BulkPairingID,
+		&i.Notes,
+		&i.PoolSize,
+		&i.OddPool,
+		&i.RepeatPairings,
+		&i.SettingsUsed,
+	)
+	return i, err
+}
+
+const refreshGeneratedRound = `-- name: RefreshGeneratedRound :one
+UPDATE rounds SET
+  generated_at = now(), generated_by = $2, pool_size = $3, odd_pool = $4,
+  repeat_pairings = $5, settings_used = $6
+WHERE id = $1 AND state = 'draft'
+RETURNING id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used
+`
+
+type RefreshGeneratedRoundParams struct {
+	ID             int32           `json:"id"`
+	GeneratedBy    RoundSource     `json:"generated_by"`
+	PoolSize       *int32          `json:"pool_size"`
+	OddPool        *OddPoolOutcome `json:"odd_pool"`
+	RepeatPairings *int32          `json:"repeat_pairings"`
+	SettingsUsed   []byte          `json:"settings_used"`
+}
+
+// Regeneration (spec §8.5) runs the engine again into the round row
+// that already exists, so an admin who rejects a draft keeps its
+// number and its review window: only the generation's own facts are
+// replaced. Guarded on state='draft' like every other edit path.
+func (q *Queries) RefreshGeneratedRound(ctx context.Context, arg RefreshGeneratedRoundParams) (Round, error) {
+	row := q.db.QueryRow(ctx, refreshGeneratedRound,
+		arg.ID,
+		arg.GeneratedBy,
+		arg.PoolSize,
+		arg.OddPool,
+		arg.RepeatPairings,
+		arg.SettingsUsed,
+	)
 	var i Round
 	err := row.Scan(
 		&i.ID,

@@ -99,3 +99,21 @@ func TestDefaults_MatchSpecSection4_2(t *testing.T) {
 	assert.Equal(t, OddPoolDoubleThenBye, d.OddPoolStrategy)
 	assert.True(t, d.Rated)
 }
+
+func TestKnown(t *testing.T) {
+	// Every key applyOverride handles must be Known, or `ic setting`
+	// would refuse a setting that works, and every key it doesn't must
+	// not be, or a typo would look like it took effect.
+	for _, key := range keys {
+		assert.True(t, Known(key), "%s is applied but not listed", key)
+
+		// A JSON array fits no setting, so a key applyOverride handles
+		// rejects it; a key it does not handle is ignored and returns
+		// nil, which is exactly the silent no-op Known exists to catch.
+		s := Defaults()
+		assert.Error(t, applyOverride(&s, key, []byte(`[]`)), "%s is listed but applyOverride ignores it", key)
+	}
+
+	assert.False(t, Known("pairing.reviewwindowhours"))
+	assert.False(t, Known(""))
+}
