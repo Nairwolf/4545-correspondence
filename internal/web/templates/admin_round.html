@@ -24,6 +24,7 @@
     <div><dt class="text-zinc-500">Pool size</dt><dd class="text-zinc-200">{{int32OrDash .Round.PoolSize}}</dd></div>
     <div><dt class="text-zinc-500">Odd pool</dt><dd class="text-zinc-200">{{oddPoolOrDash .Round.OddPool}}</dd></div>
     <div><dt class="text-zinc-500">Repeats accepted</dt><dd class="text-zinc-200">{{int32OrDash .Round.RepeatPairings}}</dd></div>
+    <div><dt class="text-zinc-500">Solver</dt><dd class="text-zinc-200">{{or .Solver "—"}}</dd></div>
     <div><dt class="text-zinc-500">Generated</dt><dd class="text-zinc-200">{{datetime .Round.GeneratedAt}} ({{.Round.GeneratedBy}})</dd></div>
   </dl>
   {{if eq (printf "%s" .Round.State) "draft"}}

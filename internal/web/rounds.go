@@ -16,6 +16,7 @@ import (
 
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
 	"github.com/nairwolf/4545-correspondence/internal/rounds"
+	"github.com/nairwolf/4545-correspondence/internal/settings"
 )
 
 // Admin round management (spec §8.5): generating, reviewing, publishing
@@ -24,6 +25,12 @@ import (
 // Lichess call — so this file needs no river client; a draft this
 // creates is published either by its own scheduled job (server mode)
 // or, for a CLI-generated one, the hourly sweep, at most an hour late.
+//
+// Every action that runs the engine reads the settings inside its own
+// transaction instead of using the server's start-up copy, so a pairing
+// setting changed with `ic setting` — pairing.solver, the weights —
+// applies from the next click, the way the scheduled job already does,
+// rather than from the next restart.
 
 // roundRow is one row of the round list.
 type roundRow struct {
@@ -92,8 +99,11 @@ func (s *Server) handleGenerateRound(w http.ResponseWriter, r *http.Request) {
 
 	var outcome rounds.Outcome
 	genErr := s.roundsTx(ctx, func(tx pgx.Tx) error {
-		var err error
-		outcome, err = rounds.Generate(ctx, tx, s.cfg, time.Now(), gen.RoundSourceManual, admin.ID, nil)
+		cfg, err := settings.Load(ctx, gen.New(tx))
+		if err != nil {
+			return err
+		}
+		outcome, err = rounds.Generate(ctx, tx, cfg, time.Now(), gen.RoundSourceManual, admin.ID, nil)
 		return err
 	})
 
@@ -153,7 +163,23 @@ type roundViewData struct {
 	Exclusions []exclusionGroup
 	Byes       []gen.ListByesForRoundRow
 	Doubles    []gen.ListDoubleGamesForRoundRow
+	Solver     string // empty for an imported round
 	Error      string
+}
+
+// solverOf names the matching algorithm a round was generated with,
+// from its settings snapshot. Every round generated before
+// pairing.solver existed was greedy, and says nothing; an imported
+// round has no snapshot at all.
+func solverOf(round gen.Round) string {
+	var snap rounds.Snapshot
+	if len(round.SettingsUsed) == 0 || json.Unmarshal(round.SettingsUsed, &snap) != nil {
+		return ""
+	}
+	if snap.Solver == "" {
+		return string(settings.SolverGreedy)
+	}
+	return string(snap.Solver)
 }
 
 func (s *Server) handleRoundView(w http.ResponseWriter, r *http.Request) {
@@ -200,6 +226,7 @@ func (s *Server) handleRoundView(w http.ResponseWriter, r *http.Request) {
 		Exclusions: groupExclusions(exclusions),
 		Byes:       byes,
 		Doubles:    doubles,
+		Solver:     solverOf(round),
 		Error:      roundViewError(r.URL.Query().Get("error")),
 	})
 }
@@ -344,7 +371,11 @@ func (s *Server) handleRegenerateRound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err := s.roundsTx(ctx, func(tx pgx.Tx) error {
-		_, err := rounds.Regenerate(ctx, tx, id, s.cfg, admin.ID, nil)
+		cfg, err := settings.Load(ctx, gen.New(tx))
+		if err != nil {
+			return err
+		}
+		_, err = rounds.Regenerate(ctx, tx, id, cfg, admin.ID, nil)
 		return err
 	})
 	switch {
@@ -456,7 +487,11 @@ func (s *Server) handleSwapPairings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err := s.roundsTx(ctx, func(tx pgx.Tx) error {
-		return rounds.SwapPairings(ctx, tx, s.cfg, roundID, a, b, admin.ID)
+		cfg, err := settings.Load(ctx, gen.New(tx))
+		if err != nil {
+			return err
+		}
+		return rounds.SwapPairings(ctx, tx, cfg, roundID, a, b, admin.ID)
 	})
 	switch {
 	case writeActionError(w, err):

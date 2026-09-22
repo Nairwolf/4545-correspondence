@@ -62,6 +62,7 @@ type Snapshot struct {
 	ColorWeight       int                      `json:"color_weight"`
 	RepeatPenalty     int                      `json:"repeat_penalty"`
 	OddPoolStrategy   settings.OddPoolStrategy `json:"odd_pool_strategy"`
+	Solver            settings.Solver          `json:"solver"`
 	Rated             bool                     `json:"rated"`
 	DaysPerMove       int                      `json:"days_per_move"`
 }
@@ -74,6 +75,7 @@ func snapshot(cfg settings.Settings) Snapshot {
 		ColorWeight:       cfg.ColorWeight,
 		RepeatPenalty:     cfg.RepeatPenalty,
 		OddPoolStrategy:   cfg.OddPoolStrategy,
+		Solver:            cfg.Solver,
 		Rated:             cfg.Rated,
 		DaysPerMove:       cfg.DaysPerMove,
 	}
@@ -95,6 +97,16 @@ func engineConfig(cfg settings.Settings, number int32) pairing.Config {
 		RepeatPenalty:     cfg.RepeatPenalty,
 		OddPool:           oddPool,
 	}
+}
+
+// solverFor is the matching algorithm pairing.solver selects (spec §6.2
+// step 4). Settings validation admits only the two values, so anything
+// else here is the default.
+func solverFor(cfg settings.Settings) pairing.Solver {
+	if cfg.Solver == settings.SolverBlossom {
+		return pairing.Blossom{}
+	}
+	return pairing.Greedy{}
 }
 
 // pool is the engine's input together with the mapping back from the

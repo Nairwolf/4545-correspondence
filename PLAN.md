@@ -495,7 +495,7 @@ Nav gains **Rounds** (`nav = "rounds"`); page list gains `admin_rounds`,
 ```
 internal/db/migrations/00011_pairing.sql
 internal/db/queries/rounds.sql                 new queries; pairings.sql / games.sql edits above
-internal/settings/settings.go                  eight pairing keys, validation, tests
+internal/settings/settings.go                  eight pairing keys (+ pairing.solver, step 6b), validation, tests
 internal/pairing/{pairing,pool,odd,cost,colours,solver_greedy}.go + _test.go   pure engine
 internal/pairing/solver_blossom.go             step 6a; selectable through pairing.solver in 6b
 internal/rounds/{rounds,generate,publish,edit}.go + _integration_test.go
@@ -726,6 +726,59 @@ has no LICENSE file**; that decision is open, not blocking.
 
 Automated verification, green: `go build`, `go vet` (both tags),
 gofmt, `make test`, `make test-integration`.
+
+### Step 6b — `pairing.solver`, and settings read per click (2026-09-22)
+
+Built as planned in the build order above, with these notes:
+
+- **The setting.** `pairing.solver` = `"greedy"` (default) |
+  `"blossom"`, validated at load like the other enum keys: an unknown
+  value or a wrong type fails, naming the key. `rounds.solverFor(cfg)`
+  replaces the hard-coded `pairing.Greedy{}` at both `pairing.Generate`
+  call sites. The scheduled `generate-round` job and `ic
+  generate-round` already reload settings on every run, so they need
+  no other change.
+- **Each round records its solver.** `rounds.Snapshot` gains `Solver`,
+  so `settings_used` says which one produced the round. The round
+  view's Diagnostics panel shows it. A round generated before this
+  step has no solver in its snapshot and was greedy; the view says
+  so. An imported round has no snapshot and shows "—".
+- **Admin actions read settings per click.** *Generate now*,
+  *Regenerate* and **Swap** now read the settings inside their own
+  transaction instead of using the server's start-up copy. Swap was
+  not in the plan, but it re-derives colours from the same settings
+  and had the same staleness problem. The other start-up reads (XP
+  weights on public pages, the dashboard's cap ceiling) are not about
+  pairing and are left for Phase 6's settings page.
+- **The web round tests are now independent of stored settings.**
+  Because the handlers read the settings table itself,
+  `isolatePairingPool` also deletes every override inside the test's
+  rolled-back transaction. Otherwise an `ic setting pairing.mode
+  '"auto_publish"'` on the dev database would break every test that
+  expects a draft. (The dev database holds no overrides today.)
+- **Found, not fixed:** spec §8.5 says the diagnostics show "the
+  settings as they were at generation". The round view shows only the
+  solver from `settings_used`, not the weights and window. That gap
+  dates from step 4; noted for close-out.
+- **README:** the `ic` list gains `generate-round`, `publish-round`
+  and `setting`, with the solver example. The rest of the README's
+  Phase 4 work (routes, cron restart note, first-rounds runbook) stays
+  in step 7.
+
+Tests: settings validation (valid value, unknown value, wrong type,
+the default); the rounds service runs the configured solver and
+records it, using the A/B/C/D rematch example (greedy: one rematch,
+blossom after regenerate: none). Through the admin pages: switching
+to blossom takes effect on the next Regenerate with no restart, the
+page names the solver, and switching back restores greedy's pairing
+exactly. An invalid value makes *Generate now* fail with a
+`generate-round` run marked failed and naming `pairing.solver`.
+
+Spec amended (§4.2, §6.2 step 4, §12, §13, §15 entry dated
+2026-09-22).
+
+Automated verification, green: `go build`, `go vet` (both tags),
+gofmt, `make test`, `make test-integration` (every package).
 
 ---
 

@@ -454,7 +454,7 @@ Rows are written for approved members only, and only for published rounds' histo
 
 ### 4.2 Configurable settings
 
-All of these live in `Setting`, are editable from the admin panel, and have the defaults below (taken from the current spreadsheet's behaviour). Until the admin settings UI exists (Phase 6) they are set with `ic setting <key> <json>` or directly in the table; the loader validates ranges and enum values (`review_window_hours`, `avoid_recent_rounds`, `color_weight` ≥ 0; `repeat_penalty` > 0; `mode` and `odd_pool_strategy` from their lists) and fails naming the key, so a bad value stops the next job run visibly rather than defaulting silently. `pairing.cron` is read when the server starts; changing it takes effect on restart. *(Phase 4, 2026-09-17.)*
+All of these live in `Setting`, are editable from the admin panel, and have the defaults below (taken from the current spreadsheet's behaviour). Until the admin settings UI exists (Phase 6) they are set with `ic setting <key> <json>` or directly in the table; the loader validates ranges and enum values (`review_window_hours`, `avoid_recent_rounds`, `color_weight` ≥ 0; `repeat_penalty` > 0; `mode`, `odd_pool_strategy` and `solver` from their lists) and fails naming the key, so a bad value stops the next job run visibly rather than defaulting silently. `pairing.cron` is read when the server starts; changing it takes effect on restart. *(Phase 4, 2026-09-17.)* The admin's round actions that run the engine (generate now, regenerate, swap) read the table on every click, as the scheduled job does on every run, so any other pairing setting takes effect from the next action without a restart. *(2026-09-22.)*
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -473,6 +473,7 @@ All of these live in `Setting`, are editable from the admin panel, and have the 
 | `player.default_max_concurrent` | `null` | Default cap for new players. `null` = unlimited |
 | `player.max_concurrent_ceiling` | `20` | Highest value a player may set, if they set one at all |
 | `pairing.odd_pool_strategy` | `double_then_bye` | `double_then_bye` \| `bye_only` |
+| `pairing.solver` | `greedy` | `greedy` \| `blossom`: the matching algorithm (§6.2 step 4), recorded on each round |
 | `player.default_accepts_double` | `true` | New players absorb odd pools by default, minimising byes |
 | `xp.win` / `xp.draw` / `xp.loss` | `3` / `2` / `1` | XP award per result |
 | `token.invalid_grace_days` | `14` | Days before an unauthorised player is deactivated |
@@ -783,6 +784,19 @@ Inputs: the eligible player set (§5.7), each with `power_rating`, `color_score`
    game in play (step 6a), greedy pairs the volunteer's two slots first,
    with their two cheapest distinct partners — otherwise the scan can
    strand the two copies as the last unmatched pair.
+
+   Amended 2026-09-22: both solvers ship, and the admin chooses with
+   `pairing.solver` (§4.2) — `greedy` by default, `blossom` for the
+   optimum. Each round records its solver in `settings_used` and the
+   round view shows it, so an admin can regenerate a draft under each
+   and compare. Blossom is a port of NetworkX's `max_weight_matching`
+   (BSD-3-Clause, notice kept in the source file): Galil's O(n³) form of
+   Edmonds' algorithm, run in maximum-cardinality mode on weights
+   `M − cost` (M above every cost). Every perfect matching has the same
+   number of pairs, so the heaviest is exactly the cheapest. It was
+   chosen over van Rantwijk's 2008 `mwmatching.py`, from which it
+   descends, because that file carries no licence. Edges are fed in the
+   greedy tie-break order above.
 
 5. Assign colours.
    Use the argmin already computed by colour_penalty in step 3 — the
@@ -1172,7 +1186,7 @@ Lichess OAuth (PKCE, §3.1), the registration flow and account page (§8.2), ser
 Player dashboard at `/account` (§8.3): activity toggle, the opt-in concurrent-games cap with the live in-progress count, double-game opt-out, resume-quest, my standing, my games and the stored authorisation status. UI only: no schema change, no new job, no new Lichess call; `player.max_concurrent_ceiling` becomes the first non-scoring setting read. Not in Phase 3: `validate-tokens` and revocation detection (Phase 5, with the rest of the token automation); bye / double-game history (Phase 4, with the tables); the deletion path (Phase 6, see §11).
 
 **Phase 4 — Pairing.** *(Planned 2026-09-17; see `PLAN.md`.)*
-The pure pairing engine (§6.2, greedy solver behind a `Solver` interface), the `byes` / `double_games` / `round_exclusions` tables and the round diagnostics columns, `generate-round` on `pairing.cron`, the draft / review-window / auto-publish flow with `publish-round` and its hourly sweep, admin round management and diagnostics (§8.5), the dashboard's this-week block (§8.3), and the in-flight capacity count (§5.8). Generated rounds are published as `manual_external` pairings: players create the games by hand and §7.3 finds them, so the phase replaces the spreadsheet's `Pairing_Maker` on its own. **No shadow mode**: the maintainer decided the site pairs for real from its first run; the first rounds use `review_window` with a long window (e.g. 24 hours) so each draft is checked on `/admin/rounds` before it publishes itself. Not in Phase 4: anything that talks to Lichess (bulk pairing, challenges, cancellation, `validate-tokens`, the `no_valid_token` exclusion), `missed_starts` / `evaluate-activity` / auto-pause, notifications, cancelling a published round — all Phase 5.
+The pure pairing engine (§6.2, greedy and blossom solvers behind a `Solver` interface, chosen with `pairing.solver`), the `byes` / `double_games` / `round_exclusions` tables and the round diagnostics columns, `generate-round` on `pairing.cron`, the draft / review-window / auto-publish flow with `publish-round` and its hourly sweep, admin round management and diagnostics (§8.5), the dashboard's this-week block (§8.3), and the in-flight capacity count (§5.8). Generated rounds are published as `manual_external` pairings: players create the games by hand and §7.3 finds them, so the phase replaces the spreadsheet's `Pairing_Maker` on its own. **No shadow mode**: the maintainer decided the site pairs for real from its first run; the first rounds use `review_window` with a long window (e.g. 24 hours) so each draft is checked on `/admin/rounds` before it publishes itself. Not in Phase 4: anything that talks to Lichess (bulk pairing, challenges, cancellation, `validate-tokens`, the `no_valid_token` exclusion), `missed_starts` / `evaluate-activity` / auto-pause, notifications, cancelling a published round — all Phase 5.
 
 **Phase 5 — Automation.**
 Bulk pairing game creation, challenge fallback, ongoing sync, missed-start tracking (`MissedStart` table, `evaluate-activity`) and auto-pause, notifications, `validate-tokens` (§7) with the grace-day deactivation (§3.3), cancelling a published round.
@@ -1220,7 +1234,7 @@ These were open and are now settled. Recorded here so they are not relitigated d
 | `validate-tokens` | **Phase 5**, with the other token automation; the dashboard shows stored token state until then (§8.3). |
 | Dashboard URL | `/account`, grown from the Phase 2 account page. |
 | Preferences before approval | Pending applicants may set them; they take effect on approval (§8.3). |
-| Matching solver | **Greedy** in Phase 4, behind a `Solver` interface; blossom only if live rounds show the need (§6.2 step 4). |
+| Matching solver | **Both**, behind a `Solver` interface, chosen by the admin with `pairing.solver`: greedy by default, blossom (a port of NetworkX's minimum-cost matching) for the optimum (§6.2 step 4). Amended 2026-09-22 from "greedy, blossom only if live rounds show the need". |
 | Cron parsing | `robfig/cron/v3` for `pairing.cron` (already in river's module graph); read at start-up (§7). |
 | Shadow mode | **Not built.** The site pairs for real from its first run; a long review window replaces it (§12). |
 | Relaxation ladder | Unreachable with a finite repeat penalty; repeats are recorded on the round and pairing instead (§6.2 step 7). |
@@ -1244,6 +1258,7 @@ These were open and are now settled. Recorded here so they are not relitigated d
 
 ## 15. Changelog
 
+- **2026-09-22** — Blossom solver, selectable. `pairing.solver` added (`greedy` default | `blossom`), validated at load (§4.2). The blossom solver is a port of NetworkX's `max_weight_matching` (the 2008 `mwmatching.py` it descends from has no licence), run on `M − cost` weights in maximum-cardinality mode; each round records its solver in `settings_used`, shown on the round view (§6.2 step 4). The admin's generate, regenerate and swap actions read settings per click rather than the server's start-up copy (§4.2). Decision on the solver amended (§13), Phase 4 paragraph updated (§12).
 - **2026-09-17** — Phase 4 plan amendments. `Round` gains `pool_size`, `odd_pool`, `repeat_pairings`, `settings_used`, a number unique among non-cancelled rounds and a one-draft rule; `Pairing` gains `position`, `rating_gap`, `color_penalty`, `repeat_of_round`; `RoundExclusion` gains `removed_by_admin` and a per-round uniqueness (§4.1, §4.1.1). Settings validated at load, `pairing.cron` applied on restart (§4.2). Token gate not applied before Phase 5 (§5.7). In-flight count includes pending pairings of published rounds (§5.8). Greedy solver chosen, volunteer slots paired first and coloured jointly, odd pool resolved before solving, the relaxation ladder replaced by recorded repeats (§6.2). Phase 4 publication is the state change with `pair_at` = publish time (§6.3). `publish-round-sweep` named, job uniqueness on `{round, publish_at}`, cron read at start-up (§7). Only published rounds are matched (§7.3). This-week dashboard block (§8.3); round management, diagnostics and manual generation detailed (§8.5). Deletion checklist extended (§11). Phase 4 scope rewritten, shadow mode dropped (§12). Decisions recorded (§13, §14).
 - **2026-09-15** — Phase 3 amendments. Dashboard recorded as built with its scope notes (§8.3); the deletion path made a Phase 6 launch gate with its design intent and a `user_id` table checklist (§11); `validate-tokens` moved to Phase 5 and the Phase 3/5/6 paragraphs updated (§12); decisions recorded (§13).
 - **2026-09-15** — Phase 2 amendments. Lichess OAuth verified (v2.0.171): PKCE `S256`, public clients only, no client secret, no refresh tokens, `POST /api/token/test` and `DELETE /api/token` recorded (§3.1); `LICHESS_CLIENT_SECRET` removed (§2.2). `OAuthToken` loses `refresh_token`, gains `issued_at`; `User` gains `lichess_profile`, `lichess_profile_fetched_at`, `fair_play_agreed_at`; `Session` entity added (§4.1). Registration reordered — agreement before the redirect, timezone dropped (§8.2, §14.4); sign-in, bootstrap-admin and rejected-applicant rules written down; the username-lookalike signal dropped (§8.2). Security mechanisms named (§11). `/jobs` moved under `/admin` (§12). Decisions recorded (§13).

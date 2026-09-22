@@ -46,6 +46,19 @@ const (
 	OddPoolByeOnly OddPoolStrategy = "bye_only"
 )
 
+// Solver selects the matching algorithm the pairing engine uses (spec
+// §4.2, §6.2 step 4).
+type Solver string
+
+const (
+	// SolverGreedy pairs down the sorted list, each player with their
+	// cheapest partner still free. Easy to audit by eye, but can leave
+	// an avoidable rematch at the bottom of the list. The default.
+	SolverGreedy Solver = "greedy"
+	// SolverBlossom finds the pairing with the lowest total cost.
+	SolverBlossom Solver = "blossom"
+)
+
 // Settings is the resolved configuration: defaults overridden by
 // whatever rows exist in the settings table.
 type Settings struct {
@@ -96,6 +109,9 @@ type Settings struct {
 	// OddPoolStrategy is pairing.odd_pool_strategy (default
 	// double_then_bye, spec §6.2 step 6).
 	OddPoolStrategy OddPoolStrategy
+	// Solver is pairing.solver (default greedy, spec §6.2 step 4): the
+	// admin's choice of matching algorithm, recorded on each round.
+	Solver Solver
 	// Rated is pairing.rated (default true): whether generated games
 	// are rated on Lichess (spec §4.2; read by Phase 5's publish, and
 	// snapshotted into Round.settings_used at generation).
@@ -121,6 +137,7 @@ func Defaults() Settings {
 		ColorWeight:       100,
 		RepeatPenalty:     1_000_000,
 		OddPoolStrategy:   OddPoolDoubleThenBye,
+		Solver:            SolverGreedy,
 		Rated:             true,
 	}
 }
@@ -144,6 +161,7 @@ const (
 	keyColorWeight       = "pairing.color_weight"
 	keyRepeatPenalty     = "pairing.repeat_penalty"
 	keyOddPoolStrategy   = "pairing.odd_pool_strategy"
+	keySolver            = "pairing.solver"
 	keyRated             = "pairing.rated"
 )
 
@@ -156,7 +174,7 @@ var keys = []string{
 	keyUnratedDefault, keyDaysPerMove, keyMaxConcurrentCeiling,
 	keyPairingCron, keyPairingMode, keyReviewWindowHours,
 	keyAvoidRecentRounds, keyColorWeight, keyRepeatPenalty,
-	keyOddPoolStrategy, keyRated,
+	keyOddPoolStrategy, keySolver, keyRated,
 }
 
 // Known reports whether key is a setting this package understands.
@@ -244,6 +262,18 @@ func applyOverride(s *Settings, key string, value []byte) error {
 			return nil
 		default:
 			return fmt.Errorf("must be %q or %q, got %q", OddPoolDoubleThenBye, OddPoolByeOnly, strategy)
+		}
+	case keySolver:
+		var solver string
+		if err := json.Unmarshal(value, &solver); err != nil {
+			return err
+		}
+		switch Solver(solver) {
+		case SolverGreedy, SolverBlossom:
+			s.Solver = Solver(solver)
+			return nil
+		default:
+			return fmt.Errorf("must be %q or %q, got %q", SolverGreedy, SolverBlossom, solver)
 		}
 	case keyRated:
 		return json.Unmarshal(value, &s.Rated)

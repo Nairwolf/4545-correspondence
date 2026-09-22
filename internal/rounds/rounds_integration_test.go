@@ -247,6 +247,38 @@ func TestGenerate_StoresWhatTheEngineDecided(t *testing.T) {
 	assert.True(t, audited(t, tx, "round.generate", round.ID), "the generation is in the audit log")
 }
 
+func TestGenerate_RunsAndRecordsTheConfiguredSolver(t *testing.T) {
+	// Greedy pairs alpha with bravo, the closest rating, and leaves
+	// charlie and delta, who met in the last round, to meet again; the
+	// blossom solver pairs them apart (PLAN.md, step 6a).
+	tx := testTx(t)
+	addPlayer(t, tx, "alpha", 2000)
+	addPlayer(t, tx, "bravo", 1990)
+	charlie := addPlayer(t, tx, "charlie", 1600)
+	delta := addPlayer(t, tx, "delta", 1590)
+	addPublishedRound(t, tx, [][2]gen.User{{charlie, delta}})
+
+	solverUsed := func(round gen.Round) settings.Solver {
+		t.Helper()
+		var snapshot rounds.Snapshot
+		require.NoError(t, json.Unmarshal(round.SettingsUsed, &snapshot))
+		return snapshot.Solver
+	}
+
+	greedy := generate(t, tx, settings.Defaults(), nil)
+	assert.Equal(t, settings.SolverGreedy, solverUsed(greedy.Round))
+	require.NotNil(t, greedy.Round.RepeatPairings)
+	assert.EqualValues(t, 1, *greedy.Round.RepeatPairings)
+
+	cfg := settings.Defaults()
+	cfg.Solver = settings.SolverBlossom
+	blossom, err := rounds.Regenerate(context.Background(), tx, greedy.Round.ID, cfg, pgtype.UUID{}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, settings.SolverBlossom, solverUsed(blossom.Round))
+	require.NotNil(t, blossom.Round.RepeatPairings)
+	assert.EqualValues(t, 0, *blossom.Round.RepeatPairings)
+}
+
 func TestGenerate_PairsTheUnlimitedPlayerWithFortyGamesInFlight(t *testing.T) {
 	// The NULL-cap rule end to end (spec §5.8): the default player has
 	// no cap, and no number of games in flight may keep them out of a

@@ -48,7 +48,7 @@ func Generate(
 	if err != nil {
 		return Outcome{}, err
 	}
-	result := pairing.Generate(p.players, p.history, engineConfig(cfg, number), pairing.Greedy{})
+	result := pairing.Generate(p.players, p.history, engineConfig(cfg, number), solverFor(cfg))
 
 	state, publishAt, publishedAt := publication(cfg, now)
 	settingsUsed, err := json.Marshal(snapshot(cfg))
@@ -130,7 +130,7 @@ func Regenerate(
 	if err != nil {
 		return Outcome{}, err
 	}
-	result := pairing.Generate(p.players, p.history, engineConfig(cfg, round.Number), pairing.Greedy{})
+	result := pairing.Generate(p.players, p.history, engineConfig(cfg, round.Number), solverFor(cfg))
 
 	settingsUsed, err := json.Marshal(snapshot(cfg))
 	if err != nil {

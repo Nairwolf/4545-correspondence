@@ -77,7 +77,24 @@ ic import-pairings [--pair-at RFC3339] <round.csv>  # create a round + pairings 
 ic sync-games                                 # run the hourly Lichess sync job once
 ic refresh-ratings                            # run the daily rating-snapshot job once
 ic recompute                                  # rebuild every player_standings row from scratch
+ic generate-round                             # run the weekly round generation once
+ic publish-round <round-number>               # publish a draft now
+ic setting <key> <json-value>                 # set a spec §4.2 setting (validated, audited)
 ```
+
+Until the admin settings page exists (Phase 6), `ic setting` is how a
+setting is changed. A string value needs its JSON quotes, so the shell
+needs them quoted too. For example, to choose the optimal pairing solver
+(spec §6.2 step 4; `greedy` is the default):
+
+```
+ic setting pairing.solver '"blossom"'
+```
+
+The admin's *Generate now* and *Regenerate* buttons pick up a changed
+pairing setting on the next click. Regenerating a draft under each
+solver is the way to compare them: the round page shows which one
+produced it.
 
 Players normally enter the league through `/join` (Lichess OAuth plus an
 admin's approval), which is also what collects the token bulk pairing

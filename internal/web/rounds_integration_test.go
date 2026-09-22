@@ -9,8 +9,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -18,16 +20,21 @@ import (
 )
 
 // isolatePairingPool takes every pre-existing approved user out of the
-// pool and cancels any pre-existing draft, so a round-generation test
-// pairs only the fixtures it adds. Without it, the pairing pool is
-// "every approved user" and the dev database's seeded league would
-// take part in every one of these tests.
+// pool, cancels any pre-existing draft and drops every stored setting
+// override, so a round-generation test pairs only the fixtures it adds,
+// under the §4.2 defaults. Without it, the pairing pool is "every
+// approved user", and the round handlers read the settings table
+// itself: the dev database's league and any `ic setting` the
+// maintainer ran would take part in every one of these tests. All
+// three roll back with the test's transaction.
 func isolatePairingPool(t *testing.T, tx pgx.Tx) {
 	t.Helper()
 	ctx := context.Background()
 	_, err := tx.Exec(ctx, `UPDATE users SET status = 'pending' WHERE status = 'approved'`)
 	require.NoError(t, err)
 	_, err = tx.Exec(ctx, `UPDATE rounds SET state = 'cancelled' WHERE state = 'draft'`)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `DELETE FROM settings`)
 	require.NoError(t, err)
 }
 
@@ -299,6 +306,102 @@ func TestAdminRounds_SwapPairings(t *testing.T) {
 	for _, p := range after {
 		assert.False(t, origPairs[[2]string{p.WhiteUserID.String(), p.BlackUserID.String()}], "a swap must change both pairs")
 	}
+}
+
+func TestAdminRounds_TheSolverSettingAppliesFromTheNextClick(t *testing.T) {
+	// The rematch greedy cannot avoid (PLAN.md, step 6a): greedy pairs
+	// A with B, the closest rating, and leaves C and D, who met in the
+	// last published round, to meet again. Blossom pairs them apart.
+	srv, q, tx := testServer(t)
+	_, adminSession := addAdmin(t, srv, q, tx)
+	isolatePairingPool(t, tx)
+	ctx := context.Background()
+	addPlayer(t, q, tx, "Alpha", true, 2000, 0, 2000, 2000, "0")
+	addPlayer(t, q, tx, "Bravo", true, 1990, 0, 1990, 1990, "0")
+	charlie := addPlayer(t, q, tx, "Charlie", true, 1600, 0, 1600, 1600, "0")
+	delta := addPlayer(t, q, tx, "Delta", true, 1590, 0, 1590, 1590, "0")
+	meetInLastRound(t, q, charlie, delta)
+
+	setSolver := func(value string) {
+		t.Helper()
+		_, err := q.UpsertSetting(ctx, gen.UpsertSettingParams{Key: "pairing.solver", Value: []byte(value)})
+		require.NoError(t, err)
+	}
+	regenerate := func(id int32) {
+		t.Helper()
+		require.Equal(t, http.StatusSeeOther, postAs(t, srv, adminSession, roundPath(id)+"/regenerate", url.Values{}).Code)
+	}
+	repeats := func(id int32) int32 {
+		t.Helper()
+		round, err := q.GetRoundByID(ctx, id)
+		require.NoError(t, err)
+		require.NotNil(t, round.RepeatPairings)
+		return *round.RepeatPairings
+	}
+
+	id, greedyPairings := generateDraft(t, srv, q, adminSession)
+	assert.EqualValues(t, 1, repeats(id), "greedy forces the rematch")
+	assert.Contains(t, getAs(t, srv, adminSession, roundPath(id)).Body.String(), ">greedy</dd>")
+
+	// No restart: the next click reads the new value.
+	setSolver(`"blossom"`)
+	regenerate(id)
+	assert.EqualValues(t, 0, repeats(id), "blossom pairs C and D apart")
+	assert.Contains(t, getAs(t, srv, adminSession, roundPath(id)).Body.String(), ">blossom</dd>")
+
+	// And back: the greedy round comes back exactly as it was.
+	setSolver(`"greedy"`)
+	regenerate(id)
+	again, err := q.ListPairingsForRound(ctx, id)
+	require.NoError(t, err)
+	require.Len(t, again, len(greedyPairings))
+	for i := range again {
+		assert.Equal(t, greedyPairings[i].WhiteUserID, again[i].WhiteUserID)
+		assert.Equal(t, greedyPairings[i].BlackUserID, again[i].BlackUserID)
+	}
+}
+
+func TestAdminRounds_ABadSolverSettingFailsVisibly(t *testing.T) {
+	srv, q, tx := testServer(t)
+	_, adminSession := addAdmin(t, srv, q, tx)
+	isolatePairingPool(t, tx)
+	addPlayer(t, q, tx, "Alpha", true, 2000, 0, 2000, 2000, "0")
+	addPlayer(t, q, tx, "Bravo", true, 1900, 0, 1900, 1900, "0")
+	_, err := q.UpsertSetting(context.Background(), gen.UpsertSettingParams{
+		Key:   "pairing.solver",
+		Value: []byte(`"optimal"`),
+	})
+	require.NoError(t, err)
+
+	rec := postAs(t, srv, adminSession, "/admin/rounds/generate", url.Values{})
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	runs, err := q.ListRecentJobRuns(context.Background(), 20)
+	require.NoError(t, err)
+	latest := latestGenerateRoundRun(t, runs)
+	assert.Equal(t, gen.JobRunStatusFailed, latest.Status)
+	require.NotNil(t, latest.Error)
+	assert.Contains(t, *latest.Error, "pairing.solver", "the failed run names the bad key on /admin/jobs")
+}
+
+// meetInLastRound records a and b as having played each other in a new
+// published round, the most recent one, so the next generation treats
+// pairing them again as a rematch.
+func meetInLastRound(t *testing.T, q *gen.Queries, a, b gen.User) {
+	t.Helper()
+	ctx := context.Background()
+	number, err := q.NextRoundNumber(ctx)
+	require.NoError(t, err)
+	now := pgtype.Timestamptz{Time: time.Now(), Valid: true}
+	round, err := q.CreateRound(ctx, gen.CreateRoundParams{
+		Number: number, State: gen.RoundStatePublished,
+		PublishAt: now, PublishedAt: now, PairAt: now, GeneratedBy: gen.RoundSourceImported,
+	})
+	require.NoError(t, err)
+	_, err = q.UpsertManualPairing(ctx, gen.UpsertManualPairingParams{
+		RoundID: round.ID, WhiteUserID: a.ID, BlackUserID: b.ID, CreationMethod: gen.PairingMethodManualExternal,
+	})
+	require.NoError(t, err)
 }
 
 func latestGenerateRoundRun(t *testing.T, runs []gen.JobRun) gen.JobRun {

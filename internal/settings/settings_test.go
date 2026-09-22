@@ -30,6 +30,7 @@ func TestApplyOverride(t *testing.T) {
 	requireNoError(applyOverride(&s, keyColorWeight, []byte(`50`)))
 	requireNoError(applyOverride(&s, keyRepeatPenalty, []byte(`2000000`)))
 	requireNoError(applyOverride(&s, keyOddPoolStrategy, []byte(`"bye_only"`)))
+	requireNoError(applyOverride(&s, keySolver, []byte(`"blossom"`)))
 	requireNoError(applyOverride(&s, keyRated, []byte(`false`)))
 	requireNoError(applyOverride(&s, "some.unknown.key", []byte(`"ignored"`)))
 
@@ -47,6 +48,7 @@ func TestApplyOverride(t *testing.T) {
 	assert.Equal(t, 50, s.ColorWeight)
 	assert.Equal(t, 2_000_000, s.RepeatPenalty)
 	assert.Equal(t, OddPoolByeOnly, s.OddPoolStrategy)
+	assert.Equal(t, SolverBlossom, s.Solver)
 	assert.False(t, s.Rated)
 }
 
@@ -68,6 +70,8 @@ func TestApplyOverride_RejectsInvalidPairingValues(t *testing.T) {
 		{"repeat penalty: zero", keyRepeatPenalty, `0`},
 		{"repeat penalty: negative", keyRepeatPenalty, `-1000000`},
 		{"odd pool strategy: unknown value", keyOddPoolStrategy, `"draft_only"`},
+		{"solver: unknown value", keySolver, `"optimal"`},
+		{"solver: wrong type", keySolver, `1`},
 		{"rated: wrong type", keyRated, `"true"`},
 	}
 	for _, tc := range cases {
@@ -97,6 +101,7 @@ func TestDefaults_MatchSpecSection4_2(t *testing.T) {
 	assert.Equal(t, 100, d.ColorWeight)
 	assert.Equal(t, 1_000_000, d.RepeatPenalty)
 	assert.Equal(t, OddPoolDoubleThenBye, d.OddPoolStrategy)
+	assert.Equal(t, SolverGreedy, d.Solver)
 	assert.True(t, d.Rated)
 }
 
