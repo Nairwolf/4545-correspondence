@@ -84,14 +84,24 @@ func assertPostConditions(t *testing.T, players []Player, res Result) {
 	assert.Equal(t, res.PoolSize, len(appearances)+byes, "pool size must be the paired players plus the bye")
 }
 
+// generate runs the engine with both solvers and checks the §6.2
+// invariants on each. It returns greedy's result: the default solver,
+// and the one whose tie-breaks the fixtures' expected pairings were
+// written against — blossom may pick a different, equally cheap
+// pairing, and on a few fixtures a strictly cheaper one.
 func generate(t *testing.T, players []Player, history History, cfg Config) Result {
 	t.Helper()
 	if history == nil {
 		history = History{}
 	}
-	res := Generate(players, history, cfg, Greedy{})
-	assertPostConditions(t, players, res)
-	return res
+	greedy := Generate(players, history, cfg, Greedy{})
+	assertPostConditions(t, players, greedy)
+
+	blossom := Generate(players, history, cfg, Blossom{})
+	assertPostConditions(t, players, blossom)
+	assert.LessOrEqual(t, blossom.RepeatPairings, greedy.RepeatPairings,
+		"the optimal solver never accepts more rematches than greedy")
+	return greedy
 }
 
 func TestBuildPool(t *testing.T) {

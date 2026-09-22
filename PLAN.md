@@ -476,9 +476,10 @@ Nav gains **Rounds** (`nav = "rounds"`); page list gains `admin_rounds`,
 - **Bye history** in the same section: count and last round.
   **Double games**: "You've played N double games" in the existing
   section.
-- **`GetPairingForUserInRound` becomes `:many`**: as `:one` it is a
-  `QueryRow`, which would silently show the double-game volunteer only
-  one of their two opponents.
+- **`GetPairingForUserInRound` becomes `:many`** (and so
+  `ListPairingsForUserInRound`): as `:one` it is a `QueryRow`, which
+  would silently show the double-game volunteer only one of their two
+  opponents.
 - `standings.Recompute` sets `is_eligible = approved ∧ active ∧
   ¬paused_by_admin ∧ auto_paused_at IS NULL` (the `00006` comment) as a
   display column; the pool query never reads it. `handleResume` gains
@@ -496,7 +497,7 @@ internal/db/migrations/00011_pairing.sql
 internal/db/queries/rounds.sql                 new queries; pairings.sql / games.sql edits above
 internal/settings/settings.go                  eight pairing keys, validation, tests
 internal/pairing/{pairing,pool,odd,cost,colours,solver_greedy}.go + _test.go   pure engine
-internal/pairing/solver_blossom.go             step 6, optional
+internal/pairing/solver_blossom.go             step 6a; selectable through pairing.solver in 6b
 internal/rounds/{rounds,generate,publish,edit}.go + _integration_test.go
 internal/jobs/jobs.go                          three handlers, cron schedule
 cmd/ic/{generate_round,publish_round,setting}.go, main.go, serve.go, import_pairings.go
@@ -546,10 +547,32 @@ review (`CLAUDE.md`). No test touches the live API.
 5. **Dashboard slot and eligibility** — this-week block, counts,
    `is_eligible`; a test per sentence.
    Suggested: `feat(web): this week's pairing, byes and exclusions on the dashboard`.
-6. **Blossom solver** *(decision 1; may be deferred)* — port of a
-   reference minimum-weight perfect matching, equivalence with brute
-   force on all pools ≤ 8, determinism, then flip the default solver.
-   Suggested: `feat(pairing): minimum-weight perfect matching solver`.
+6. **Blossom solver, selectable by a setting** *(decision 1, amended
+   2026-09-22: the maintainer keeps both solvers and lets the admin
+   choose, rather than replacing greedy)*. A new setting
+   `pairing.solver` = `"greedy"` (default, today's behaviour) |
+   `"blossom"`; each round records its solver in `settings_used` and
+   the admin round view shows it. Two commit points:
+   - **6a — the solver, not wired in.** `internal/pairing/solver_blossom.go`:
+     a hand port of van Rantwijk's `mwmatching.py` (licence checked
+     first; no Go dependency), run as maximum-cardinality
+     maximum-weight matching on `M − cost`, which on a graph where
+     every complete pairing has the same size is exactly the
+     minimum-cost perfect matching. Edges fed in the §6.2 step 4 order
+     `(cost, lower id, higher id)`. Tests: same total cost as brute
+     force on the corpus up to 8 slots; valid matchings; the
+     A 2000 / B 1990 / C 1600 / D 1590 rematch example; determinism
+     under shuffled input; a 200-player pool plus a benchmark; the
+     engine's table tests under both solvers.
+     Suggested: `feat(pairing): minimum-weight perfect matching solver`.
+   - **6b — the setting and the wiring.** `settings.Solver` with
+     validation; `rounds.Snapshot.Solver` and `solverFor(cfg)` at both
+     `pairing.Generate` call sites; the admin *Generate now* and
+     *Regenerate* handlers reload settings per request instead of
+     using the start-up copy (otherwise a solver switch, or any
+     pairing-weight change, is ignored until a restart); the solver in
+     the diagnostics panel; spec §4.2 / §6.2 / §13 / §15, README.
+     Suggested: `feat(rounds): choose the pairing solver with pairing.solver`.
 7. **Docs and close-out** — README (routes, subcommands, cron restart
    note, first-rounds runbook), `CLAUDE.md` repository-state paragraph,
    spec amendments below, this file's "what was built" section.
@@ -589,6 +612,120 @@ review (`CLAUDE.md`). No test touches the live API.
   and `evaluate-activity` listed under Phase 5.
 - **§13 / §14** — decisions 1–9 as answered; §14.2 closed with the
   concrete rule.
+
+---
+
+## What was built
+
+Steps 1–4 are summarised at close-out (step 7); their commits are
+`7ac7596`, `5b8e3be`, `0544276`, `c4a38aa`.
+
+### Step 5 — dashboard slot and eligibility (2026-09-22, `bdc6976`)
+
+Built as planned in *Dashboard slot* above, with these notes:
+
+- **The bye sentence is the spec's (§8.3)**, not the shorter line
+  first planned: "Odd number of players this week and nobody was free
+  for a double game, so you sat out. You're first in line to avoid the
+  next one." It reads the round's own `settings_used`: under
+  `bye_only` the double-game clause is dropped, because it would be
+  false.
+- **The query is `ListPairingsForUserInRound`**, not
+  `GetPairingForUserInRound`: `List…` is this codebase's prefix for a
+  `:many` query. The generated row struct was checked (CLAUDE.md):
+  `OpponentUsername string`, `IsWhite bool`, both from NOT NULL
+  columns.
+- **A dashboard fixture must be the latest round whatever the database
+  holds**, since the integration tests run in a rolled-back
+  transaction on the dev database (6 published rounds, up to 200).
+  The fixtures use round numbers 9000+. The "no published round" test
+  skips on such a database.
+- No new Tailwind class: everything the section uses was already in
+  `app.css`.
+
+### Step 6a — the blossom solver, not yet wired in (2026-09-22)
+
+`internal/pairing/solver_blossom.go`: `Blossom`, a second `Solver`. Of
+every way to pair all the slots, it returns one with the lowest total
+cost. Nothing calls it yet; 6b adds the `pairing.solver` setting.
+
+**Why it exists.** Greedy never looks ahead: pairing the top of the
+list well can leave an avoidable rematch at the bottom. Worked
+example: A 2000, B 1990, C 1600, D 1590, with C and D having just met.
+Greedy pairs A–B (gap 10) and leaves C–D to meet again (cost
+≈ 1 000 020). A–C and B–D costs ≈ 800 with no rematch. On the
+brute-force corpus (1 000 pools of 2–6 players), greedy finds the best
+pairing in 743 and forces an avoidable rematch in 49.
+
+**The source, and why (maintainer's choice, 2026-09-22).** The plan
+named van Rantwijk's 2008 `mwmatching.py`. That file turned out to
+carry **no licence at all**, so it is not free to copy. Three sources
+were considered:
+- **NetworkX's `max_weight_matching` — chosen.** BSD-3-Clause; the same
+  algorithm (Galil 1986, O(n³), with the "pair everyone" option); its
+  `min_weight_matching` uses exactly the `M − cost` transformation
+  below.
+- The author's 2023 rewrite (MIT): rejected. It is more code, with
+  extra data structures for a speed a few hundred players never need.
+- A fresh implementation from Galil's paper: rejected. Slowest to
+  write and riskiest.
+
+The BSD licence asks that NetworkX's copyright notice and licence text
+travel with the copied code: they are the comment at the top of
+`solver_blossom.go`, separated from the package clause so they are not
+the package doc. No Go dependency was added. **This repository still
+has no LICENSE file**; that decision is open, not blocking.
+
+**How the port maps onto Go:**
+- **Lowest cost as highest weight.** The algorithm maximises total
+  weight, so each edge weighs `M − cost` with `M` = the largest cost
+  + 1. It runs in maximum-cardinality mode, and every complete pairing
+  has the same number of pairs, so the heaviest pairing is exactly the
+  cheapest. Costs are integers, so the arithmetic is exact; NetworkX's
+  `delta1` step (only used without maximum cardinality) is dropped.
+- **Determinism.** NetworkX's dictionaries become fields on one
+  `*blossom` per vertex or blossom. Every dictionary it *iterates*
+  becomes an ordered slice, reproducing Python's insertion order.
+  Maps remain only for lookups, because Go's map iteration order is
+  random. Edges, and so each vertex's neighbours, are fed in §6.2 step
+  4's order: cost, lower id, higher id, then slot index for the
+  volunteer's two slots.
+- **Plain recursion.** NetworkX flattens two recursive functions into
+  loops ("trampolines") because of Python's recursion limit. Go has
+  none, so they are ordinary recursion, with the same call order.
+- **The optimality certificate** (`verifyOptimum`, NetworkX's
+  `verifyOptimum`) is ported, but only the tests call it; `Match`
+  does not run it on every round.
+
+**Verification:**
+- **Against brute force:** optimal on all 1 800 corpus pools of up to
+  **10 slots** (the plan said 8; 10 still checks all 945 possible
+  pairings instantly). The cost is compared, not the pairing, since
+  two pairings can tie.
+- **League-sized pools** (51, 120, 199, 200 players): the certificate
+  holds; blossom never has more rematches, nor a higher cost, than
+  greedy.
+- **Determinism:** a 99-player pool in shuffled orders gives an
+  identical round.
+- **Speed:** about 23 ms and 12.8 MB for a 200-player pool
+  (`BenchmarkBlossom_200Players`).
+- **Coverage:** every function at 100%, apart from `Match`'s
+  unreachable panic and the certificate's error returns, which never
+  firing is the point.
+- **The engine's table tests run under both solvers.** `generate`
+  checks the §6.2 invariants on each result and that blossom never
+  accepts more rematches, then returns greedy's result: the fixtures'
+  expected pairings were written against greedy's tie-breaks. Every
+  one of those specific expectations was also checked once against
+  blossom and passes. Where the two differ, the pairings are equally
+  cheap, except on one 6-slot fixture where blossom's (1 450) beats
+  greedy's (1 650).
+- **Greedy's measurement is unchanged** (743 / 1 000, 49 rematches):
+  the corpus now comes from a shared `corpusGraph` helper that draws
+  the same random numbers as before.
+
+Automated verification, green: `go build`, `go vet` (both tags),
+gofmt, `make test`, `make test-integration`.
 
 ---
 

@@ -62,18 +62,10 @@ func TestGreedy_AgainstBruteForceOnSmallPools(t *testing.T) {
 	for range 200 {
 		for size := 2; size <= 6; size++ {
 			for _, withVolunteer := range []bool{false, true} {
-				pool, history := randomPool(rng, size)
-				slots := make([]Slot, 0, size+1)
-				for i, p := range pool {
-					slots = append(slots, Slot{Pool: i, ID: p.ID})
-				}
-				if withVolunteer {
-					slots = append(slots, Slot{Pool: 0, ID: pool[0].ID})
-				}
-				if len(slots)%2 == 1 {
+				g, ok := corpusGraph(rng, size, withVolunteer, cfg)
+				if !ok {
 					continue
 				}
-				g := buildGraph(pool, slots, history, cfg)
 
 				got := Greedy{}.Match(g)
 				want := bruteForce{}.Match(g)
@@ -146,6 +138,27 @@ func randomPool(rng *rand.Rand, size int) ([]Player, History) {
 		}
 	}
 	return pool, history
+}
+
+// corpusGraph builds one fixture of the brute-force corpus: a random
+// pool of size players, plus a second slot for the first player when
+// withVolunteer. ok is false when that leaves an odd number of slots.
+// The pool is drawn before the parity check, so a skipped fixture
+// consumes the same random numbers as a kept one and the corpus stays
+// the same whichever solver reads it.
+func corpusGraph(rng *rand.Rand, size int, withVolunteer bool, cfg Config) (g *Graph, ok bool) {
+	pool, history := randomPool(rng, size)
+	slots := make([]Slot, 0, size+1)
+	for i, p := range pool {
+		slots = append(slots, Slot{Pool: i, ID: p.ID})
+	}
+	if withVolunteer {
+		slots = append(slots, Slot{Pool: 0, ID: pool[0].ID})
+	}
+	if len(slots)%2 == 1 {
+		return nil, false
+	}
+	return buildGraph(pool, slots, history, cfg), true
 }
 
 func assertValidMatching(t *testing.T, g *Graph, matching [][2]int) {
