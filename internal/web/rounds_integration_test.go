@@ -361,6 +361,53 @@ func TestAdminRounds_TheSolverSettingAppliesFromTheNextClick(t *testing.T) {
 	}
 }
 
+func TestAdminRounds_ShowsTheSettingsAtGeneration(t *testing.T) {
+	// Spec §8.5: the settings as they were when the round was
+	// generated, not today's — a draft reviewed after an `ic setting`
+	// must still say what it was paired under.
+	srv, q, tx := testServer(t)
+	_, adminSession := addAdmin(t, srv, q, tx)
+	isolatePairingPool(t, tx)
+	ctx := context.Background()
+	addPlayer(t, q, tx, "Alpha", true, 2000, 0, 2000, 2000, "0")
+	addPlayer(t, q, tx, "Bravo", true, 1900, 0, 1900, 1900, "0")
+	set := func(key, value string) {
+		t.Helper()
+		_, err := q.UpsertSetting(ctx, gen.UpsertSettingParams{Key: key, Value: []byte(value)})
+		require.NoError(t, err)
+	}
+	set("pairing.color_weight", `37`)
+	set("pairing.avoid_recent_rounds", `3`)
+	set("pairing.review_window_hours", `24`)
+
+	id, _ := generateDraft(t, srv, q, adminSession)
+	set("pairing.color_weight", `50`)
+	set("pairing.solver", `"blossom"`)
+
+	body := getAs(t, srv, adminSession, roundPath(id)).Body.String()
+	assert.Contains(t, body, "Settings at generation")
+	assert.Contains(t, body, ">37</dd>", "the colour weight in force at generation, not today's 50")
+	assert.NotContains(t, body, ">50</dd>")
+	assert.Contains(t, body, ">3 rounds</dd>")
+	assert.Contains(t, body, ">24 h</dd>")
+	assert.Contains(t, body, ">greedy</dd>")
+	assert.Contains(t, body, ">double_then_bye</dd>")
+	assert.Contains(t, body, ">rated, 2 days per move</dd>")
+
+	// An imported round was never generated: nothing to show, and it
+	// must say so rather than show defaults it was not paired under.
+	number, err := q.NextRoundNumber(ctx)
+	require.NoError(t, err)
+	now := pgtype.Timestamptz{Time: time.Now(), Valid: true}
+	imported, err := q.CreateRound(ctx, gen.CreateRoundParams{
+		Number: number, State: gen.RoundStatePublished,
+		PublishAt: now, PublishedAt: now, PairAt: now, GeneratedBy: gen.RoundSourceImported,
+	})
+	require.NoError(t, err)
+	body = getAs(t, srv, adminSession, roundPath(imported.ID)).Body.String()
+	assert.Contains(t, body, "None recorded: this round was imported")
+}
+
 func TestAdminRounds_ABadSolverSettingFailsVisibly(t *testing.T) {
 	srv, q, tx := testServer(t)
 	_, adminSession := addAdmin(t, srv, q, tx)

@@ -163,23 +163,24 @@ type roundViewData struct {
 	Exclusions []exclusionGroup
 	Byes       []gen.ListByesForRoundRow
 	Doubles    []gen.ListDoubleGamesForRoundRow
-	Solver     string // empty for an imported round
-	Error      string
+	// Settings are the pairing settings as they stood at generation
+	// (spec §8.5), not today's; nil for an imported round.
+	Settings *rounds.Snapshot
+	Error    string
 }
 
-// solverOf names the matching algorithm a round was generated with,
-// from its settings snapshot. Every round generated before
-// pairing.solver existed was greedy, and says nothing; an imported
-// round has no snapshot at all.
-func solverOf(round gen.Round) string {
+// settingsUsed decodes a round's settings snapshot. Every round
+// generated before pairing.solver existed was greedy, and its snapshot
+// says nothing; an imported round has no snapshot at all.
+func settingsUsed(round gen.Round) *rounds.Snapshot {
 	var snap rounds.Snapshot
 	if len(round.SettingsUsed) == 0 || json.Unmarshal(round.SettingsUsed, &snap) != nil {
-		return ""
+		return nil
 	}
 	if snap.Solver == "" {
-		return string(settings.SolverGreedy)
+		snap.Solver = settings.SolverGreedy
 	}
-	return string(snap.Solver)
+	return &snap
 }
 
 func (s *Server) handleRoundView(w http.ResponseWriter, r *http.Request) {
@@ -226,7 +227,7 @@ func (s *Server) handleRoundView(w http.ResponseWriter, r *http.Request) {
 		Exclusions: groupExclusions(exclusions),
 		Byes:       byes,
 		Doubles:    doubles,
-		Solver:     solverOf(round),
+		Settings:   settingsUsed(round),
 		Error:      roundViewError(r.URL.Query().Get("error")),
 	})
 }
