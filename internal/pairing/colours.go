@@ -39,6 +39,15 @@ func assignColours(a, b Player) (white, black Player) {
 	return b, a
 }
 
+// AssignColours is assignColours, exported for the one caller outside
+// Generate: an admin's swap between two pairings (spec §8.5) re-derives
+// colours with the engine's own colour step, so a swap never worsens
+// balance and can never disagree with how Generate would have coloured
+// the same pair.
+func AssignColours(a, b Player) (white, black Player) {
+	return assignColours(a, b)
+}
+
 // assignDoubleColours re-colours the double-game volunteer's two games
 // so they get ONE WHITE AND ONE BLACK (§6.2 step 6a) — a hard
 // constraint, not a preference, which is what makes a double game free

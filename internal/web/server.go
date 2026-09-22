@@ -97,7 +97,10 @@ func New(ctx context.Context, deps Deps) (*Server, error) {
 // transaction-scoped db and *gen.Queries (so nothing is committed to the
 // real database) while still passing the real pool that /health pings.
 func newServer(deps Deps, db txBeginner, q *gen.Queries, cfg settings.Settings) (*Server, error) {
-	pages := []string{"home", "standings", "levels", "player", "jobs", "join", "account", "auth_error", "admin_registrations"}
+	pages := []string{
+		"home", "standings", "levels", "player", "jobs", "join", "account", "auth_error",
+		"admin_registrations", "admin_rounds", "admin_round",
+	}
 	templates := make(map[string]*template.Template, len(pages))
 	for _, name := range pages {
 		t, err := template.New("layout.html").Funcs(funcs).ParseFS(
@@ -208,6 +211,12 @@ var funcs = template.FuncMap{
 	},
 	"sortHref":  sortHref,
 	"sortArrow": sortArrow,
+	"oddPoolOrDash": func(v *gen.OddPoolOutcome) string {
+		if v == nil {
+			return "—"
+		}
+		return string(*v)
+	},
 }
 
 func numericString(n pgtype.Numeric, zero string) string {

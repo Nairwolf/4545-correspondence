@@ -1,0 +1,148 @@
+{{define "content"}}
+<div class="mb-4 flex items-center justify-between">
+  <h1 class="text-lg font-semibold text-zinc-100">Round #{{.Round.Number}}</h1>
+  <a href="/admin/rounds" class="text-sm text-zinc-500 hover:text-zinc-300">&larr; All rounds</a>
+</div>
+
+{{if .Error}}<p class="mb-4 rounded border border-red-900/60 bg-red-950/30 p-2 text-sm text-red-300">{{.Error}}</p>{{end}}
+
+{{/* State banner */}}
+<div class="mb-4 rounded border p-3 text-sm {{if eq (printf "%s" .Round.State) "draft"}}border-amber-800/60 bg-amber-950/30 text-amber-200{{else if eq (printf "%s" .Round.State) "published"}}border-emerald-900/60 bg-emerald-950/20 text-emerald-200{{else}}border-zinc-800 bg-zinc-900/40 text-zinc-400{{end}}">
+  {{if eq (printf "%s" .Round.State) "draft"}}
+    Draft — auto-publishes at {{datetime .Round.PublishAt}} unless published, cancelled or regenerated first.
+  {{else if eq (printf "%s" .Round.State) "published"}}
+    Published {{datetime .Round.PublishedAt}}. Pairings are manual_external/pending; players challenge each other by hand.
+  {{else}}
+    Cancelled{{if .Round.Notes}}: {{.Round.Notes}}{{end}}.
+  {{end}}
+</div>
+
+{{/* Diagnostics panel (spec §8.5) */}}
+<div class="mb-6 rounded border border-zinc-800 bg-zinc-900/40 p-3">
+  <h2 class="mb-2 text-sm font-semibold text-zinc-200">Diagnostics</h2>
+  <dl class="grid grid-cols-2 gap-x-6 gap-y-1 text-xs sm:grid-cols-4">
+    <div><dt class="text-zinc-500">Pool size</dt><dd class="text-zinc-200">{{int32OrDash .Round.PoolSize}}</dd></div>
+    <div><dt class="text-zinc-500">Odd pool</dt><dd class="text-zinc-200">{{oddPoolOrDash .Round.OddPool}}</dd></div>
+    <div><dt class="text-zinc-500">Repeats accepted</dt><dd class="text-zinc-200">{{int32OrDash .Round.RepeatPairings}}</dd></div>
+    <div><dt class="text-zinc-500">Generated</dt><dd class="text-zinc-200">{{datetime .Round.GeneratedAt}} ({{.Round.GeneratedBy}})</dd></div>
+  </dl>
+  {{if eq (printf "%s" .Round.State) "draft"}}
+  <p class="mt-2 text-xs text-zinc-500">The pool was not recalculated after generation — regenerate to pick up any change in standings, capacity or activity since (spec §5.8).</p>
+  {{end}}
+</div>
+
+{{/* Exclusions */}}
+{{if .Exclusions}}
+<div class="mb-6 rounded border border-zinc-800 bg-zinc-900/40 p-3">
+  <h2 class="mb-2 text-sm font-semibold text-zinc-200">Exclusions</h2>
+  {{range .Exclusions}}
+  <div class="mb-2 last:mb-0">
+    <h3 class="text-xs font-medium uppercase tracking-wide text-zinc-500">{{.Reason}} ({{len .Rows}})</h3>
+    <ul class="mt-1 text-xs text-zinc-400">
+      {{range .Rows}}
+      <li>{{.LichessUsername}}{{if .OngoingGames}} — {{int32OrDash .OngoingGames}} of {{int32OrDash .MaxConcurrentGames}} games in progress{{end}}</li>
+      {{end}}
+    </ul>
+  </div>
+  {{end}}
+</div>
+{{end}}
+
+{{/* Pairings table */}}
+<div class="overflow-x-auto">
+<table class="w-full min-w-[64rem] border-collapse text-left">
+  <thead class="text-xs uppercase tracking-wide text-zinc-500">
+    <tr class="border-b border-zinc-800">
+      <th class="py-2 pr-3">#</th>
+      <th class="py-2 pr-3">White</th>
+      <th class="py-2 pr-3">Black</th>
+      <th class="py-2 pr-3 text-right">Gap</th>
+      <th class="py-2 pr-3 text-right">Colour pen.</th>
+      <th class="py-2 pr-3">Repeat of</th>
+      <th class="py-2 pr-3">Status</th>
+      <th class="py-2">Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{$round := .Round}}
+    {{range .Pairings}}
+    <tr class="border-b border-zinc-900 align-top">
+      <td class="py-1.5 pr-3 text-zinc-500">{{int32OrDash .Position}}</td>
+      <td class="py-1.5 pr-3 text-zinc-100">{{.WhiteUsername}} <span class="text-zinc-500">({{int32OrDash .WhitePowerRating}})</span></td>
+      <td class="py-1.5 pr-3 text-zinc-100">{{.BlackUsername}} <span class="text-zinc-500">({{int32OrDash .BlackPowerRating}})</span></td>
+      <td class="py-1.5 pr-3 text-right tabular-nums text-zinc-400">{{int32OrDash .RatingGap}}</td>
+      <td class="py-1.5 pr-3 text-right tabular-nums text-zinc-400">{{int32OrDash .ColorPenalty}}</td>
+      <td class="py-1.5 pr-3 text-zinc-500">{{if .RepeatOfRound}}#{{int32OrDash .RepeatOfRound}}{{else}}—{{end}}</td>
+      <td class="py-1.5 pr-3">
+        {{.Status}}
+        {{if .EditedBy.Valid}}<span class="ml-1 rounded bg-zinc-800 px-1 text-xs text-zinc-400">edited</span>{{end}}
+      </td>
+      <td class="py-1.5">
+        <div class="flex flex-wrap gap-2">
+          {{if eq (printf "%s" $round.State) "draft"}}
+          <form method="post" action="/admin/rounds/{{$round.ID}}/pairings/{{.ID}}/flip">
+            <button type="submit" class="rounded border border-zinc-700 px-2 py-0.5 text-xs text-zinc-300 hover:border-zinc-500">Flip</button>
+          </form>
+          <form method="post" action="/admin/rounds/{{$round.ID}}/pairings/{{.ID}}/remove">
+            <button type="submit" class="rounded border border-red-900 px-2 py-0.5 text-xs text-red-300 hover:border-red-700">Remove</button>
+          </form>
+          {{else if and (eq (printf "%s" $round.State) "published") (eq (printf "%s" .Status) "pending")}}
+          <form method="post" action="/admin/rounds/{{$round.ID}}/pairings/{{.ID}}/fail">
+            <button type="submit" class="rounded border border-amber-800 px-2 py-0.5 text-xs text-amber-300 hover:border-amber-600">Mark failed</button>
+          </form>
+          {{end}}
+        </div>
+      </td>
+    </tr>
+    {{else}}
+    <tr><td colspan="8" class="py-4 text-zinc-500">No pairings.</td></tr>
+    {{end}}
+  </tbody>
+</table>
+</div>
+
+{{if .Byes}}
+<p class="mt-3 text-xs text-zinc-500">Bye: {{range .Byes}}{{.LichessUsername}}{{end}}</p>
+{{end}}
+{{if .Doubles}}
+<p class="mt-1 text-xs text-zinc-500">Double game: {{range .Doubles}}{{.LichessUsername}}{{end}}</p>
+{{end}}
+
+{{/* Swap form (spec §8.5), draft only */}}
+{{if and (eq (printf "%s" .Round.State) "draft") (gt (len .Pairings) 1)}}
+<form method="post" action="/admin/rounds/{{.Round.ID}}/pairings/swap" class="mt-4 flex flex-wrap items-end gap-2 rounded border border-zinc-800 p-3 text-xs">
+  <div>
+    <label class="block text-zinc-500">Swap opponents between</label>
+    <select name="a" class="rounded border border-zinc-700 bg-zinc-900 p-1 text-zinc-200">
+      {{range .Pairings}}<option value="{{.ID}}">{{.WhiteUsername}} vs {{.BlackUsername}}</option>{{end}}
+    </select>
+  </div>
+  <div>
+    <label class="block text-zinc-500">and</label>
+    <select name="b" class="rounded border border-zinc-700 bg-zinc-900 p-1 text-zinc-200">
+      {{range .Pairings}}<option value="{{.ID}}">{{.WhiteUsername}} vs {{.BlackUsername}}</option>{{end}}
+    </select>
+  </div>
+  <button type="submit" class="rounded border border-zinc-700 px-2 py-1 text-zinc-300 hover:border-zinc-500">Swap</button>
+</form>
+{{end}}
+
+{{/* Round actions */}}
+<div class="mt-6 flex flex-wrap items-center gap-3">
+  {{if eq (printf "%s" .Round.State) "draft"}}
+  <form method="post" action="/admin/rounds/{{.Round.ID}}/publish">
+    <button type="submit" class="rounded bg-emerald-700 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-600">Publish now</button>
+  </form>
+  <form method="post" action="/admin/rounds/{{.Round.ID}}/regenerate">
+    <button type="submit" class="rounded border border-zinc-700 px-3 py-1 text-xs text-zinc-300 hover:border-zinc-500">Regenerate</button>
+  </form>
+  <details>
+    <summary class="cursor-pointer rounded border border-red-900 px-3 py-1 text-xs text-red-300 hover:border-red-700">Cancel…</summary>
+    <form method="post" action="/admin/rounds/{{.Round.ID}}/cancel" class="mt-2 w-72">
+      <textarea name="reason" rows="2" required placeholder="Reason (shown on this page)" class="w-full rounded border border-zinc-700 bg-zinc-900 p-1 text-xs text-zinc-200"></textarea>
+      <button type="submit" class="mt-1 rounded bg-red-800 px-2 py-1 text-xs font-medium text-white hover:bg-red-700">Cancel round</button>
+    </form>
+  </details>
+  {{end}}
+</div>
+{{end}}

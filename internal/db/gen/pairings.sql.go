@@ -276,6 +276,44 @@ func (q *Queries) MarkPairingFailed(ctx context.Context, id pgtype.UUID) error {
 	return err
 }
 
+const markPublishedPairingFailed = `-- name: MarkPublishedPairingFailed :one
+UPDATE pairings SET status = 'failed'
+WHERE pairings.id = $1 AND pairings.status = 'pending' AND pairings.round_id = $2
+  AND EXISTS (SELECT 1 FROM rounds r WHERE r.id = $2 AND r.state = 'published')
+RETURNING id, round_id, white_user_id, black_user_id, creation_method, lichess_game_id, status, match_ambiguous, created_at, edited_by, position, rating_gap, color_penalty, repeat_of_round
+`
+
+type MarkPublishedPairingFailedParams struct {
+	ID      pgtype.UUID `json:"id"`
+	RoundID int32       `json:"round_id"`
+}
+
+// The admin stand-in for Phase 5's missed-start job (spec §8.5,
+// decision 7): only a PUBLISHED round's still-PENDING pairing can be
+// marked failed by hand — one already picked up by sync-games has a
+// game and is no longer this button's business.
+func (q *Queries) MarkPublishedPairingFailed(ctx context.Context, arg MarkPublishedPairingFailedParams) (Pairing, error) {
+	row := q.db.QueryRow(ctx, markPublishedPairingFailed, arg.ID, arg.RoundID)
+	var i Pairing
+	err := row.Scan(
+		&i.ID,
+		&i.RoundID,
+		&i.WhiteUserID,
+		&i.BlackUserID,
+		&i.CreationMethod,
+		&i.LichessGameID,
+		&i.Status,
+		&i.MatchAmbiguous,
+		&i.CreatedAt,
+		&i.EditedBy,
+		&i.Position,
+		&i.RatingGap,
+		&i.ColorPenalty,
+		&i.RepeatOfRound,
+	)
+	return i, err
+}
+
 const upsertManualPairing = `-- name: UpsertManualPairing :one
 INSERT INTO pairings (round_id, white_user_id, black_user_id, creation_method, lichess_game_id)
 VALUES ($1, $2, $3, $4, $5)

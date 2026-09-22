@@ -438,6 +438,39 @@ func (q *Queries) GetLatestPublishedRound(ctx context.Context) (Round, error) {
 	return i, err
 }
 
+const getPairingByID = `-- name: GetPairingByID :one
+SELECT id, round_id, white_user_id, black_user_id, creation_method, lichess_game_id, status, match_ambiguous, created_at, edited_by, position, rating_gap, color_penalty, repeat_of_round FROM pairings WHERE id = $1 AND round_id = $2
+`
+
+type GetPairingByIDParams struct {
+	ID      pgtype.UUID `json:"id"`
+	RoundID int32       `json:"round_id"`
+}
+
+// Scoped to its round so a stale or mistyped pairing id from a form
+// can never touch a different round's row.
+func (q *Queries) GetPairingByID(ctx context.Context, arg GetPairingByIDParams) (Pairing, error) {
+	row := q.db.QueryRow(ctx, getPairingByID, arg.ID, arg.RoundID)
+	var i Pairing
+	err := row.Scan(
+		&i.ID,
+		&i.RoundID,
+		&i.WhiteUserID,
+		&i.BlackUserID,
+		&i.CreationMethod,
+		&i.LichessGameID,
+		&i.Status,
+		&i.MatchAmbiguous,
+		&i.CreatedAt,
+		&i.EditedBy,
+		&i.Position,
+		&i.RatingGap,
+		&i.ColorPenalty,
+		&i.RepeatOfRound,
+	)
+	return i, err
+}
+
 const getPairingForUserInRound = `-- name: GetPairingForUserInRound :one
 SELECT
   p.id, p.round_id, p.white_user_id, p.black_user_id, p.creation_method, p.lichess_game_id, p.status, p.match_ambiguous, p.created_at, p.edited_by, p.position, p.rating_gap, p.color_penalty, p.repeat_of_round,

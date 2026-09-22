@@ -244,6 +244,11 @@ DELETE FROM double_games WHERE round_id = $1;
 -- name: DeleteRoundExclusions :exec
 DELETE FROM round_exclusions WHERE round_id = $1;
 
+-- name: GetPairingByID :one
+-- Scoped to its round so a stale or mistyped pairing id from a form
+-- can never touch a different round's row.
+SELECT * FROM pairings WHERE id = $1 AND round_id = $2;
+
 -- name: FlipPairingColours :one
 -- Swaps the two players' colours in place; the caller nulls the
 -- diagnostic columns (they no longer describe the stored colours) and

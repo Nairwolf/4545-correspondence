@@ -56,6 +56,19 @@ func (s *Server) Handler() http.Handler {
 			r.Post("/registrations/approve", s.handleApproveRegistrations)
 			r.Post("/registrations/{id}/reject", s.handleRejectRegistration)
 			r.Get("/jobs", s.handleJobs)
+
+			r.Route("/rounds", func(r chi.Router) {
+				r.Get("/", s.handleAdminRounds)
+				r.Post("/generate", s.handleGenerateRound)
+				r.Get("/{id}", s.handleRoundView)
+				r.Post("/{id}/publish", s.handlePublishRound)
+				r.Post("/{id}/cancel", s.handleCancelRound)
+				r.Post("/{id}/regenerate", s.handleRegenerateRound)
+				r.Post("/{id}/pairings/swap", s.handleSwapPairings)
+				r.Post("/{id}/pairings/{pid}/flip", s.handleFlipPairing)
+				r.Post("/{id}/pairings/{pid}/remove", s.handleRemovePairing)
+				r.Post("/{id}/pairings/{pid}/fail", s.handleFailPairing)
+			})
 		})
 	})
 
