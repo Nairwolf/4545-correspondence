@@ -19,7 +19,7 @@ CREATE TABLE player_standings (
   last_level_up_round   int,
   last_level_up_at      timestamptz,
   last_game_finished_at timestamptz,
-  is_eligible           boolean NOT NULL DEFAULT false,   -- Phase 4 fills this; Phase 1 = is_active && approved
+  is_eligible           boolean NOT NULL DEFAULT false,   -- approved && active && !paused_by_admin && auto_paused_at IS NULL (display only; the pool reads it live)
   updated_at            timestamptz NOT NULL DEFAULT now()
 );
 

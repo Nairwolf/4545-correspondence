@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
+	"github.com/nairwolf/4545-correspondence/internal/standings"
 )
 
 // profileOf re-reads a player's profile row.
@@ -123,7 +124,7 @@ func TestDashboard_Activity(t *testing.T) {
 
 	standing, err := q.GetPlayerStanding(context.Background(), u.ID)
 	require.NoError(t, err)
-	assert.False(t, standing.IsEligible, "Recompute ran: is_eligible follows is_active")
+	assert.False(t, standing.IsEligible, "Recompute ran: is_active is an input to is_eligible")
 	assert.Equal(t, []string{"profile.activity"}, auditActions(t, tx, u.ID))
 
 	// Same value again: nothing to change, nothing to audit.
@@ -298,4 +299,222 @@ func TestDashboard_AuthorisationAndGames(t *testing.T) {
 	assert.Contains(t, body, "Only the last 10 are shown")
 	assert.Contains(t, body, "https://lichess.org/fina")    // most recent finished
 	assert.NotContains(t, body, "https://lichess.org/finl") // the twelfth is not
+}
+
+// thisWeekRound writes a round numbered far past any real one, so it is
+// the latest whatever the test database already holds.
+func thisWeekRound(t *testing.T, q *gen.Queries, number int32, state gen.RoundState, settingsUsed string) gen.Round {
+	t.Helper()
+	now := pgtype.Timestamptz{Time: time.Now(), Valid: true}
+	params := gen.CreateGeneratedRoundParams{
+		Number: number, State: state, PublishAt: now, PairAt: now,
+		GeneratedBy: gen.RoundSourceSchedule,
+	}
+	if state == gen.RoundStatePublished {
+		params.PublishedAt = now
+	}
+	if settingsUsed != "" {
+		params.SettingsUsed = []byte(settingsUsed)
+	}
+	r, err := q.CreateGeneratedRound(context.Background(), params)
+	require.NoError(t, err)
+	return r
+}
+
+func pairIn(t *testing.T, q *gen.Queries, r gen.Round, white, black gen.User) gen.Pairing {
+	t.Helper()
+	p, err := q.InsertGeneratedPairing(context.Background(), gen.InsertGeneratedPairingParams{
+		RoundID: r.ID, WhiteUserID: white.ID, BlackUserID: black.ID,
+	})
+	require.NoError(t, err)
+	return p
+}
+
+func excludeIn(t *testing.T, q *gen.Queries, r gen.Round, u gen.User, reason gen.ExclusionReason, ongoing, cap *int32) {
+	t.Helper()
+	_, err := q.InsertRoundExclusion(context.Background(), gen.InsertRoundExclusionParams{
+		RoundID: r.ID, UserID: u.ID, Reason: reason, OngoingGames: ongoing, MaxConcurrentGames: cap,
+	})
+	require.NoError(t, err)
+}
+
+func TestDashboard_ThisWeek(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("no published round: no section", func(t *testing.T) {
+		srv, q, tx := testServer(t)
+		u := addPlayer(t, q, tx, "Fresh", true, 1800, 10, 1800, 1800, "20")
+		var published int
+		require.NoError(t, tx.QueryRow(ctx, "SELECT count(*) FROM rounds WHERE state = 'published'").Scan(&published))
+		if published > 0 {
+			t.Skip("the test database already holds published rounds")
+		}
+		rec := getAs(t, srv, sessionFor(t, srv, u), "/account")
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.NotContains(t, rec.Body.String(), "This week")
+	})
+
+	t.Run("paired: opponent, colour, challenge link, then the game", func(t *testing.T) {
+		srv, q, tx := testServer(t)
+		u := addPlayer(t, q, tx, "Walter", true, 1800, 10, 1800, 1800, "20")
+		opp := addPlayer(t, q, tx, "Brenda", true, 1800, 10, 1800, 1800, "20")
+		r := thisWeekRound(t, q, 9000, gen.RoundStatePublished, "")
+		p := pairIn(t, q, r, u, opp)
+		session := sessionFor(t, srv, u)
+
+		body := getAs(t, srv, session, "/account").Body.String()
+		assert.Contains(t, body, "This week · round 9000")
+		assert.Contains(t, body, ">Brenda</a> with white.")
+		assert.Contains(t, body, `href="https://lichess.org/@/Brenda">challenge them on Lichess`)
+		assert.Contains(t, body, "Start the game on Lichess as you do today")
+
+		oppBody := getAs(t, srv, sessionFor(t, srv, opp), "/account").Body.String()
+		assert.Contains(t, oppBody, ">Walter</a> with black.")
+
+		id := "thisweek1"
+		require.NoError(t, q.AttachGameToPairing(ctx, gen.AttachGameToPairingParams{
+			ID: p.ID, LichessGameID: &id, Status: gen.PairingStatusInProgress,
+		}))
+		body = getAs(t, srv, session, "/account").Body.String()
+		assert.Contains(t, body, `href="https://lichess.org/thisweek1">open on Lichess`)
+		assert.NotContains(t, body, "challenge them on Lichess")
+		assert.NotContains(t, body, "Start the game on Lichess as you do today")
+	})
+
+	t.Run("double game: both opponents, one white one black", func(t *testing.T) {
+		srv, q, tx := testServer(t)
+		vol := addPlayer(t, q, tx, "Volunteer", true, 1800, 10, 1800, 1800, "20")
+		a := addPlayer(t, q, tx, "Alpha", true, 1800, 10, 1800, 1800, "20")
+		b := addPlayer(t, q, tx, "Bravo", true, 1800, 10, 1800, 1800, "20")
+		r := thisWeekRound(t, q, 9000, gen.RoundStatePublished, "")
+		pairIn(t, q, r, vol, a)
+		pairIn(t, q, r, b, vol)
+		_, err := q.InsertDoubleGame(ctx, gen.InsertDoubleGameParams{RoundID: r.ID, UserID: vol.ID})
+		require.NoError(t, err)
+
+		body := getAs(t, srv, sessionFor(t, srv, vol), "/account").Body.String()
+		assert.Contains(t, body, ">Alpha</a> with white.")
+		assert.Contains(t, body, ">Bravo</a> with black.")
+		assert.Contains(t, body, "you're playing two games") // static template text: not escaped
+		assert.Contains(t, body, "You&#39;ve played 1 double game so far.")
+	})
+
+	t.Run("pairing marked failed", func(t *testing.T) {
+		srv, q, tx := testServer(t)
+		u := addPlayer(t, q, tx, "Ghosted", true, 1800, 10, 1800, 1800, "20")
+		opp := addPlayer(t, q, tx, "Absent", true, 1800, 10, 1800, 1800, "20")
+		r := thisWeekRound(t, q, 9000, gen.RoundStatePublished, "")
+		p := pairIn(t, q, r, u, opp)
+		require.NoError(t, q.MarkPairingFailed(ctx, p.ID))
+
+		body := getAs(t, srv, sessionFor(t, srv, u), "/account").Body.String()
+		assert.Contains(t, body, ">Absent</a> with white. <span class=\"text-zinc-500\">Marked as not played.</span>")
+		assert.NotContains(t, body, "challenge them on Lichess")
+	})
+
+	t.Run("bye, and the bye history", func(t *testing.T) {
+		srv, q, tx := testServer(t)
+		u := addPlayer(t, q, tx, "Resting", true, 1800, 10, 1800, 1800, "20")
+		for _, n := range []int32{9000, 9003} {
+			r := thisWeekRound(t, q, n, gen.RoundStatePublished, `{"odd_pool_strategy":"double_then_bye"}`)
+			_, err := q.InsertBye(ctx, gen.InsertByeParams{RoundID: r.ID, UserID: u.ID})
+			require.NoError(t, err)
+			excludeIn(t, q, r, u, gen.ExclusionReasonBye, nil, nil)
+		}
+
+		body := getAs(t, srv, sessionFor(t, srv, u), "/account").Body.String()
+		assert.Contains(t, body, "This week · round 9003")
+		assert.Contains(t, body, "Odd number of players this week and nobody was free for a double game, so you sat out. You&#39;re first in line to avoid the next one.")
+		assert.Contains(t, body, "Byes: 2 byes so far, most recently in round 9003.")
+	})
+
+	t.Run("at capacity, with the numbers", func(t *testing.T) {
+		srv, q, tx := testServer(t)
+		u := addPlayer(t, q, tx, "Busy", true, 1800, 10, 1800, 1800, "20")
+		r := thisWeekRound(t, q, 9000, gen.RoundStatePublished, "")
+		four := int32(4)
+		excludeIn(t, q, r, u, gen.ExclusionReasonAtCapacity, &four, &four)
+
+		body := getAs(t, srv, sessionFor(t, srv, u), "/account").Body.String()
+		assert.Contains(t, body, "You had 4 games in progress and your limit is 4, so you sat out round 9000.")
+		assert.NotContains(t, body, "Byes:", "no byes, no history line")
+	})
+
+	t.Run("removed by an admin", func(t *testing.T) {
+		srv, q, tx := testServer(t)
+		u := addPlayer(t, q, tx, "Dropped", true, 1800, 10, 1800, 1800, "20")
+		r := thisWeekRound(t, q, 9000, gen.RoundStatePublished, "")
+		excludeIn(t, q, r, u, gen.ExclusionReasonRemovedByAdmin, nil, nil)
+
+		body := getAs(t, srv, sessionFor(t, srv, u), "/account").Body.String()
+		assert.Contains(t, body, "An admin removed your pairing for round 9000.")
+	})
+
+	t.Run("approved after the round was paired", func(t *testing.T) {
+		srv, q, tx := testServer(t)
+		u := addPlayer(t, q, tx, "Newcomer", true, 1800, 10, 1800, 1800, "20")
+		thisWeekRound(t, q, 9000, gen.RoundStatePublished, "")
+
+		body := getAs(t, srv, sessionFor(t, srv, u), "/account").Body.String()
+		assert.Contains(t, body, "Round 9000 was paired before you joined — you&#39;ll be in the next one.")
+	})
+
+	t.Run("a newer draft is never shown", func(t *testing.T) {
+		srv, q, tx := testServer(t)
+		u := addPlayer(t, q, tx, "Patient", true, 1800, 10, 1800, 1800, "20")
+		opp := addPlayer(t, q, tx, "Future", true, 1800, 10, 1800, 1800, "20")
+		thisWeekRound(t, q, 9000, gen.RoundStatePublished, "")
+		draft := thisWeekRound(t, q, 9001, gen.RoundStateDraft, "")
+		pairIn(t, q, draft, u, opp)
+
+		body := getAs(t, srv, sessionFor(t, srv, u), "/account").Body.String()
+		assert.Contains(t, body, "This week · round 9000")
+		assert.NotContains(t, body, "Future")
+	})
+
+	t.Run("pending applicants see no section", func(t *testing.T) {
+		srv, q, _ := testServer(t)
+		u := applicant(t, q, "waiting", "Waiting", account("waiting", "Waiting"))
+		thisWeekRound(t, q, 9000, gen.RoundStatePublished, "")
+
+		body := getAs(t, srv, sessionFor(t, srv, u), "/account").Body.String()
+		assert.NotContains(t, body, "This week")
+	})
+}
+
+func TestDashboard_Eligibility(t *testing.T) {
+	ctx := context.Background()
+	srv, q, tx := testServer(t)
+	u := addPlayer(t, q, tx, "Eligible", true, 1800, 10, 1800, 1800, "20")
+	eligible := func() bool {
+		t.Helper()
+		_, err := standings.Recompute(ctx, q, u.ID, srv.cfg)
+		require.NoError(t, err)
+		s, err := q.GetPlayerStanding(ctx, u.ID)
+		require.NoError(t, err)
+		return s.IsEligible
+	}
+	set := func(sql string) {
+		t.Helper()
+		_, err := tx.Exec(ctx, sql, u.ID)
+		require.NoError(t, err)
+	}
+
+	assert.True(t, eligible(), "approved and active")
+
+	set("UPDATE player_profiles SET paused_by_admin = true WHERE user_id = $1")
+	assert.False(t, eligible(), "an admin pause alone makes the player ineligible")
+	set("UPDATE player_profiles SET paused_by_admin = false WHERE user_id = $1")
+	assert.True(t, eligible())
+
+	set("UPDATE player_profiles SET auto_paused_at = now() WHERE user_id = $1")
+	assert.False(t, eligible(), "an auto-pause alone makes the player ineligible")
+	assert.True(t, profileOf(t, q, u).IsActive, "while still active")
+
+	// Resume recomputes in its own transaction: no nightly wait.
+	rec := postAs(t, srv, sessionFor(t, srv, u), "/account/resume", url.Values{})
+	require.Equal(t, http.StatusSeeOther, rec.Code)
+	s, err := q.GetPlayerStanding(ctx, u.ID)
+	require.NoError(t, err)
+	assert.True(t, s.IsEligible, "eligible again straight after resuming")
 }

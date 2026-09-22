@@ -1,6 +1,8 @@
 package web
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -8,8 +10,11 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
+	"github.com/nairwolf/4545-correspondence/internal/rounds"
+	"github.com/nairwolf/4545-correspondence/internal/settings"
 	"github.com/nairwolf/4545-correspondence/internal/standings"
 )
 
@@ -44,6 +49,9 @@ type dashboardData struct {
 	OngoingGames []playerGame
 	RecentGames  []playerGame
 	MoreGames    bool // finished games beyond RecentGames exist
+
+	ThisWeek    thisWeekView
+	DoubleGames string // "You've played N double games so far.", empty when none
 
 	Token     *gen.OauthToken // nil when none stored
 	TokenOK   bool            // stored, not revoked, not expired
@@ -80,6 +88,165 @@ func capacityFor(ongoing int, cap *int32) capacityView {
 		v.OverCap = ongoing > int(*cap)
 	}
 	return v
+}
+
+// thisWeekKind says which of the "This week" sentences applies. The
+// zero value means no round has been published yet: no section.
+type thisWeekKind string
+
+const (
+	thisWeekPaired    thisWeekKind = "paired"
+	thisWeekBye       thisWeekKind = "bye"
+	thisWeekExcluded  thisWeekKind = "excluded"
+	thisWeekNotInPool thisWeekKind = "not_in_pool"
+)
+
+// thisWeekView is the "This week" section (spec §8.3): what happened to
+// this player in the latest published round, answering "why didn't I
+// get a game this week?" without anyone having to ask.
+type thisWeekView struct {
+	Kind  thisWeekKind
+	Round int32
+	// Games has two entries for the odd-pool volunteer (§6.2 step 6a).
+	Games []thisWeekGame
+	// NeedsChallenge: at least one game still has to be started by
+	// hand on Lichess (until Phase 5 creates games itself).
+	NeedsChallenge bool
+	Sentence       string // bye, excluded and not-in-pool wording
+	ByeHistory     string // "N byes so far, most recently in round M.", empty when none
+}
+
+type thisWeekGame struct {
+	Opponent  string
+	Color     string // "white" or "black"
+	GameID    string // empty until sync-games has found the game
+	NotPlayed bool   // the pairing was marked failed (or cancelled)
+}
+
+// thisWeekFor loads the "This week" section for the latest published
+// round. A draft is never shown: it can still change before it
+// publishes.
+func thisWeekFor(ctx context.Context, q *gen.Queries, userID pgtype.UUID) (thisWeekView, error) {
+	round, err := q.GetLatestPublishedRound(ctx)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return thisWeekView{}, nil
+	}
+	if err != nil {
+		return thisWeekView{}, err
+	}
+	v := thisWeekView{Round: round.Number}
+
+	if v.ByeHistory, err = byeHistoryFor(ctx, q, userID); err != nil {
+		return thisWeekView{}, err
+	}
+
+	pairings, err := q.ListPairingsForUserInRound(ctx, gen.ListPairingsForUserInRoundParams{
+		RoundID: round.ID,
+		UserID:  userID,
+	})
+	if err != nil {
+		return thisWeekView{}, err
+	}
+	if len(pairings) > 0 {
+		v.Kind = thisWeekPaired
+		for _, p := range pairings {
+			g := thisWeekGame{
+				Opponent:  p.OpponentUsername,
+				Color:     "black",
+				NotPlayed: p.Status == gen.PairingStatusFailed || p.Status == gen.PairingStatusCancelled,
+			}
+			if p.IsWhite {
+				g.Color = "white"
+			}
+			if p.LichessGameID != nil {
+				g.GameID = *p.LichessGameID
+			}
+			if g.GameID == "" && !g.NotPlayed {
+				v.NeedsChallenge = true
+			}
+			v.Games = append(v.Games, g)
+		}
+		return v, nil
+	}
+
+	exc, err := q.GetExclusionForUserInRound(ctx, gen.GetExclusionForUserInRoundParams{
+		RoundID: round.ID,
+		UserID:  userID,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// Every approved player in the pool gets a pairing or an
+		// exclusion row, so no row means they were not approved yet
+		// when the round was generated.
+		v.Kind = thisWeekNotInPool
+		v.Sentence = fmt.Sprintf("Round %d was paired before you joined — you'll be in the next one.", round.Number)
+	case err != nil:
+		return thisWeekView{}, err
+	case exc.Reason == gen.ExclusionReasonBye:
+		v.Kind = thisWeekBye
+		v.Sentence = byeSentence(oddPoolStrategyOf(round))
+	default:
+		v.Kind = thisWeekExcluded
+		v.Sentence = exclusionSentence(exc, round.Number)
+	}
+	return v, nil
+}
+
+// byeHistoryFor words the player's bye count and the last one's round.
+func byeHistoryFor(ctx context.Context, q *gen.Queries, userID pgtype.UUID) (string, error) {
+	n, err := q.CountByesForUser(ctx, userID)
+	if err != nil || n == 0 {
+		return "", err
+	}
+	last, err := q.GetLastByeForUser(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s so far, most recently in round %d.", plural(int(n), "bye"), last.RoundNumber), nil
+}
+
+// oddPoolStrategyOf reads the odd-pool rule the round was generated
+// under. An imported round has no snapshot; it also has no byes, so
+// the default is only a formality there.
+func oddPoolStrategyOf(round gen.Round) settings.OddPoolStrategy {
+	var snap rounds.Snapshot
+	if len(round.SettingsUsed) == 0 || json.Unmarshal(round.SettingsUsed, &snap) != nil {
+		return settings.OddPoolDoubleThenBye
+	}
+	return snap.OddPoolStrategy
+}
+
+// byeSentence is spec §8.3's bye wording. It must never read as a
+// penalty: a bye goes by rotation alone, so the player who just had one
+// is the last in line for the next.
+func byeSentence(strategy settings.OddPoolStrategy) string {
+	if strategy == settings.OddPoolByeOnly {
+		return "Odd number of players this week, so you sat out. You're first in line to avoid the next one."
+	}
+	return "Odd number of players this week and nobody was free for a double game, so you sat out. You're first in line to avoid the next one."
+}
+
+// exclusionSentence words a round_exclusions row (spec §4.1, §8.3). The
+// pause reasons stay short: the banners at the top of the page already
+// explain them and say what to do.
+func exclusionSentence(exc gen.RoundExclusion, round int32) string {
+	switch exc.Reason {
+	case gen.ExclusionReasonAtCapacity:
+		if exc.OngoingGames == nil || exc.MaxConcurrentGames == nil {
+			return fmt.Sprintf("You were at your games-at-once limit, so you sat out round %d. No penalty — you're back as soon as a game finishes.", round)
+		}
+		return fmt.Sprintf("You had %s in progress and your limit is %d, so you sat out round %d. No penalty — you're back as soon as a game finishes.",
+			plural(int(*exc.OngoingGames), "game"), *exc.MaxConcurrentGames, round)
+	case gen.ExclusionReasonInactive:
+		return fmt.Sprintf("Your quest was paused, so you sat out round %d.", round)
+	case gen.ExclusionReasonPaused:
+		return fmt.Sprintf("An admin had paused your quest, so you sat out round %d.", round)
+	case gen.ExclusionReasonAutoPaused:
+		return fmt.Sprintf("Your quest was paused after unanswered challenges, so you sat out round %d.", round)
+	case gen.ExclusionReasonRemovedByAdmin:
+		return fmt.Sprintf("An admin removed your pairing for round %d.", round)
+	}
+	return fmt.Sprintf("You weren't paired in round %d.", round)
 }
 
 // savedMessage turns the ?saved= code into the confirmation line.
@@ -157,6 +324,21 @@ func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, status 
 		}
 	}
 
+	if user.Status == gen.UserStatusApproved {
+		if data.ThisWeek, err = thisWeekFor(ctx, s.q, user.ID); err != nil {
+			serverError(w, err)
+			return
+		}
+		doubles, err := s.q.CountDoubleGamesForUser(ctx, user.ID)
+		if err != nil {
+			serverError(w, err)
+			return
+		}
+		if doubles > 0 {
+			data.DoubleGames = fmt.Sprintf("You've played %s so far.", plural(int(doubles), "double game"))
+		}
+	}
+
 	tok, err := s.q.GetOAuthToken(ctx, user.ID)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -212,8 +394,8 @@ func redirectToDashboard(w http.ResponseWriter, r *http.Request, saved string) {
 }
 
 // handleSetActivity is "I'm playing" / "Pause my quest" (spec §8.3).
-// is_eligible in player_standings derives from is_active, so the
-// standing is recomputed in the same transaction.
+// is_active is one of the inputs to player_standings.is_eligible, so
+// the standing is recomputed in the same transaction.
 func (s *Server) handleSetActivity(w http.ResponseWriter, r *http.Request) {
 	user, profile, ok := s.settingsRequest(w, r)
 	if !ok {
@@ -318,7 +500,8 @@ func (s *Server) handleSetDoubleGames(w http.ResponseWriter, r *http.Request) {
 
 // handleResume clears an auto-pause (spec §8.3 "Resume quest"). Only
 // meaningful while auto-paused: otherwise nothing changes and nothing
-// is audited.
+// is audited. auto_paused_at is an input to is_eligible, so the
+// standing is recomputed in the same transaction, as for activity.
 func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 	user, profile, ok := s.settingsRequest(w, r)
 	if !ok {
@@ -327,6 +510,9 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 	err := s.inTx(r.Context(), func(q *gen.Queries) error {
 		n, err := q.ClearAutoPause(r.Context(), user.ID)
 		if err != nil || n == 0 {
+			return err
+		}
+		if _, err := standings.Recompute(r.Context(), q, user.ID, s.cfg); err != nil {
 			return err
 		}
 		return audit(r.Context(), q, user.ID, "profile.resume", user.ID,

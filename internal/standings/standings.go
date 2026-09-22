@@ -64,7 +64,12 @@ func Recompute(ctx context.Context, q *gen.Queries, userID pgtype.UUID, cfg sett
 	if err != nil {
 		return false, fmt.Errorf("standings: user: %w", err)
 	}
-	isEligible := profile.IsActive && user.Status == gen.UserStatusApproved
+	// A display column (spec §5.7): the pairing pool reads eligibility
+	// live from users/player_profiles and never trusts this copy.
+	isEligible := user.Status == gen.UserStatusApproved &&
+		profile.IsActive &&
+		!profile.PausedByAdmin &&
+		!profile.AutoPausedAt.Valid
 
 	prev, err := q.GetPlayerStanding(ctx, userID)
 	hasPrev := true

@@ -471,69 +471,6 @@ func (q *Queries) GetPairingByID(ctx context.Context, arg GetPairingByIDParams) 
 	return i, err
 }
 
-const getPairingForUserInRound = `-- name: GetPairingForUserInRound :one
-SELECT
-  p.id, p.round_id, p.white_user_id, p.black_user_id, p.creation_method, p.lichess_game_id, p.status, p.match_ambiguous, p.created_at, p.edited_by, p.position, p.rating_gap, p.color_penalty, p.repeat_of_round,
-  (CASE WHEN p.white_user_id = $2 THEN bu.lichess_username ELSE wu.lichess_username END)::text AS opponent_username,
-  (p.white_user_id = $2) AS is_white
-FROM pairings p
-JOIN users wu ON wu.id = p.white_user_id
-JOIN users bu ON bu.id = p.black_user_id
-WHERE p.round_id = $1 AND (p.white_user_id = $2 OR p.black_user_id = $2)
-`
-
-type GetPairingForUserInRoundParams struct {
-	RoundID int32       `json:"round_id"`
-	UserID  pgtype.UUID `json:"user_id"`
-}
-
-type GetPairingForUserInRoundRow struct {
-	ID               pgtype.UUID        `json:"id"`
-	RoundID          int32              `json:"round_id"`
-	WhiteUserID      pgtype.UUID        `json:"white_user_id"`
-	BlackUserID      pgtype.UUID        `json:"black_user_id"`
-	CreationMethod   PairingMethod      `json:"creation_method"`
-	LichessGameID    *string            `json:"lichess_game_id"`
-	Status           PairingStatus      `json:"status"`
-	MatchAmbiguous   bool               `json:"match_ambiguous"`
-	CreatedAt        pgtype.Timestamptz `json:"created_at"`
-	EditedBy         pgtype.UUID        `json:"edited_by"`
-	Position         *int32             `json:"position"`
-	RatingGap        *int32             `json:"rating_gap"`
-	ColorPenalty     *int32             `json:"color_penalty"`
-	RepeatOfRound    *int32             `json:"repeat_of_round"`
-	OpponentUsername string             `json:"opponent_username"`
-	IsWhite          bool               `json:"is_white"`
-}
-
-// The dashboard's "this week" block (spec §8.3). sqlc.arg names the
-// parameter for what it actually is here — the player asking, who may
-// be either colour — rather than the misleading "white_user_id" its
-// first use in the CASE would otherwise suggest.
-func (q *Queries) GetPairingForUserInRound(ctx context.Context, arg GetPairingForUserInRoundParams) (GetPairingForUserInRoundRow, error) {
-	row := q.db.QueryRow(ctx, getPairingForUserInRound, arg.RoundID, arg.UserID)
-	var i GetPairingForUserInRoundRow
-	err := row.Scan(
-		&i.ID,
-		&i.RoundID,
-		&i.WhiteUserID,
-		&i.BlackUserID,
-		&i.CreationMethod,
-		&i.LichessGameID,
-		&i.Status,
-		&i.MatchAmbiguous,
-		&i.CreatedAt,
-		&i.EditedBy,
-		&i.Position,
-		&i.RatingGap,
-		&i.ColorPenalty,
-		&i.RepeatOfRound,
-		&i.OpponentUsername,
-		&i.IsWhite,
-	)
-	return i, err
-}
-
 const getRoundByID = `-- name: GetRoundByID :one
 SELECT id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used FROM rounds WHERE id = $1
 `
@@ -1111,6 +1048,85 @@ func (q *Queries) ListPairingsForRound(ctx context.Context, roundID int32) ([]Li
 			&i.BlackUsername,
 			&i.WhitePowerRating,
 			&i.BlackPowerRating,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPairingsForUserInRound = `-- name: ListPairingsForUserInRound :many
+SELECT
+  p.id, p.round_id, p.white_user_id, p.black_user_id, p.creation_method, p.lichess_game_id, p.status, p.match_ambiguous, p.created_at, p.edited_by, p.position, p.rating_gap, p.color_penalty, p.repeat_of_round,
+  (CASE WHEN p.white_user_id = $2 THEN bu.lichess_username ELSE wu.lichess_username END)::text AS opponent_username,
+  (p.white_user_id = $2) AS is_white
+FROM pairings p
+JOIN users wu ON wu.id = p.white_user_id
+JOIN users bu ON bu.id = p.black_user_id
+WHERE p.round_id = $1 AND (p.white_user_id = $2 OR p.black_user_id = $2)
+ORDER BY p.position ASC NULLS LAST, p.created_at ASC
+`
+
+type ListPairingsForUserInRoundParams struct {
+	RoundID int32       `json:"round_id"`
+	UserID  pgtype.UUID `json:"user_id"`
+}
+
+type ListPairingsForUserInRoundRow struct {
+	ID               pgtype.UUID        `json:"id"`
+	RoundID          int32              `json:"round_id"`
+	WhiteUserID      pgtype.UUID        `json:"white_user_id"`
+	BlackUserID      pgtype.UUID        `json:"black_user_id"`
+	CreationMethod   PairingMethod      `json:"creation_method"`
+	LichessGameID    *string            `json:"lichess_game_id"`
+	Status           PairingStatus      `json:"status"`
+	MatchAmbiguous   bool               `json:"match_ambiguous"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	EditedBy         pgtype.UUID        `json:"edited_by"`
+	Position         *int32             `json:"position"`
+	RatingGap        *int32             `json:"rating_gap"`
+	ColorPenalty     *int32             `json:"color_penalty"`
+	RepeatOfRound    *int32             `json:"repeat_of_round"`
+	OpponentUsername string             `json:"opponent_username"`
+	IsWhite          bool               `json:"is_white"`
+}
+
+// The dashboard's "this week" block (spec §8.3). :many, not :one: the
+// odd-pool volunteer (§6.2 step 6a) has two pairings in the same round,
+// and a :one would silently show them only one opponent. sqlc.arg names
+// the parameter for what it actually is here — the player asking, who
+// may be either colour — rather than the misleading "white_user_id" its
+// first use in the CASE would otherwise suggest.
+func (q *Queries) ListPairingsForUserInRound(ctx context.Context, arg ListPairingsForUserInRoundParams) ([]ListPairingsForUserInRoundRow, error) {
+	rows, err := q.db.Query(ctx, listPairingsForUserInRound, arg.RoundID, arg.UserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPairingsForUserInRoundRow
+	for rows.Next() {
+		var i ListPairingsForUserInRoundRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.RoundID,
+			&i.WhiteUserID,
+			&i.BlackUserID,
+			&i.CreationMethod,
+			&i.LichessGameID,
+			&i.Status,
+			&i.MatchAmbiguous,
+			&i.CreatedAt,
+			&i.EditedBy,
+			&i.Position,
+			&i.RatingGap,
+			&i.ColorPenalty,
+			&i.RepeatOfRound,
+			&i.OpponentUsername,
+			&i.IsWhite,
 		); err != nil {
 			return nil, err
 		}

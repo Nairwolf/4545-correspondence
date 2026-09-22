@@ -458,17 +458,34 @@ Nav gains **Rounds** (`nav = "rounds"`); page list gains `admin_rounds`,
 
 ## Dashboard slot (`/account`)
 
-- **This week**: for the latest published round — your pairing
-  (opponent, colour, a "challenge them on Lichess" link until Phase 5
-  creates the game), or the bye sentence from §8.3, or the exclusion
-  reason in plain words (at capacity with the numbers; paused; inactive;
-  removed by an admin).
-- **Double games**: "You've absorbed N double games" in the existing
-  section. **Bye history**: count and last round.
+- **This week**, approved members only, about the latest *published*
+  round (a draft is never shown — it can still change). Exactly one of:
+  - **paired** — opponent and colour; a link to the game once
+    `sync-games` has found it, otherwise to the opponent's Lichess
+    profile to challenge them (until Phase 5 creates the game);
+  - **paired twice** (the double-game volunteer) — both games, one
+    white and one black;
+  - **pairing marked failed** — the opponent, "marked as not played";
+  - **bye** — the neutral §8.3 sentence, never worded as a penalty;
+  - **excluded** — the reason in plain words: at capacity with the
+    numbers, paused / auto-paused / inactive in one short line (the
+    banners above carry the detail), removed by an admin;
+  - **not in the pool** (no pairing, no exclusion row) — approved after
+    the round was paired: "you'll be in the next one";
+  - no published round yet → the section is absent.
+- **Bye history** in the same section: count and last round.
+  **Double games**: "You've played N double games" in the existing
+  section.
+- **`GetPairingForUserInRound` becomes `:many`**: as `:one` it is a
+  `QueryRow`, which would silently show the double-game volunteer only
+  one of their two opponents.
 - `standings.Recompute` sets `is_eligible = approved ∧ active ∧
-  ¬paused_by_admin ∧ auto_paused_at IS NULL` (the `00006` TODO) as a
-  display column; the pool query never reads it. The `dashboard.go`
-  comment saying eligibility derives from `is_active` alone is updated.
+  ¬paused_by_admin ∧ auto_paused_at IS NULL` (the `00006` comment) as a
+  display column; the pool query never reads it. `handleResume` gains
+  the same in-transaction `Recompute` as `handleSetActivity`, otherwise
+  a resumed player stays ineligible until the nightly recompute. The
+  `dashboard.go` comment saying eligibility derives from `is_active`
+  alone is updated.
 
 ---
 

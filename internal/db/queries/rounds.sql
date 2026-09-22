@@ -290,10 +290,12 @@ SELECT * FROM rounds WHERE state = 'draft' AND publish_at <= $1;
 -- name: GetLatestPublishedRound :one
 SELECT * FROM rounds WHERE state = 'published' ORDER BY number DESC LIMIT 1;
 
--- name: GetPairingForUserInRound :one
--- The dashboard's "this week" block (spec §8.3). sqlc.arg names the
--- parameter for what it actually is here — the player asking, who may
--- be either colour — rather than the misleading "white_user_id" its
+-- name: ListPairingsForUserInRound :many
+-- The dashboard's "this week" block (spec §8.3). :many, not :one: the
+-- odd-pool volunteer (§6.2 step 6a) has two pairings in the same round,
+-- and a :one would silently show them only one opponent. sqlc.arg names
+-- the parameter for what it actually is here — the player asking, who
+-- may be either colour — rather than the misleading "white_user_id" its
 -- first use in the CASE would otherwise suggest.
 SELECT
   p.*,
@@ -302,7 +304,8 @@ SELECT
 FROM pairings p
 JOIN users wu ON wu.id = p.white_user_id
 JOIN users bu ON bu.id = p.black_user_id
-WHERE p.round_id = $1 AND (p.white_user_id = sqlc.arg(user_id) OR p.black_user_id = sqlc.arg(user_id));
+WHERE p.round_id = $1 AND (p.white_user_id = sqlc.arg(user_id) OR p.black_user_id = sqlc.arg(user_id))
+ORDER BY p.position ASC NULLS LAST, p.created_at ASC;
 
 -- name: GetExclusionForUserInRound :one
 SELECT * FROM round_exclusions WHERE round_id = $1 AND user_id = $2;
