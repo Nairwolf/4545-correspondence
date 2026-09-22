@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-Phases 1–3 (spec §12) are implemented. Phase 1, read-only parity:
+Phases 1–4 (spec §12) are implemented. Phase 1, read-only parity:
 schema/migrations, the Lichess client, `sync-games`/`refresh-ratings`/
 `recompute` as both river-scheduled jobs and one-shot `ic` subcommands,
 the pure scoring module, and the public web pages (`/`, `/standings`,
@@ -17,9 +17,21 @@ Phase 3, self-service: the player dashboard at `/account`
 (`internal/web/dashboard.go`, queries in `internal/db/queries/profile.sql`)
 — activity, the optional concurrent-games cap (NULL = unlimited, bounded
 by the `player.max_concurrent_ceiling` setting), double-game opt-out,
-resume-quest, my games and stored authorisation status. Not built yet:
-`validate-tokens` (Phase 5) and the GDPR deletion path (Phase 6, a gate
-before public registration — see spec §11).
+resume-quest, my games and stored authorisation status. Phase 4,
+pairing: the pure engine (`internal/pairing`) with two solvers behind
+one `Solver` interface — greedy (default) and blossom, a port of
+NetworkX's minimum-cost matching carrying its BSD notice — chosen with
+the `pairing.solver` setting; the rounds service (`internal/rounds`)
+with the one-draft rule, the review window and guarded publication;
+the `generate-round` (on `pairing.cron`), `publish-round` and
+`publish-round-sweep` jobs; admin round management and diagnostics at
+`/admin/rounds`; and the dashboard's "This week" section. Generated
+pairings are `manual_external`: players still start the games by hand
+and `sync-games` finds them. Not built yet: everything that talks to
+Lichess for pairing — bulk pairing, the challenge fallback,
+`validate-tokens`, missed starts and auto-pause, notifications
+(Phase 5) — and the GDPR deletion path (Phase 6, a gate before public
+registration — see spec §11).
 `docs/infinite-correspondence-spec.md`
 is still the source of truth for behaviour; read it before changing
 anything under `internal/`, and update it when a decision changes rather
@@ -40,9 +52,9 @@ make psql               # psql shell on the dev database
 ```
 
 See `README.md` for the full command list (including `make tailwind` /
-`make css` and the one-shot `ic` admin subcommands) and `PLAN.md`'s build
-order for what's done and what's next (the pairing engine onward,
-Phase 4+, is not built yet).
+`make css`, the one-shot `ic` admin subcommands and the runbook for the
+first live rounds) and `PLAN.md`'s build order for what's done and
+what's next (automation, Phase 5 onward, is not built yet).
 
 ## What the system does
 
@@ -93,7 +105,7 @@ Everything in spec §4.2 lives in the `Setting` table as runtime-editable JSON w
 1. Read-only parity (schema, Lichess client, completion sync, scoring, public pages) — validates the hardest logic first
 2. Identity (OAuth, registration, admin queue)
 3. Self-service (player dashboard)
-4. Pairing (engine, rounds, review window, diagnostics) — run in shadow mode against the spreadsheet for a week or two
+4. Pairing (engine, rounds, review window, diagnostics) — no shadow mode: the site pairs for real from its first round, with a long review window on the first drafts as the safety net (maintainer decision, 2026-09-17)
 5. Automation (bulk pairing, challenge fallback, auto-pause, notifications)
 6. Polish (admin settings, health page, Discord)
 7. Optional history migration (§9) — only if maintainers confirm
@@ -102,7 +114,7 @@ Out of scope permanently: the spreadsheet's Awards / Awards_Backend sheets (the 
 
 ## Testing expectations (spec §11)
 
-Table-driven unit tests for the whole scoring module using fixtures from real spreadsheet values; pairing tests covering colour balancing, repeat avoidance, capacity caps, the relaxation ladder, and the odd-pool paths (double-game selection with and without volunteers, two-distinct-opponents, one-white-one-black, cap at `ongoing + 2`, bye rotation fairness over many simulated rounds); integration tests for ingestion idempotency. A mocked Lichess client — **no test touches the live API**.
+Table-driven unit tests for the whole scoring module using fixtures from real spreadsheet values; pairing tests covering colour balancing, repeat avoidance, capacity caps, an unavoidable repeat being recorded (the relaxation ladder is unreachable, spec §6.2 step 7), both solvers (blossom checked against brute force), and the odd-pool paths (double-game selection with and without volunteers, two-distinct-opponents, one-white-one-black, cap at `ongoing + 2`, bye rotation fairness over many simulated rounds); integration tests for ingestion idempotency. A mocked Lichess client — **no test touches the live API**.
 
 ## Open questions (spec §14)
 

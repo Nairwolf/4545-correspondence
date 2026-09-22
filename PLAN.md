@@ -1,5 +1,9 @@
 # Phase 4 implementation plan — Pairing
 
+**Status: built and closed out 2026-09-22** (commits `7ac7596` to
+`c86bdfb`). The live checks at the end are still to be run; see "What
+was built".
+
 ## Context
 
 Phases 1–3 are built and closed out. Phase 4 is **pairing** (spec §12):
@@ -617,8 +621,84 @@ review (`CLAUDE.md`). No test touches the live API.
 
 ## What was built
 
-Steps 1–4 are summarised at close-out (step 7); their commits are
-`7ac7596`, `5b8e3be`, `0544276`, `c4a38aa`.
+Steps 1–4 were summarised at close-out from their commits and the
+code; steps 5 onward were recorded as they landed.
+
+### Step 1 — schema, queries, settings (`7ac7596`)
+
+- **The migration is exactly the planned schema** (`00011_pairing.sql`):
+  the three tables, the two enums, the round and pairing diagnostics
+  columns, `rounds_number_live` and `rounds_one_draft`.
+- **`sync-games` matches only published rounds**, pinned by an
+  integration test that a draft's pairing is never returned.
+  `CountInFlightGamesForUser` replaced `CountOngoingGamesForUser`
+  everywhere (decision 7), and the old query is gone.
+- **Deviation: `ListPairingPool` is not one statement with everything
+  in it.**
+  - It `LEFT JOIN`s the standings: a seeded or just-approved player
+    can have no standing row yet, and dropping them from the pool
+    would be a silent NULL bug. The rounds service pairs such a player
+    at `rating.unrated_default`.
+  - The round number of a player's last bye and last double game is
+    **not** in the pool query. Computed in a derived table, sqlc typed
+    that genuinely nullable number as a plain `int32`, with no warning.
+    It is read per player instead (`GetLastByeForUser` /
+    `GetLastDoubleGameForUser`, `pgx.ErrNoRows` meaning "never"). This
+    discovery is the CLAUDE.md rule about checking sqlc's generated
+    types after any query with a subquery, derived table or cast.
+
+### Step 2 — the engine, greedy solver (`5b8e3be`)
+
+Built as planned: a pure module, every step a named function with its
+own table test, determinism tested with shuffled inputs.
+
+- **Deviation, spec over plan:** the double-game capacity gate follows
+  spec §6.2 6a, `ongoing + 2 ≤ cap`. The plan's
+  `CapacityAllows(max, inFlight+2)` was one stricter: with a cap of 4
+  and 2 games in flight, the plan's reading would have refused a
+  double game the player can take, ending exactly at the cap. The
+  maintainer agreed the spec was right.
+- **The brute-force reference solver** in the tests measured greedy
+  against the optimum from the start (743 of 1 000 small pools
+  optimal, 49 avoidable rematches). Those numbers are what step 6 was
+  later decided on.
+
+### Step 3 — rounds service and jobs (`0544276`)
+
+Built as planned: `internal/rounds`, the three jobs, `ic
+generate-round` / `ic publish-round` / `ic setting`.
+
+- **New dependency: `robfig/cron/v3`**, promoted from indirect to
+  direct (decision 2).
+- **Only the weekly job schedules its draft's publication.** `serve`
+  passes a river-backed `Scheduler`. The CLI has no job runner and
+  passes none, so its drafts are published by the hourly sweep.
+- **The publish job is unique on `{RoundID, PublishAt}`**, as planned,
+  so a regenerated draft's schedule is never mistaken for the old one.
+- **Found at close-out: `pairing.cron` runs in the server's own
+  timezone.** River hands the schedule the process's local time. The
+  default `0 12 * * 1` is therefore Monday noon wherever `serve` runs
+  (UTC in a typical container). robfig/cron accepts a `CRON_TZ=`
+  prefix to pin it; the README runbook says so.
+
+### Step 4 — admin round management (`c4a38aa`)
+
+Built as planned: the round list and round view, every planned action,
+edits refused with 409 on anything but a draft, `edited_by`, nulled
+diagnostics and an audit row on every edit.
+
+- **Swap re-derives colours with the engine's own colour step**:
+  `pairing.AssignColours` was exported for it.
+- **Open question settled: no scheduler in the web layer.** A draft
+  generated with *Generate now* schedules no publish job, so the
+  hourly sweep publishes it, up to an hour after its window ends.
+  *Publish now* is immediate. Found at close-out: the comment at the
+  top of `internal/web/rounds.go` claimed such a draft had "its own
+  scheduled job"; it is corrected, and the behaviour is now in spec
+  §8.5 and the README runbook.
+- **Found at close-out:** the diagnostics panel did not show the
+  settings snapshot spec §8.5 promises. It was fixed during step 7
+  (`c86bdfb`).
 
 ### Step 5 — dashboard slot and eligibility (2026-09-22, `bdc6976`)
 
@@ -780,6 +860,35 @@ Spec amended (§4.2, §6.2 step 4, §12, §13, §15 entry dated
 Automated verification, green: `go build`, `go vet` (both tags),
 gofmt, `make test`, `make test-integration` (every package).
 
+### Step 7 — docs and close-out (2026-09-22)
+
+- **One code fix, committed on its own** (`c86bdfb`, maintainer's
+  choice): the round page lists the whole settings snapshot under
+  "Settings at generation", as spec §8.5 promises. The test changes a
+  setting after generating and checks the page still shows the value
+  in force at generation. An imported round says it has none.
+- **README:** the admin routes; which jobs `serve` runs and when; the
+  `ic` list; and a **runbook for the first live rounds** — before the
+  first Monday (long review window, the cron timezone), reviewing a
+  draft, publication timing, what players must create for
+  `sync-games` to find a game, *Mark failed*, and a missed Monday.
+- **CLAUDE.md:** the repository state covers Phase 4; the build-order
+  line no longer says "shadow mode"; the testing expectations name
+  both solvers and drop the unreachable relaxation ladder.
+- **Spec:** §8.3 "This week" recorded as built with its settled cases;
+  §8.5 the settings snapshot and the manual draft's publication by the
+  sweep; §11 the same testing change; §12 Phase 4 marked built; a §15
+  entry.
+- **Comment corrected** at the top of `internal/web/rounds.go` (see
+  step 4).
+- **Live verification: not run yet.** As of 2026-09-22 the dev
+  database holds only the six imported rounds (195–200), and no round
+  job has ever run on it. The checks below are still the maintainer's
+  to run.
+
+Automated verification, green: `go build`, `go vet` (both tags),
+gofmt, `make test`, `make test-integration` (every package).
+
 ---
 
 ## Verification (end of Phase 4)
@@ -787,7 +896,7 @@ gofmt, `make test`, `make test-integration` (every package).
 Automated: `go build`, `go vet` (both tags), gofmt, `make test`,
 `make test-integration` green after every step.
 
-Live, by the maintainer:
+Live, by the maintainer — **not run yet** (see step 7 above):
 
 1. `make migrate`; `ic setting pairing.review_window_hours 24`; `ic
    generate-round` → a draft appears on `/admin/rounds` with
@@ -797,9 +906,18 @@ Live, by the maintainer:
    small, colours going to the player who is due them, no repeat within
    the window unless the diagnostics say the pool forced it.
 3. Cancel the draft with a reason; generate again → same number reused.
-4. Generate from the admin page, edit a pairing,
-   watch it auto-publish after the window (or publish now); a paired
-   player's dashboard shows the opponent, a capped player's shows the
-   at-capacity sentence with numbers, `pair_at` equals `published_at`.
+4. Generate from the admin page, edit a pairing, then publish it:
+   *Publish now*, or wait for the hourly sweep, which publishes it up
+   to an hour after the window ends. A paired player's dashboard
+   shows the opponent, a capped player's shows the at-capacity
+   sentence with numbers, and `pair_at` equals `published_at`.
 5. Restart `serve` and confirm the cron schedule fires at the
-   configured time (use a near-future cron for the check).
+   configured time (use a near-future cron for the check). It runs in
+   the server's timezone unless the expression starts with
+   `CRON_TZ=`. The scheduled draft publishes itself when its window
+   ends.
+6. On a draft, check the diagnostics panel's "Settings at
+   generation", then `ic setting pairing.solver '"blossom"'` and
+   *Regenerate*: the panel says "blossom", and the repeats accepted
+   are the same or fewer. Switch back and regenerate: greedy's pairing
+   returns unchanged.
