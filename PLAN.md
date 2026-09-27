@@ -1,7 +1,8 @@
 # Phase 4 implementation plan — Pairing
 
 **Status: built and closed out 2026-09-22** (commits `7ac7596` to
-`c86bdfb`). The live checks at the end are still to be run; see "What
+`c86bdfb`). The live checks were run by the maintainer on 2026-09-25
+and 2026-09-27 and all passed; see "Live verification" under "What
 was built".
 
 ## Context
@@ -881,13 +882,114 @@ gofmt, `make test`, `make test-integration` (every package).
   entry.
 - **Comment corrected** at the top of `internal/web/rounds.go` (see
   step 4).
-- **Live verification: not run yet.** As of 2026-09-22 the dev
-  database holds only the six imported rounds (195–200), and no round
-  job has ever run on it. The checks below are still the maintainer's
-  to run.
+- **Live verification** was not part of the close-out; it was run
+  afterwards and is recorded below.
 
 Automated verification, green: `go build`, `go vet` (both tags),
 gofmt, `make test`, `make test-integration` (every package).
+
+### Live verification (maintainer, 2026-09-25 and 2026-09-27)
+
+All six checks listed under "Verification" below passed. They ran
+on the dev database: rounds 195–200 imported, the maintainer plus
+seven demo players approved (SleepyBishop inactive), and made-up game
+ids, so Lichess never had a real game to find. The order differed
+from the list:
+- The solver comparison moved onto the first draft, where this data
+  gives the two solvers different answers.
+- The at-capacity check moved into the cron check. A limit of 1 only
+  excludes the maintainer once a published round has given them a
+  game.
+
+- **Generation from the CLI (check 1).** `ic generate-round`, with a
+  24-hour window, made draft 201, one past the imported rounds, source
+  manual.
+  - Pool of 7, so one player plays two games. It was RookieOne:
+    nobody had had a double game yet, so the tie-break fell to the
+    user id.
+  - SleepyBishop was excluded as inactive.
+  - `/health` showed the run.
+  - `ic sync-games` recorded `pairings_checked: 0` while the draft
+    held four pairings with no game, so a draft never reaches Lichess.
+- **Hand check (check 2).** Greedy's draft:
+
+  | White | Black | Gap | Colour penalty | Repeat of |
+  |---|---|---|---|---|
+  | HikaruSpeed | QueensGambit | 85 | 2 | 196 |
+  | RookieOne | MagnusMagnet | 35 | 0 | — |
+  | Nairwolf | RookieOne | 13 | 3 | — |
+  | PawnStorm42 | KnightTerror | 489 | 2 | 199 |
+
+  - Every colour went to the player owed it.
+  - PawnStorm42 and KnightTerror were both at −1, so one had to take
+    black. On that tie the lower-rated player takes white:
+    PawnStorm42.
+  - The volunteer played one white and one black.
+  - The 3 on the volunteer's second game is scored from their colour
+    balance before the round. Across the round their balance does not
+    move. This is the stored "realised penalty" of spec §6.2 step 5
+    working as specified, not a bug.
+- **Solvers (check 6).** Among the six players other than the
+  maintainer, only two pairs had not met in rounds 196–200:
+  KnightTerror–QueensGambit and MagnusMagnet–RookieOne. So every
+  possible pairing has at least one repeat.
+  - Greedy accepted 2.
+  - Blossom, after *Regenerate*, accepted 1, with the pairing worked
+    out by hand beforehand: HikaruSpeed–Nairwolf,
+    KnightTerror–QueensGambit, RookieOne–MagnusMagnet, and
+    PawnStorm42–RookieOne (a repeat of round 198).
+  - Switching back to greedy and regenerating restored its pairing
+    exactly.
+  - The diagnostics panel named the solver each time.
+- **Cancel and reuse the number (check 3).** Cancelling with a reason,
+  then *Generate now*, made a new draft 201, identical to the
+  cancelled one.
+- **Edit and publish (check 4).**
+  - *Flip* on PawnStorm42–KnightTerror showed the edited tag, blanked
+    the row's diagnostics and wrote a `pairing.flip` audit row.
+  - *Publish now*: `pair_at` equalled `published_at`, and the
+    dashboard said "You play RookieOne with white."
+- **Schedule and self-publication (check 5, with the at-capacity part
+  of check 4).** Setup: maintainer's game limit set to 1, a 1-hour
+  window, `pairing.cron` = `CRON_TZ=UTC 52 19 * * *`, then a server
+  restart.
+  - The job fired at 19:52 UTC, which is 21:52 on the server's Paris
+    clock, so the `CRON_TZ` prefix is honoured.
+  - Draft 202, source schedule, a pool of 6 (even).
+  - Exclusions: the maintainer as at capacity, 1 game of 1, and
+    SleepyBishop as inactive. The maintainer's round-201 game, never
+    started on Lichess, counted as in flight (decision 7).
+  - Exactly one `publish-round` job, scheduled at `publish_at`.
+  - Half a second after `publish_at`, that job published the round.
+    The hourly sweep, four minutes earlier, had rightly found nothing
+    due.
+  - The `round.publish` audit row has no actor, and `pair_at` equals
+    `published_at`.
+  - The at-capacity exclusion row that the dashboard's sentence is
+    built from was in place.
+- **Clean-up.** Window back to 24 hours, `pairing.cron` pinned to
+  `CRON_TZ=UTC 0 12 * * 1`, the maintainer's limit removed, server
+  restarted.
+
+Findings:
+- **Greedy accepted an avoidable rematch in both generated rounds.**
+  - In round 201 it accepted 2 where 1 was possible.
+  - In round 202 it did so again. Only KnightTerror–QueensGambit and
+    MagnusMagnet–PawnStorm42 were fresh pairs; greedy gave
+    HikaruSpeed the nearest rating, MagnusMagnet, first, which forced
+    a second rematch lower down.
+  - Seven demo players who have nearly all met is an extreme pool. A
+    league of 50 or more has far more fresh opponents.
+  - Still, it is the pattern decision 1 said to watch for in the
+    first live rounds. `pairing.solver` stays `greedy`; the default is
+    the maintainer's call.
+- **No code change came out of the checks.**
+- **The dev database now holds published rounds 201 and 202** with
+  pending demo pairings. Those count as games in flight, and
+  `sync-games` looks for them every hour. *Mark failed* clears one if
+  it gets in the way.
+- **The production generation time is not chosen yet.** The dev
+  database is pinned to Monday noon UTC.
 
 ---
 
@@ -896,7 +998,8 @@ gofmt, `make test`, `make test-integration` (every package).
 Automated: `go build`, `go vet` (both tags), gofmt, `make test`,
 `make test-integration` green after every step.
 
-Live, by the maintainer — **not run yet** (see step 7 above):
+Live, by the maintainer — **run 2026-09-25 and 2026-09-27, all
+passed** (see "Live verification" above):
 
 1. `make migrate`; `ic setting pairing.review_window_hours 24`; `ic
    generate-round` → a draft appears on `/admin/rounds` with
