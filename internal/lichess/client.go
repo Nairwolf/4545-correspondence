@@ -1,9 +1,11 @@
 // Package lichess is the one place in this application that speaks HTTP
 // to lichess.org (spec §3.2: "wrap all of this in a single LichessClient
 // module so the rest of the app never touches HTTP directly"): reading
-// public user ratings and game history (Phase 1), and the sign-in calls
-// that act on behalf of one player (Phase 2, see oauth.go). Bulk pairing
-// and challenges are later phases.
+// public user ratings and game history (Phase 1), the sign-in calls that
+// act on behalf of one player (Phase 2, see oauth.go), and creating the
+// league's games — bulk pairing, direct challenges and the token probe
+// that decides between them (Phase 5, see bulk.go, challenge.go and
+// tokens.go).
 package lichess
 
 import (
@@ -15,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -68,6 +71,40 @@ type API interface {
 	// we obtained but will not keep (a sign-in by a non-member, or a
 	// banned account) and, later, for account deletion (spec §11).
 	RevokeToken(ctx context.Context, bearer tokencrypt.Secret) error
+
+	// CreateBulkPairing creates games between players, as the organiser
+	// (spec §3.2). The games start at once: no pairAt is sent. A refusal
+	// is a *BulkRejection.
+	CreateBulkPairing(
+		ctx context.Context,
+		organiser tokencrypt.Secret,
+		req BulkPairingRequest,
+	) (BulkPairing, error)
+
+	// ListBulkPairings returns the organiser's most recent bulks, newest
+	// first, whether their games were created yet or not.
+	ListBulkPairings(ctx context.Context, organiser tokencrypt.Secret) ([]BulkPairing, error)
+
+	// TestTokens asks Lichess who each token belongs to, batching
+	// internally. A nil value means Lichess called the token invalid; a
+	// token Lichess did not mention at all is absent from the map.
+	TestTokens(
+		ctx context.Context,
+		tokens []tokencrypt.Secret,
+	) (map[tokencrypt.Secret]*TokenInfo, error)
+
+	// CreateChallenge sends a correspondence challenge to opponent from
+	// the player challenger belongs to (spec §3.3). The challenge's id is
+	// the game's id once accepted.
+	CreateChallenge(
+		ctx context.Context,
+		challenger tokencrypt.Secret,
+		opponent string,
+		req ChallengeRequest,
+	) (Challenge, error)
+
+	// CancelChallenge withdraws a challenge challenger sent.
+	CancelChallenge(ctx context.Context, challenger tokencrypt.Secret, id string) error
 }
 
 // Client is the real, HTTP-backed implementation of API.
@@ -152,7 +189,8 @@ var _ API = (*Client)(nil)
 // APIError is returned for any non-2xx response that survives the 429
 // retry. It carries Lichess's own {"error": "..."} message when one was
 // sent (spec's verified Error schema), so callers and logs see the real
-// reason rather than just a status code.
+// reason rather than just a status code. A form Lichess refused comes
+// back as {"error": {"field": ["reason"]}}; Message spells that out too.
 type APIError struct {
 	StatusCode int
 	Message    string
@@ -165,14 +203,47 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("lichess: unexpected status %d", e.StatusCode)
 }
 
-// do issues one request, retrying exactly once after a 429 (spec §7.2:
+// do issues one request with send and turns any response other than a
+// 2xx into an *APIError. The caller must close the returned response
+// body on success.
+func (c *Client) do(
+	ctx context.Context,
+	method, path string,
+	query url.Values,
+	body []byte,
+	contentType, accept string,
+	bearer string,
+) (*http.Response, error) {
+	resp, err := c.send(
+		ctx,
+		method,
+		path,
+		query,
+		body,
+		contentType,
+		accept,
+		bearer,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		defer resp.Body.Close()
+		return nil, readAPIError(resp)
+	}
+	return resp, nil
+}
+
+// send issues one request, retrying exactly once after a 429 (spec §7.2:
 // wait at least 60s, retry once, then let the caller's job fail and be
 // retried by the scheduler — this function only owns the one retry, not
-// the job-level retry). bearer is the token the call is made as: the
-// app's own for the read-only polling, a player's for the calls that
-// act on their behalf; empty sends no Authorization header. The caller
-// must close the returned response body on success.
-func (c *Client) do(
+// the job-level retry), and returns the response whatever its status:
+// most callers want do, but a bulk pairing's refusal needs its own
+// reading (bulk.go). bearer is the token the call is made as: the app's
+// own for the read-only polling, a player's or the organiser's for the
+// calls that act on their behalf; empty sends no Authorization header.
+// The caller must close the returned response body.
+func (c *Client) send(
 	ctx context.Context,
 	method, path string,
 	query url.Values,
@@ -231,11 +302,6 @@ func (c *Client) do(
 		}
 	}
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		defer resp.Body.Close()
-		return nil, readAPIError(resp)
-	}
-
 	return resp, nil
 }
 
@@ -243,13 +309,39 @@ func readAPIError(resp *http.Response) error {
 	apiErr := &APIError{StatusCode: resp.StatusCode}
 	if strings.Contains(resp.Header.Get("Content-Type"), "json") {
 		var body struct {
-			Error string `json:"error"`
+			Error json.RawMessage `json:"error"`
 		}
 		if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<10)).Decode(&body); err == nil {
-			apiErr.Message = body.Error
+			apiErr.Message = errorMessage(body.Error)
 		}
 	}
 	return apiErr
+}
+
+// errorMessage reads the "error" member of a Lichess error body. It is
+// usually a sentence, but a refused form sends each field's reasons
+// instead — {"days": ["Invalid value"]} — which is spelled out as
+// "days: Invalid value", fields in alphabetical order so the text is
+// stable. Anything else yields "".
+func errorMessage(raw json.RawMessage) string {
+	var sentence string
+	if err := json.Unmarshal(raw, &sentence); err == nil {
+		return sentence
+	}
+	var fields map[string][]string
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return ""
+	}
+	names := make([]string, 0, len(fields))
+	for name := range fields {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		parts = append(parts, name+": "+strings.Join(fields[name], ", "))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // UsersByID implements API.

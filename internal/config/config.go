@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/nairwolf/4545-correspondence/internal/tokencrypt"
 )
 
 // Config holds process-wide configuration read from the environment.
@@ -26,6 +28,13 @@ type Config struct {
 	// §3.4); this is not a per-player token, just a courtesy identity for
 	// the app's own read-only polling.
 	LichessToken string
+
+	// OrganiserToken is LICHESS_ORG_TOKEN: the league account's
+	// challenge:bulk token, which creates the round's games (spec §2.2,
+	// §3.2). It is optional here — nothing reads it while
+	// pairing.game_creation is manual — and the game-creation job fails,
+	// naming the variable, if it is missing when needed.
+	OrganiserToken tokencrypt.Secret
 
 	// Auth is what the sign-in flow needs (spec §2.2, §3.1). Load reads
 	// it without validating, so the one-shot CLI subcommands keep working
@@ -73,9 +82,10 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		DatabaseURL:  dbURL,
-		ListenAddr:   listenAddr,
-		LichessToken: os.Getenv("LICHESS_TOKEN"),
+		DatabaseURL:    dbURL,
+		ListenAddr:     listenAddr,
+		LichessToken:   os.Getenv("LICHESS_TOKEN"),
+		OrganiserToken: tokencrypt.Secret(os.Getenv("LICHESS_ORG_TOKEN")),
 		Auth: Auth{
 			LichessClientID:       os.Getenv("LICHESS_CLIENT_ID"),
 			LichessRedirectURI:    os.Getenv("LICHESS_REDIRECT_URI"),

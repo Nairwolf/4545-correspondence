@@ -615,6 +615,83 @@ Each step is recorded here as it lands.
   name comes from (one league per deployment: no new hard-coded league
   text).
 
+### Step 1 — Lichess client (2026-09-28)
+
+Built as planned: the five `API` methods (`bulk.go`, `tokens.go`,
+`challenge.go`), `BulkRejection`, the `Fake`'s game-creation half,
+`LICHESS_ORG_TOKEN` in `internal/config` (as a `tokencrypt.Secret`,
+optional) and `pairing.days_per_move` checked against Lichess's set.
+Nothing calls the new methods yet: no behaviour change.
+
+- **Checked against the source, not only the plan.** The OpenAPI files
+  were re-read (still v2.0.174), and so was the server code behind
+  them (lila's `BulkPairing` controller and `ChallengeBulkSetup`).
+  That confirmed the plan's *lila* points and found two more:
+  - **A refused bulk has three shapes, not two.** Besides
+    `{"tokens": …}` and `{"error": …}` there is
+    `{"duplicateUsers": […]}`. It only happens for real-time games,
+    but `BulkRejection` carries it rather than dropping it. And
+    `"error"` is either a sentence or, for a refused form, an object
+    of field reasons (`{"days": ["…"]}`).
+  - **The bulk list returns the organiser's 100 most recent bulks**,
+    whether their games were created yet or not — what step 5's
+    reconciliation needs. A bulk created without `pairAt` still
+    answers `pairedAt: null`, because Lichess returns the bulk as
+    stored, before its games were made.
+- **Deviation: `do` split in two.** `send` makes the call (with the
+  one 429 retry) and returns any status; `do` is `send` plus turning a
+  non-2xx into an `*APIError`, as before. `CreateBulkPairing` uses
+  `send` so it can read its own 400 body. No other caller changed.
+- **Beyond the plan: form refusals are readable.** `APIError.Message`
+  was empty when Lichess refused a form (`"error"` is an object then).
+  It now reads e.g. "days: Invalid value" — useful for challenge
+  errors in the job log.
+- **No token in any error text.** `BulkRejection` keeps only the
+  reasons, keyed by the tokens the caller sent; any reason that
+  quotes one of those tokens has it replaced by `[redacted]`, and
+  `Error()` names counts and reasons only. The body is read with a
+  1 MB limit (a thousand refused tokens don't fit in the 8 KB used for
+  other errors) and never kept.
+- **`TestTokens` separates "invalid" from "not mentioned".** A token
+  Lichess answered `null` for is in the map with a nil value; one it
+  didn't mention is absent. A caller revoking tokens on the strength
+  of this call must only revoke the first kind.
+- **The `Fake`** checks tokens the way Lichess does: unknown, or
+  without `challenge:write`, is refused. `RejectTokens` covers "valid
+  at the probe, refused by the bulk". It stamps a bulk with the wall
+  clock so a reconciliation looking for bulks created after
+  publication finds it. Its ids depend only on call order (`bulk1`,
+  `game2`, …), and every call is recorded with the token it was made
+  as.
+- **For step 7:** cancelling a challenge that was *accepted* in the
+  meantime aborts the game instead, until both players have made
+  their first move (documented). `cancel-challenge` must therefore treat "the
+  game exists" as a possibility, not an error; it never sends
+  `opponentToken`, which would let it abort a game already in play.
+
+Tests: every method against `httptest`, including all four 400 shapes
+(tokens, duplicate users, a sentence, a refused form) plus an
+unreadable body; a 429 on a bulk is an `APIError` after the one retry;
+no error text — rejection, transport failure, 401 — contains a token;
+token-test batching (2 005 tokens → 1 000, 1 000, 5), duplicates sent
+once, `null` vs absent; the challenge form (colour always set, no
+clock, no keep-alive stream) and its refusals; cancel and its 404;
+the `Fake`'s all-or-nothing bulk, ids, call record and per-method
+errors; every `days_per_move` Lichess accepts, and 0, 4 and `"2"`
+refused; `LICHESS_ORG_TOKEN` optional and never printed.
+
+Automated verification: `go build`, `go vet` (both tags), gofmt,
+`make test` green; `make test-integration` green in every package but
+`cmd/ic`. There two sync-games tests fail
+(`TestDoSyncGames_NeverMatchesADraftRoundsPairing`,
+`…_AmbiguousMatchFlagsThePairingAndAttachesNothing`), and they fail
+identically on `2eb8da5`, before this step. They assert on the whole
+database — "0 pairings checked", "no unmatched pairing left" — and the
+dev database has held 7 pending demo pairings (rounds 201 and 202)
+since Phase 4's live checks. Nothing in this step touches that code;
+the fix is to scope the two assertions to the tests' own rows, as the
+README asks of integration tests.
+
 ---
 
 ## Verification

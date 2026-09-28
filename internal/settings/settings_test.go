@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -73,6 +74,9 @@ func TestApplyOverride_RejectsInvalidPairingValues(t *testing.T) {
 		{"solver: unknown value", keySolver, `"optimal"`},
 		{"solver: wrong type", keySolver, `1`},
 		{"rated: wrong type", keyRated, `"true"`},
+		{"days per move: not a Lichess value", keyDaysPerMove, `4`},
+		{"days per move: zero", keyDaysPerMove, `0`},
+		{"days per move: wrong type", keyDaysPerMove, `"2"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -80,6 +84,14 @@ func TestApplyOverride_RejectsInvalidPairingValues(t *testing.T) {
 			err := applyOverride(&s, tc.key, []byte(tc.value))
 			require.Error(t, err)
 		})
+	}
+}
+
+func TestApplyOverride_DaysPerMoveAcceptsEveryLichessValue(t *testing.T) {
+	for _, days := range []int{1, 2, 3, 5, 7, 10, 14} {
+		s := Defaults()
+		require.NoError(t, applyOverride(&s, keyDaysPerMove, []byte(strconv.Itoa(days))))
+		assert.Equal(t, days, s.DaysPerMove)
 	}
 }
 

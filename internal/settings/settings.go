@@ -77,7 +77,9 @@ type Settings struct {
 	UnratedDefault int
 	// DaysPerMove is pairing.days_per_move (default 2): the
 	// correspondence time control every league game uses, and one of
-	// the filters a candidate game must match (spec §7.3).
+	// the filters a candidate game must match (spec §7.3). Only the
+	// values Lichess accepts are allowed (DaysPerMoveValues): any other
+	// would make every bulk pairing and challenge fail.
 	DaysPerMove int
 	// MaxConcurrentCeiling is player.max_concurrent_ceiling (default
 	// 20): the highest cap a player may set on their dashboard, if they
@@ -141,6 +143,11 @@ func Defaults() Settings {
 		Rated:             true,
 	}
 }
+
+// DaysPerMoveValues are the days-per-move time controls Lichess accepts
+// for a correspondence game, in bulk pairings and challenges alike
+// (spec §4.2, §6.3).
+var DaysPerMoveValues = []int{1, 2, 3, 5, 7, 10, 14}
 
 // key names as stored in the settings table (spec §4.2).
 const (
@@ -217,7 +224,15 @@ func applyOverride(s *Settings, key string, value []byte) error {
 	case keyUnratedDefault:
 		return json.Unmarshal(value, &s.UnratedDefault)
 	case keyDaysPerMove:
-		return json.Unmarshal(value, &s.DaysPerMove)
+		var days int
+		if err := json.Unmarshal(value, &days); err != nil {
+			return err
+		}
+		if !slices.Contains(DaysPerMoveValues, days) {
+			return fmt.Errorf("must be one of %v (the values Lichess accepts), got %d", DaysPerMoveValues, days)
+		}
+		s.DaysPerMove = days
+		return nil
 	case keyMaxConcurrentCeiling:
 		return json.Unmarshal(value, &s.MaxConcurrentCeiling)
 

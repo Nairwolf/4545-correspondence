@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -61,4 +62,23 @@ func TestSecureCookies(t *testing.T) {
 func TestSplitList(t *testing.T) {
 	assert.Nil(t, splitList(""))
 	assert.Equal(t, []string{"a", "b"}, splitList(" a, b,, "))
+}
+
+func TestLoad_OrganiserToken(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://localhost/ic")
+
+	t.Run("optional", func(t *testing.T) {
+		t.Setenv("LICHESS_ORG_TOKEN", "")
+		cfg, err := Load()
+		require.NoError(t, err, "game creation is off by default, so the organiser token is not required")
+		assert.Empty(t, cfg.OrganiserToken)
+	})
+
+	t.Run("read and never printed", func(t *testing.T) {
+		t.Setenv("LICHESS_ORG_TOKEN", "lip_organiser")
+		cfg, err := Load()
+		require.NoError(t, err)
+		assert.Equal(t, "lip_organiser", string(cfg.OrganiserToken))
+		assert.NotContains(t, fmt.Sprintf("%v %+v", cfg, cfg), "lip_organiser")
+	})
 }
