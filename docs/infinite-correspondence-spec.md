@@ -2,7 +2,7 @@
 
 Replacement web application for the "Lichess4545 - Infinite Correspondence" Google Sheets system.
 
-**Status:** specification for implementation — Phase 1 amendments applied 2026-09-07, Phase 2 and Phase 3 amendments applied 2026-09-15, Phase 4 plan amendments applied 2026-09-17 (see §15 changelog)
+**Status:** specification for implementation — Phase 1 amendments applied 2026-09-07, Phase 2 and Phase 3 amendments applied 2026-09-15, Phase 4 plan amendments applied 2026-09-17, Phase 5 plan amendments applied 2026-09-28 (see §15 changelog)
 **Source of truth for existing behaviour:** the `Lichess4545 - Infinite Correspondence` spreadsheet (sheets: `Overview`, `Standings`, `Standings_Backend`, `Levels`, `Pairing_Maker`, `Pairing_Maker_Backend`, `Perf_Rating_Backend`, `RawData`, `Stats`)
 
 > **Out of scope:** the spreadsheet's `Awards` / `Awards_Backend` sheets are **not** being ported. The award metrics depend on a "compensation / sound sacrifice" detection rule whose implementation was lost, and the maintainers have confirmed the feature will not be carried over.
@@ -100,14 +100,16 @@ Notes on the choices that carry real weight:
 DATABASE_URL
 LICHESS_CLIENT_ID              # self-chosen public client id (e.g. the site's hostname); nothing is registered on Lichess
 LICHESS_REDIRECT_URI           # absolute callback URL; its scheme also decides whether cookies are Secure
-LICHESS_ORG_TOKEN              # organiser token, scope: challenge:bulk
+LICHESS_ORG_TOKEN              # organiser token, scope: challenge:bulk; needed only when
+                               # pairing.game_creation = lichess (§4.2)
 TOKEN_ENCRYPTION_KEY           # 32 bytes, hex-encoded: AES-256-GCM key for stored player OAuth tokens
 SESSION_SECRET                 # >= 32 chars: signs the short-lived OAuth-state cookie
 ADMIN_LICHESS_USERNAMES        # comma-separated bootstrap admin list
-LICHESS_MSG_ENABLED            # optional, send notifications as Lichess PMs
 ```
 
 There is no `LICHESS_CLIENT_SECRET`: Lichess has no confidential clients (§3.1). Rotating `TOKEN_ENCRYPTION_KEY` makes every stored token unreadable, so every player re-authorises. *(Amended 2026-09-15.)*
+
+`LICHESS_ORG_TOKEN` may be empty while `pairing.game_creation = manual`; a `create-games` run under `lichess` without it fails, naming the variable. There is no `LICHESS_MSG_ENABLED`: the league sends no custom Lichess messages (§10). *(Amended 2026-09-28.)*
 
 ---
 
@@ -117,11 +119,12 @@ There is no `LICHESS_CLIENT_SECRET`: Lichess has no confidential clients (§3.1)
 
 | Actor | Scope | Purpose |
 |---|---|---|
-| Organiser (league account) | `challenge:bulk` | Create bulk pairings |
-| Each player | `challenge:write` | Allow games to be created on their behalf |
-| Each player | `msg:write` *(optional)* | Send notifications as Lichess private messages (§10) |
+| Organiser (league account) | `challenge:bulk` | Create bulk pairings (Lichess also sends each player the bulk's message from this account, §3.2) |
+| Each player | `challenge:write` | Allow games to be created on their behalf, and a challenge to be sent from their account when their opponent's token has lapsed (§3.3) |
 
 Bulk pairing requires the organiser's `challenge:bulk` token **plus a `challenge:write` token for every player in the pairing**.
+
+**`msg:write` is not a player scope** *(amended 2026-09-28)*. An earlier draft asked each player for it so the league could send them Lichess private messages. But `POST /inbox/{username}` sends a message *as the token's owner*: a player's `msg:write` token could only send messages *from that player*. League messages would have to come from the organiser account, which Lichess allows to start only about 20 new conversations a day. Players are never asked for it; the only Lichess message the league sends is the one bulk pairing sends by itself (§3.2, §10). Custom messages, if still wanted, come from the organiser account in Phase 6 at the earliest.
 
 **How Lichess OAuth actually works** (verified against the `lichess-org/api` OpenAPI sources, v2.0.171, 2026-09-15):
 
@@ -130,8 +133,8 @@ Bulk pairing requires the organiser's `challenge:bulk` token **plus a `challenge
 - `POST /api/token` (form-encoded `grant_type=authorization_code`, `code`, `code_verifier`, `redirect_uri`, `client_id`) returns `{token_type, access_token, expires_in}`.
 - **Access tokens are long-lived (about a year) and there are no refresh tokens.** The remedy for an expired or revoked token is signing in again; nothing refreshes anything.
 - `GET /api/account` with the new token identifies the player (`id`, `username`, `perfs`, `createdAt`, `disabled`, `tosViolation`, `count.rated`, …) — the registration queue's signals (§8.2) come from this one call, stored raw on the `User`.
-- `POST /api/token/test` (up to 1000 tokens) reports each token's `userId`, `scopes` and `expires`, or `null` if invalid: the token-health probe for §3.3 and `validate-tokens` (§7). `DELETE /api/token` revokes the bearer token — used for a token obtained but not kept, and on account deletion (§11).
-- **Consent is all-or-nothing** for the requested scope string. A player cannot decline `msg:write` on the Lichess screen, so any optional scope is a choice made on *our* side before the redirect. Phase 2 requests exactly `challenge:write`; `msg:write` is requested by re-authorisation when notifications ship (Phase 5).
+- `POST /api/token/test` (unauthenticated, up to 1000 tokens per call) reports each token's `userId`, `scopes` and `expires`, or `null` if invalid: the token-health probe for §3.3, run weekly by `validate-tokens` (§7) and again over a round's players when its games are created (§6.3). `DELETE /api/token` revokes the bearer token — used for a token obtained but not kept, and on account deletion (§11).
+- **Consent is all-or-nothing** for the requested scope string: a player cannot decline one scope on the Lichess screen, so any optional scope would have to be a choice made on *our* side before the redirect. The league requests exactly `challenge:write`, at registration and at every sign-in.
 
 **Players do nothing technical.** The token is obtained transparently during registration through a standard OAuth consent screen — the same experience as any "Sign in with Google" button:
 
@@ -159,20 +162,23 @@ Relevant form fields:
 
 | Field | Value for this league |
 |---|---|
-| `players` | `token1:token2,token3:token4,...` — colon-joined pairs, white first |
-| `days` | `2` (2 days per move) |
-| `rated` | `true` |
+| `players` | `token1:token2,token3:token4,...` — colon-joined pairs, white first; for correspondence a player may appear in more than one pair (the double game, §6.2 step 6a) |
+| `days` | the round's `days_per_move` (default `2`), from its `settings_used` |
+| `rated` | the round's `rated` (default `true`), from its `settings_used` |
 | `variant` | `standard` |
-| `pairAt` | epoch ms — when games are created |
-| `message` | optional message shown to players |
+| `pairAt` | **omitted**: the games are created at once (§6.3) |
+| `message` | a message naming the league and the round; must contain `{game}` |
 
-Notes and constraints:
+Notes and constraints (OpenAPI v2.0.174, re-checked 2026-09-24; points marked *lila* are read from the server source, not documented, and are confirmed live before game creation is switched on):
 
 - Games are created **directly**. Players do not accept a challenge; the game simply appears in their correspondence list. This removes the "failure to start a game" failure mode for consenting players.
+- The response carries the bulk's id and **the game ids at creation** (`games[{id, white, black}]`), so the games are known at once, with no discovery.
 - `clock.limit` / `clock.increment` are omitted when `days` is used.
-- Pairings can be scheduled **up to a week in advance**, which fits a Monday cadence exactly.
-- A created bulk pairing can be **looked up**, **cancelled before it fires**, and (for clocked games) have its clocks started early. Cancellation before `pairAt` is the mechanism behind the admin review window (§6.3).
-- The organiser token must remain valid; treat its expiry as a P1 alert.
+- The `message` is **sent to each player from the organiser account** when their game is created (default *"Your game with {opponent} is ready: {game}."*; *lila:* it ignores the players' messaging preferences). It is the league's "game created" Lichess message (§10).
+- A bulk is all-or-nothing and a failed bulk is free (§6.3). *lila:* a bad token comes back as `{"tokens": {"<the token>": "<reason>"}}`, keyed by the raw token, which the client maps back to a player; any other refusal is `{"error": "..."}`. The body therefore contains secrets and is never logged or stored.
+- `GET /api/bulk-pairing` lists the organiser's bulks: a retried game-creation job uses it to adopt a bulk it already created rather than create the games twice (§6.3).
+- Bulks can also be scheduled ahead with `pairAt` and cancelled before they fire. The league uses neither: nothing reaches Lichess before a round is published, and the review window before that is the undo (§6.3).
+- The organiser token must remain valid; treat its expiry as a P1 alert (§8.5).
 
 **Implementation requirement:** verify exact parameter names, rate limits and the maximum number of pairs per request against the live API documentation at `https://lichess.org/api#tag/Bulk-pairings` before writing the client. Wrap all of this in a single `LichessClient` module so the rest of the app never touches HTTP directly.
 
@@ -182,18 +188,23 @@ If a player has no valid `challenge:write` token (never granted, revoked, or exp
 
 This path should be rare. It exists because a token can lapse for the reasons listed in §3.1, not because players are expected to do anything themselves.
 
-1. **Exclude from bulk request, create a direct challenge instead.** `POST /api/challenge/{username}` with `days=2`, `rated=true`, `color` set explicitly. This produces a challenge the opponent must accept — the old, manual behaviour.
-2. **Prompt the player to re-authorise.** A prominent banner on their dashboard and a notification, both linking to the one-click re-auth flow. The message should explain the consequence in plain terms: their games can no longer be created automatically.
-3. **Flag in the admin dashboard.** Players without a valid token are listed explicitly, since each one degrades the experience of whoever they are paired against.
+1. **Take the pairing out of the bulk request and create it another way.** A token *works* when it is stored, not revoked, not expired, carries `challenge:write`, and passed the probe run when the round's games are created (§6.3). Per pairing *(Phase 5, 2026-09-28)*:
+   - **both tokens work** → bulk pairing (§3.2);
+   - **one works** → a **direct challenge sent by the player whose token works**: `POST /api/challenge/{opponent}` with their token, the round's `days` and `rated`, and `color` set to the challenger's assigned colour. The opponent must accept — the old, manual behaviour. The challenge's id is the game's id once accepted (§3.4);
+   - **neither works** → the pairing stays `manual_external`, and the two players start the game by hand, as before Phase 5 (§7.3).
+2. **Prompt the player to re-authorise.** A prominent banner on their dashboard and a notification, both linking to the one-click re-auth flow — the ordinary sign-in, which replaces the stored token and clears its revocation (§8.2). The message should explain the consequence in plain terms: their games can no longer be created automatically.
+3. **Flag in the admin dashboard.** Players without a valid token are listed explicitly (`/admin/tokens`, §8.5), with since when and the days of grace left, since each one degrades the experience of whoever they are paired against.
 
-A player whose token has been invalid for more than `token.invalid_grace_days` (default 14) is automatically set to inactive and excluded from pairing until they re-authorise. This is not a penalty — it prevents them from repeatedly consuming a pairing slot that cannot become a real game.
+A player whose token has been invalid for more than `token.invalid_grace_days` (default 14) is excluded from pairing until they re-authorise. This is not a penalty — it prevents them from repeatedly consuming a pairing slot that cannot become a real game.
+
+*(Phase 5, 2026-09-28.)* The exclusion is computed live when the pool is built — a `no_valid_token` `RoundExclusion` (§5.7) — not a flag flipped on the player. Setting `is_active = false` would overwrite the player's own choice and need undoing on re-authorisation; computed live, re-authorising restores them for the next round with nothing to undo, and the dashboard says why they were left out and how to fix it. "Invalid since" is `revoked_at`, or `expires_at` once passed. **A player with no token row at all** (seeded, never signed in) is excluded at once, with no grace: grace is for a token that lapsed, and this also means the site can never send a surprise challenge to a seeded member from a test database. The rule applies only when the site creates games (`pairing.game_creation = lichess`, §4.2).
 
 ### 3.4 Reading games
 
 Two distinct sync jobs (§7):
 
-- **Ongoing detection.** For each published pairing, determine whether the Lichess game exists and is in progress. When games are created via bulk pairing, the game IDs are returned by the API at creation time (`GET /api/bulk-pairing/{id}` returns the pairing with its `games` array of `{id, white, black}`), so ongoing games are known immediately without polling for discovery. Polling is only needed for fallback-path challenge games and for detecting completion.
-- **Completion sync.** Export finished games and ingest full detail. For any pairing with a known game ID, use `POST /api/games/export/_ids` (up to 300 comma-separated IDs per call, `Accept: application/x-ndjson`) — one call re-checks every in-progress game. `GET /api/bulk-pairing/{id}/games` streams the games of a bulk pairing. For a pairing **without** a game ID (fallback challenge, or an externally created game — §7.3), search `GET /api/games/user/{username}` for the white player with `perfType=correspondence&rated=true&since=<round pair_at>` and match on opponent, colour, variant and `daysPerTurn`. Single-game export, when needed, is `GET /game/export/{gameId}` (note: **not** under `/api/`).
+- **Ongoing detection.** For each published pairing, determine whether the Lichess game exists and is in progress. When games are created via bulk pairing, the game IDs are returned by the API at creation time (`POST /api/bulk-pairing` answers with the bulk and its `games` array of `{id, white, black}`; `GET /api/bulk-pairing/{id}` returns the same), so ongoing games are known immediately without polling for discovery. **A challenge's id is its game's id once accepted** (documented), so a fallback challenge is stored with that id and re-checked by id exactly like a bulk game *(2026-09-28)*. Discovery by search is only needed for games players start by hand (§7.3); polling otherwise only detects completion.
+- **Completion sync.** Export finished games and ingest full detail. For any pairing with a known game ID, use `POST /api/games/export/_ids` (up to 300 comma-separated IDs per call, `Accept: application/x-ndjson`) — one call re-checks every in-progress game. `GET /api/bulk-pairing/{id}/games` streams the games of a bulk pairing. For a pairing **without** a game ID (a game started by hand — §7.3), search `GET /api/games/user/{username}` for the white player with `perfType=correspondence&rated=true&since=<round pair_at>` and match on opponent, colour, variant and `daysPerTurn`. Single-game export, when needed, is `GET /game/export/{gameId}` (note: **not** under `/api/`).
 
 Export options: `opening=true&accuracy=true`. Do **not** request `evals=true` — it appends a per-ply analysis array that no metric uses; `acpl` and `accuracy` come from `players.{white,black}.analysis` without it. Do **not** request `clocks=true` either: it appends a per-move array of remaining time that is meaningless for correspondence games (the clock is days per move, not a running clock) and nothing in this spec reads it. Both omissions are deliberate — they keep `raw_payload` (§7.1) small without losing anything a later phase could want. *(Decided 2026-09-13.)*
 
@@ -225,7 +236,7 @@ User
 OAuthToken                                 # one per user, replaced on every sign-in
   user_id               uuid pk fk -> User
   access_token          bytea            # AES-256-GCM, nonce-prefixed; key from TOKEN_ENCRYPTION_KEY
-  scopes                text[]           # as granted: {challenge:write}, later also msg:write
+  scopes                text[]           # as granted: {challenge:write}
   issued_at             timestamptz
   expires_at            timestamptz nullable   # issued_at + expires_in
   revoked_at            timestamptz nullable
@@ -253,6 +264,8 @@ PlayerProfile
   paused_by_admin       boolean default false
   paused_reason         text nullable
   auto_paused_at        timestamptz nullable      # missed-start rule
+  resumed_at            timestamptz nullable      # last "resume quest"; missed starts
+                                                  # before it no longer count (§6.4)
   timezone              text
   joined_at             timestamptz
 
@@ -271,10 +284,16 @@ Round
   generated_at          timestamptz
   publish_at            timestamptz        # end of review window
   published_at          timestamptz nullable
-  pair_at               timestamptz        # value sent as Lichess pairAt; set to the actual
-                                           # publish moment on publish (§6.3)
+  pair_at               timestamptz        # set to the actual publish moment on publish; the
+                                           # §7.3 search cutoff. Not sent to Lichess: games
+                                           # are created at once, without pairAt (§6.3)
   generated_by          enum(schedule, manual, imported)
   bulk_pairing_id       text nullable      # Lichess bulk pairing id
+  game_creation         enum(manual, creating, created, gave_up) default manual
+                                           # how the games were created (§6.3): manual =
+                                           # published under pairing.game_creation = manual
+                                           # (and every round before Phase 5)
+  games_created_at      timestamptz nullable   # when create-games finished
   notes                 text nullable      # cancellation reason, admin remarks
   pool_size             int nullable       # diagnostics (§8.5): players in the matching pool
   odd_pool              enum(even, double_game, bye) nullable   # how an odd pool was resolved
@@ -290,11 +309,13 @@ Pairing
                                                     # manual_external: pairing published outside
                                                     # the system (the spreadsheet during the
                                                     # transition, or an admin fix-up); the game
-                                                    # is discovered by matching (§7.3). Rounds
-                                                    # generated by the engine also use it until
-                                                    # Phase 5 creates games and overwrites the
-                                                    # method at publish.
-  lichess_game_id       text nullable unique
+                                                    # is discovered by matching (§7.3). Generated
+                                                    # pairings start as manual_external; game
+                                                    # creation (§6.3) overwrites the method for
+                                                    # those it creates, and the rest stay
+                                                    # hand-started.
+  lichess_game_id       text nullable unique        # for a challenge, the challenge id: it is the
+                                                    # game's id once accepted (§3.4)
   status                enum(pending, created, in_progress, completed, failed, cancelled)
   match_ambiguous       boolean default false       # §7.3: more than one candidate game found;
                                                     # admin must pick
@@ -372,9 +393,11 @@ PlayerStanding                             # materialised, recomputed on ingest
 
 MissedStart
   id                    bigserial pk
-  user_id               uuid fk -> User
+  user_id               uuid fk -> User       # the player who had to accept the challenge
   round_id              int fk -> Round
+  pairing_id            uuid fk -> Pairing    # the challenge pairing that was never accepted
   recorded_at           timestamptz
+  UNIQUE (round_id, user_id)
 
 RoundExclusion            # why an eligible-looking player got no pairing
   id                    bigserial pk
@@ -396,15 +419,17 @@ Notification              # on-site notification centre (§10)
   title                 text
   body                  text
   link_url              text nullable
+  dedupe_key            text nullable unique   # e.g. round:201:paired:<pairing id>, so a
+                                              # retried job never notifies twice
   read_at               timestamptz nullable
   created_at            timestamptz
 
-NotificationPreference
+NotificationPreference    # a row only for a category the player turned off
   user_id               uuid fk -> User
   category              text
-  on_site               boolean default true
-  lichess_pm            boolean default true
   PRIMARY KEY (user_id, category)
+  # On-site is the only channel (§10), so the earlier on_site / lichess_pm
+  # flags are gone: the row's existence is the opt-out. Amended 2026-09-28.
 
 Bye                       # history, drives bye rotation fairness (§6.2.6b)
   id                    bigserial pk
@@ -443,17 +468,19 @@ Setting                                     # runtime-editable configuration
 
 With bulk pairing this is close to vestigial: games are created outright, so there is nothing for the player to accept and nothing to miss. It still earns its place because a player whose token has lapsed would otherwise consume a pairing slot every week, producing a challenge nobody accepts and quietly wasting an opponent's round. Rows should be rare; if this table fills up, something is wrong with token health rather than with players.
 
+A row is written **only for a challenge pairing, for the player who had to accept it** — the one case where the league knows who did not act. A hand-started pairing that never became a game is retired without one: either player could have issued the challenge, and Lichess shows no challenge that was sent and ignored (§6.4). *(Phase 5, 2026-09-28.)*
+
 **`RoundExclusion`** — one row per player who was considered for a round but received no pairing, with the reason (at capacity, inactive, paused, auto-paused, no valid token, bye, pending approval).
 
 It exists to answer the single most common support question this system will generate: *"why didn't I get a game this week?"* Without it, that question can only be answered by re-running the pairing engine and inferring what happened — precisely the debugging experience the spreadsheet forced on maintainers. With it, the answer renders directly on the player's dashboard and in the admin round diagnostics view, and no one has to be asked.
 
 Both tables are append-only history. Neither is read by the pairing algorithm itself; they exist for explanation and audit.
 
-Rows are written for approved members only, and only for published rounds' history to be read back: a draft's rows are deleted when it is regenerated and ignored when it is cancelled. Pending applicants are never loaded into the pool, so `pending_approval` is unused until a phase needs it; `no_valid_token` arrives with `validate-tokens` (Phase 5). *(Phase 4, 2026-09-17.)*
+Rows are written for approved members only, and only for published rounds' history to be read back: a draft's rows are deleted when it is regenerated and ignored when it is cancelled. Pending applicants are never loaded into the pool, so `pending_approval` is unused until a phase needs it; `no_valid_token` arrives with `validate-tokens` (Phase 5). *(Phase 4, 2026-09-17.)* It is written only under `pairing.game_creation = lichess`, for a token lapsed beyond its grace or no token at all (§3.3). *(Phase 5, 2026-09-28.)*
 
 ### 4.2 Configurable settings
 
-All of these live in `Setting`, are editable from the admin panel, and have the defaults below (taken from the current spreadsheet's behaviour). Until the admin settings UI exists (Phase 6) they are set with `ic setting <key> <json>` or directly in the table; the loader validates ranges and enum values (`review_window_hours`, `avoid_recent_rounds`, `color_weight` ≥ 0; `repeat_penalty` > 0; `mode`, `odd_pool_strategy` and `solver` from their lists) and fails naming the key, so a bad value stops the next job run visibly rather than defaulting silently. `pairing.cron` is read when the server starts; changing it takes effect on restart. *(Phase 4, 2026-09-17.)* The admin's round actions that run the engine (generate now, regenerate, swap) read the table on every click, as the scheduled job does on every run, so any other pairing setting takes effect from the next action without a restart. *(2026-09-22.)*
+All of these live in `Setting`, are editable from the admin panel, and have the defaults below (taken from the current spreadsheet's behaviour). Until the admin settings UI exists (Phase 6) they are set with `ic setting <key> <json>` or directly in the table; the loader validates ranges and enum values (`review_window_hours`, `avoid_recent_rounds`, `color_weight` ≥ 0; `repeat_penalty` > 0; `mode`, `odd_pool_strategy` and `solver` from their lists) and fails naming the key, so a bad value stops the next job run visibly rather than defaulting silently. `pairing.cron` is read when the server starts; changing it takes effect on restart. *(Phase 4, 2026-09-17.)* The admin's round actions that run the engine (generate now, regenerate, swap) read the table on every click, as the scheduled job does on every run, so any other pairing setting takes effect from the next action without a restart. *(2026-09-22.)* Phase 5 adds `pairing.game_creation` (from its list), `days_per_move` from Lichess's set, `token.invalid_grace_days` ≥ 0 and `activity.missed_starts_to_pause` ≥ 1 to the validation; a `days_per_move` outside Lichess's set would make every bulk fail. *(2026-09-28.)*
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -464,18 +491,19 @@ All of these live in `Setting`, are editable from the admin panel, and have the 
 | `pairing.avoid_recent_rounds` | `5` | Do not repeat opponents from the last N rounds |
 | `pairing.color_weight` | `100` | Rating points one unit of colour imbalance is worth (§6.2) |
 | `pairing.repeat_penalty` | `1000000` | Large finite cost of a repeat opponent (§6.2) |
-| `pairing.days_per_move` | `2` | Correspondence time control |
+| `pairing.days_per_move` | `2` | Correspondence time control: one of 1, 2, 3, 5, 7, 10, 14 (the values Lichess accepts) |
 | `pairing.rated` | `true` | Rated games |
+| `pairing.game_creation` | `manual` | `manual` \| `lichess`: whether publication creates the round's games on Lichess (§6.3). `manual` = players start every game by hand, as before Phase 5; `lichess` needs `LICHESS_ORG_TOKEN` and turns on the token gate (§3.3, §5.7). Recorded on each round |
 | `pairing.min_games_for_perf` | `5` | Below this, fall back to rating |
-| `activity.threshold_weeks` | `3` | Inactivity cutoff (see §8.4) |
-| `activity.missed_starts_to_pause` | `2` | Consecutive misses before auto-pause |
+| `activity.threshold_weeks` | `3` | Inactivity cutoff (see §8.4; not read while §8.4 is deferred) |
+| `activity.missed_starts_to_pause` | `2` | Consecutive missed starts before auto-pause (§6.4); a warning comes one before |
 | `player.default_max_concurrent` | `null` | Default cap for new players. `null` = unlimited |
 | `player.max_concurrent_ceiling` | `20` | Highest value a player may set, if they set one at all |
 | `pairing.odd_pool_strategy` | `double_then_bye` | `double_then_bye` \| `bye_only` |
 | `pairing.solver` | `greedy` | `greedy` \| `blossom`: the matching algorithm (§6.2 step 4), recorded on each round |
 | `player.default_accepts_double` | `true` | New players absorb odd pools by default, minimising byes |
 | `xp.win` / `xp.draw` / `xp.loss` | `3` / `2` / `1` | XP award per result |
-| `token.invalid_grace_days` | `14` | Days before an unauthorised player is deactivated |
+| `token.invalid_grace_days` | `14` | Days a lapsed token is tolerated before the player is left out of pairing (`no_valid_token`, §3.3) |
 | `rating.unrated_default` | `1500` | Rating assumed for a player with neither a correspondence nor a classical rating (§5.1) |
 
 ---
@@ -626,6 +654,8 @@ A player is paired in a round if **all** hold:
 
 *(Phase 4, 2026-09-17.)* Until Phase 5 creates games, every game is created by hand — the fallback path is the only path — so item 6 does not gate the pool and no `no_valid_token` exclusion is written. Seeded players have no token at all; a literal reading would empty the pool.
 
+*(Phase 5, 2026-09-28.)* Item 6 applies only under `pairing.game_creation = lichess` (§4.2); under `manual` the Phase 4 reading above still holds. Under `lichess`, "valid, or the fallback path is enabled" means §3.3's rule: a lapsed token is tolerated for `token.invalid_grace_days`, during which the player's games go through the challenge fallback; past it, or with no token row at all, the player is excluded with `no_valid_token`. It is checked last, after items 2–4, so a player who is both paused and tokenless is shown as paused.
+
 Note the difference from the spreadsheet, which used a time-since-last-game threshold (`inactive for < ACTIVITY_THRESHOLD * 7` days) as the sole activity signal. That heuristic is retained only as an *automatic suggestion* to deactivate (§8.4), not as the eligibility rule itself, because players now declare activity explicitly.
 
 ### 5.8 Concurrent-game capacity
@@ -647,7 +677,7 @@ eligible_for_capacity(player) =
     OR ongoing_games(player) < max_concurrent_games(player)
 ```
 
-**What counts as in flight** *(decided 2026-09-17)*: `Game` rows with `status = in_progress` **plus** pairings of *published* rounds that are still `pending` or `created` with no game ingested yet. A pairing the player has been told to start is a game in flight before Lichess knows about it; without the second term a capped player would be re-paired every week for as long as they delayed their challenge. One query provides the number to the pairing engine, the `PlayerStanding.ongoing` column and the dashboard sentence, so the three can never disagree. A pairing nobody ever starts counts until it is marked `failed` — by the missed-start job (§6.4, Phase 5), or by an admin's *Mark failed* on the round page until then.
+**What counts as in flight** *(decided 2026-09-17)*: `Game` rows with `status = in_progress` **plus** pairings of *published* rounds that are still `pending` or `created` with no game ingested yet. A pairing the player has been told to start is a game in flight before Lichess knows about it; without the second term a capped player would be re-paired every week for as long as they delayed their challenge. One query provides the number to the pairing engine, the `PlayerStanding.ongoing` column and the dashboard sentence, so the three can never disagree. A pairing nobody ever starts counts until it is marked `failed` — automatically, by `evaluate-activity` at the next generation (§6.4, Phase 5), or by an admin's *Mark failed* on the round page. A bulk-created game counts from its creation (`status = created`), before `sync-games` has ingested it.
 
 Behaviour:
 
@@ -686,7 +716,7 @@ Pairing generation is **automatic and scheduled**. It runs every Monday via `pai
 
 Two publication modes, selectable in admin settings:
 
-- **`review_window` (default).** The round is generated in `draft` state. Admins are notified. If no admin acts within `pairing.review_window_hours` (default 6), the round auto-publishes. An admin may publish early, edit pairings, or cancel the round.
+- **`review_window` (default).** The round is generated in `draft` state. Admins are notified: from Phase 5, a banner on every admin page says a draft is waiting for review and when it will publish itself (§8.5). If no admin acts within `pairing.review_window_hours` (default 6), the round auto-publishes. An admin may publish early, edit pairings, or cancel the round.
 - **`auto_publish`.** The round is generated and published in the same job, with no draft state.
 
 Manual generation (`generated_by = manual`) exists only for exceptions: a failed scheduled run, a Lichess outage, or an off-cycle round. It is not part of the normal weekly flow.
@@ -881,29 +911,44 @@ The engine must be **deterministic**: same inputs, same output. Seed any tie-bre
 
 ### 6.3 Publication
 
-*(Phase 4, 2026-09-17.)* Until Phase 5, publication is the state change only: `state = published`, `published_at` set, and `pair_at` set to the same moment (so an early publish never leaves §7.3's `pair_at − 1 day` cutoff ahead of the games players create). The pairings stay `manual_external` / `pending`; players challenge each other by hand and `sync-games` finds the games through §7.3. Steps 1–5 below are Phase 5. Every publish path — the scheduled job, the hourly sweep and an admin's *Publish now* — is the same guarded update (`WHERE state = 'draft'`, after locking the row), so whichever runs first wins and the others are no-ops.
+*(Phase 4, 2026-09-17.)* Publication is a guarded state change: `state = published`, `published_at` set, and `pair_at` set to the same moment (so an early publish never leaves §7.3's `pair_at − 1 day` cutoff ahead of the games players create). Every publish path — the scheduled job, the hourly sweep, an admin's *Publish now*, and generation under `auto_publish` — is the same guarded update (`WHERE state = 'draft'`, after locking the row), so whichever runs first wins and the others are no-ops.
 
-On publish:
+**Game creation** *(Phase 5, 2026-09-28)* follows `pairing.game_creation` (§4.2), which the round records at publication (`Round.game_creation`):
 
-1. Partition pairings by whether both players have valid `challenge:write` tokens.
-2. For the bulk-capable set, issue `POST /api/bulk-pairing` with `days=2`, `rated=true`, `pairAt` set to the publish time. Store the returned bulk pairing id on the `Round` and the returned game ids on each `Pairing`; set `Pairing.status = created`.
-3. For the remainder, issue individual challenges via `POST /api/challenge/{username}`, set `creation_method = challenge`, `status = pending`.
-4. **A bulk pairing is all-or-nothing on the Lichess side.** The whole request is rejected (HTTP 400 with an `error` message) if any token is missing, invalid, lacks `challenge:write`, or belongs to a closed account, or if the organiser already has 20 scheduled bulks / 1000 scheduled games. Partial bulks are never created; failed bulks do not count against the rate limit. Publication must therefore: (a) rely on `validate-tokens` (§7) having run just beforehand; (b) on a 400, parse the error, move the offending pairing(s) to the challenge fallback, and resubmit the rest; (c) give up after a bounded number of resubmissions and mark the remaining pairings `failed`. Individual challenge failures (step 3) are independent and never roll back anything.
-5. Notify players (§10).
+- **`manual`** (the default): publication is the state change only. The pairings stay `manual_external` / `pending`; players challenge each other by hand and `sync-games` finds the games (§7.3). The switch exists so the code can ship and be tested before the organiser account does (§14.3), and so that if automation misbehaves an admin turns it off with one setting and the league carries on by hand.
+- **`lichess`**: the round is marked `creating` and a `create-games` job for it is queued **in the same transaction** as the state change. This is the rule for every Lichess call that follows from a change in our data — *database first, Lichess after*: either both the change and its job are written or neither is, and the job then talks to Lichess outside any transaction. (The Phase 4 sketch called Lichess inside the publish transaction; a transaction held open across a 60-second 429 wait is bad, and a crash after Lichess created the games but before our commit would roll back our record while the games exist.)
 
-Verified limits: `days` must be one of 1, 2, 3, 5, 7, 10, 14; at most 500 games per bulk and 500 games per 10 minutes; a custom `message` must contain the `{game}` placeholder. Correspondence bulks may include the same player in more than one game (this is what makes the double game in §6.2 a single request) — confirm live before relying on it. **The `pairAt` horizon is documented inconsistently** (endpoint text says "up to 24h in advance", the field says "up to 7 days"); test it with a throwaway bulk before Phase 5 assumes a Monday-generate / later-publish gap of more than a day.
+`create-games` is unique per round while pending or running, and has a longer retry budget than the other jobs (10 attempts, which river's back-off spreads over about four hours) so a short outage is ridden out. It is idempotent and reconciles before acting:
 
-If the round is cancelled during the review window and a bulk pairing was already scheduled with a future `pairAt`, cancel it via the bulk pairing cancel endpoint.
+1. Load the round's pairings still `manual_external` / `pending` with no game id. None → the round is `created`; done.
+2. **Reconcile.** List the organiser's recent bulks (`GET /api/bulk-pairing`); a bulk created after `published_at` whose games match some of these pairings (same white, same black) is adopted rather than created again, so a retried job never creates the games twice. A retry an admin asks for (§8.5) first runs the §7.3 search, so a game a player has already started by hand is attached rather than duplicated.
+3. **Probe** the round's players' tokens with one `POST /api/token/test`. `validate-tokens` (§7) runs weekly and can be a day stale by publication, and a bulk is all-or-nothing, so its result is not relied on alone. A failing token is marked revoked on the spot and its player notified.
+4. **Partition** the pairings by token, per §3.3: bulk, challenge, or left to be started by hand.
+5. **Bulk.** One request for the whole bulk-capable set, the double-game volunteer's two games included; `days` and `rated` from the round's `settings_used` — the settings it was paired under, not today's; no `pairAt`, so the games start at once; and the league's `message` (§3.2). A bulk is all-or-nothing on the Lichess side: the whole request is rejected (HTTP 400) if any token is missing, invalid, lacks `challenge:write`, or belongs to a closed account, or if the organiser has too many scheduled bulks or games. Partial bulks are never created, and failed bulks do not count against the rate limit. A rejection naming tokens marks them revoked, moves their pairings to the challenge or by-hand partition, and resubmits the rest — at most 3 submissions per run. Any other refusal fails the run, and river retries it. The result is committed right after the call: the bulk id on the `Round`; on each pairing `creation_method = bulk`, `status = created` and the game id.
+6. **Challenges**, one call each with the challenger's token (§3.3), each committed on its own right after its call, so a crash can at worst leave one duplicate challenge. The pairing becomes `creation_method = challenge`, `status = pending`, with the challenge id as its game id. A failed call leaves that pairing to be started by hand and does not stop the others.
+7. The round is `created` with `games_created_at`; players are notified (§10); a `sync-games` run is queued so the new games reach the Overview within minutes rather than an hour.
 
-### 6.4 Missed starts
+**When Lichess keeps refusing** *(decided 2026-09-24)*, the players start those games by hand rather than losing the week. On `create-games`' last failed attempt the round's creation is marked `gave_up`, its pairings stay `manual_external` / `pending`, and both players of each are told on-site to challenge their opponent by hand; the dashboard shows the challenge link. A pairing nobody then starts gets the 48-hour reminder and is retired at the next generation, with no missed start (§6.4). An admin can *Retry game creation* from the round page (§8.5); players whose games the retry creates are told their game now exists and not to start another. This replaces the earlier rule of marking the remaining pairings `failed`.
 
-With bulk pairing, games are created outright and a "missed start" is effectively impossible. The rule still applies to the fallback challenge path:
+A pairing's status only ever moves with a guarded update (`WHERE status = 'pending' AND lichess_game_id IS NULL`), so an admin's *Mark failed* in the meantime wins.
 
-- If a `Pairing` with `creation_method = challenge` is still `pending` (unaccepted) when the next round generates, record a `MissedStart` for the player who failed to accept.
-- After `activity.missed_starts_to_pause` (default 2) **consecutive** missed starts, set `auto_paused_at` and stop pairing the player. Notify them with a one-click resume link.
-- Any accepted challenge resets the consecutive counter.
+**A published round is final** *(decided 2026-09-24)*. After publication an undo cannot be clean: the games exist, Lichess has messaged the players, hand-started games are out of reach, and aborting bulk games would rest on undocumented behaviour. The review window is the undo; a mistake after it is lived with or repaired pairing by pairing (*Mark failed*). Voiding a single existing game — a player banned for cheating mid-week, say — is left to Phase 6's player management.
 
-This reproduces the current rule: *"Failure to start a game 2 weeks in a row will result in your quest being paused and you will receive no new pairings until you resume quest."*
+Verified limits (OpenAPI v2.0.174, 2026-09-24): `days` must be one of 1, 2, 3, 5, 7, 10, 14; at most 500 games per bulk and 500 games per 10 minutes; a custom `message` must contain the `{game}` placeholder. Correspondence bulks may include the same player in more than one game — documented since v2.0.174 — which is what makes the double game in §6.2 part of the single request. The `pairAt` horizon, documented inconsistently ("up to 24h in advance" in the endpoint text, "up to 7 days" on the field; the server enforces 7 days), no longer matters: games are created at publication, no bulk is ever scheduled ahead, and so none ever needs cancelling.
+
+### 6.4 Unstarted pairings and missed starts
+
+With bulk pairing, games are created outright and a "missed start" is effectively impossible. The rule still applies to the fallback challenge path. *(Rewritten for Phase 5, 2026-09-28.)*
+
+`evaluate-activity` runs as the **first step of every generation** — scheduled, *Generate now*, and `ic generate-round` — in its own transaction with its own job run, then generation follows; a failed evaluation is visible on the job log but does not block the round. It runs before generation rather than after, because a player who reaches the pause threshold must already be out of the round generated next; run afterwards, they would be paired again and their next challenge would go unaccepted too.
+
+- **Every still-`pending` pairing of a published round is marked `failed`**, whatever its kind: an unaccepted challenge, or a hand-started pairing nobody started (both tokens lapsed, game creation gave up, or the whole league under `pairing.game_creation = manual`). It stops counting toward capacity (§5.8), which ends the admin's weekly *Mark failed* chore; the button stays for exceptions.
+- **A `MissedStart` is recorded only for a challenge pairing, for the player who had to accept** — the one case where the league knows who did not act. For a hand-started pairing it cannot tell: either player could have challenged, and Lichess shows no challenge that was sent and ignored. When automation gave up, the failure was the league's, not the players'. Those pairings are retired without a missed start and never lead to auto-pause — the same outcome as before Phase 5, minus the chore. Never for a bye or a capacity skip either (§5.8, §6.2 step 6b).
+- The missed challenge is **withdrawn on Lichess** (`POST /api/challenge/{id}/cancel` with the challenger's token, run by a `cancel-challenge` job queued in the same transaction, §6.3), so a late acceptance cannot create a game that never counts.
+- **Consecutive** means missed starts recorded after both the player's latest started league game and their latest *resume quest* (`PlayerProfile.resumed_at`). At `activity.missed_starts_to_pause − 1` the player is warned; at `activity.missed_starts_to_pause` (default 2) `auto_paused_at` is set, they leave the pool, and they are notified with a one-click resume link. Any started game, and resuming, resets the count.
+- A pairing still not started **48 hours after publication** (challenge or hand-started) sends one reminder (§10), from the hourly `sync-games`.
+
+This reproduces the current rule: *"Failure to start a game 2 weeks in a row will result in your quest being paused and you will receive no new pairings until you resume quest."* — applied where a failure to start can be attributed to one player.
 
 ---
 
@@ -915,13 +960,15 @@ Every job must be idempotent, retryable, and record its outcome. A `JobRun` tabl
 
 | Job | Schedule | Responsibility |
 |---|---|---|
+| `validate-tokens` | **Weekly**, at `pairing.cron` − 1h | Test every stored token (and the organiser's), mark revoked, notify affected players — so the pairing pool is accurate when it matters |
+| `evaluate-activity` | **First step of every generation** (scheduled, admin, CLI) | Retire unstarted pairings, record missed starts, warn and auto-pause (§6.4) |
 | `generate-round` | Weekly (`pairing.cron`) | Run the pairing engine, create a `draft` or published `Round` |
 | `publish-round` | **Scheduled once**, at the round's `publish_at` | Publish a `draft` round when its review window expires |
-| `publish-round-sweep` | **Hourly** | Safety net: publish any `draft` whose `publish_at` has passed (a job lost to a restart, a failed enqueue, or a round generated from the CLI, which has no scheduler) |
-| `sync-games` | **Hourly** | Single merged job: reconcile pairing status, match games to pairings that have no game id yet (§7.3), ingest newly finished games, update standings and levels |
-| `validate-tokens` | **Weekly**, ~1h before `generate-round` | Check stored tokens, mark revoked, notify affected players — so the pairing pool is accurate when it matters |
+| `publish-round-sweep` | **Hourly** | Safety net: publish any `draft` whose `publish_at` has passed (a job lost to a restart or a failed enqueue) |
+| `create-games` | **Queued by publication** under `pairing.game_creation = lichess`; an admin's *Retry*; `ic create-games` | Create the round's games on Lichess: bulk, challenges, give up to hand-started (§6.3) |
+| `cancel-challenge` | **Queued by a missed start** | Withdraw the unaccepted challenge on Lichess (§6.4) |
+| `sync-games` | **Hourly**, and once right after `create-games` | Single merged job: reconcile pairing status, match games to pairings that have no game id yet (§7.3), ingest newly finished games, update standings and levels; send the 48-hour "not started yet" reminder (§6.4) |
 | `refresh-ratings` | Daily | Update `RatingSnapshot` for all approved players |
-| `evaluate-activity` | Weekly, after round generation | Record missed starts, apply auto-pause, flag long-inactive players |
 | `recompute-aggregates` | Nightly | Full recompute of standings and stats as a self-healing backstop against incremental drift |
 
 Reasoning behind the changes:
@@ -932,6 +979,10 @@ Reasoning behind the changes:
 - **`publish-round` is scheduled, not swept.** `river` can enqueue a job to run at a specific future time, so when a round enters `draft` the publish job is scheduled directly for its `publish_at`. The hourly sweep exists only to catch a job lost to a restart or a failed enqueue — belt and braces, not the mechanism. The job is unique on `{round id, publish_at}` — not on the round id alone — because river treats a completed job with identical args as a duplicate, and a regenerated round would otherwise keep its old schedule. Cancelling or regenerating a draft cancels its pending job. *(Phase 4, 2026-09-17.)*
 - **`generate-round` runs on `pairing.cron`**, the first wall-clock schedule in the system (the sync jobs run on intervals). The schedule is built when the server starts; a firing missed while the binary was down is not caught up — manual generation (§6.1) covers that, and the admin round page says so. *(Phase 4, 2026-09-17.)*
 - **`validate-tokens` moved from daily to weekly, timed just before pairing.** Token validity only affects one decision — who can be bulk-paired — and that decision is made once a week. Checking daily made the same API calls seven times to influence one outcome. Running it shortly before `generate-round` puts the freshest possible data where it is actually used. Tokens that fail mid-week are caught anyway, because a failed API call marks the token invalid on the spot.
+- **`validate-tokens` runs exactly one hour before `pairing.cron`** *(Phase 5, 2026-09-28)*: its schedule is the parsed `pairing.cron` shifted by −1h, so it follows the setting, `CRON_TZ=` included. With a review window the pool it gates can be a day old by publication, so `create-games` probes the round's tokens again before any bulk (§6.3).
+- **Lichess calls that follow from a change in our data run in jobs queued in the same transaction as the change** *(Phase 5, 2026-09-28)*: `create-games` with a round's publication, `cancel-challenge` with a missed start. Either both are written or neither is, no transaction is held open across a Lichess call, and each job reconciles before acting, so a retry never acts twice (§6.3).
+- **`evaluate-activity` runs before generation, not after it** *(Phase 5, 2026-09-28)*, so a player who has just reached the pause threshold is already out of the round being generated (§6.4). It no longer flags long-inactive players: the §8.4 check-in is deferred.
+- **Every generation path queues its draft's publish job** *(Phase 5, 2026-09-28)*: the web layer and the CLI get a job enqueuer, so a draft made with *Generate now* or `ic generate-round` publishes when its window ends rather than up to an hour later from the sweep.
 
 Both `sync-games` and `generate-round` must also be **manually triggerable from the admin panel**, for the case where an outage means the data is stale and someone wants it fixed now rather than at the top of the hour.
 
@@ -957,6 +1008,8 @@ For each finished game:
 
 A pairing can lack a `lichess_game_id` in two cases: a fallback challenge (§3.3) that has not yet been accepted, and a `manual_external` pairing — in particular every pairing imported from the spreadsheet during the transition (§12, Phase 1), when the league is still being paired by the sheet and games are still being created by hand.
 
+*(Amended 2026-09-28.)* Only the second case remains. A challenge's id is its game's id once accepted (§3.4), so a fallback challenge is stored with that id and re-checked by id like a bulk game, never searched. The pairings searched are the `manual_external` ones players start by hand: imported pairings, every generated pairing under `pairing.game_creation = manual`, and under `lichess` those whose two players both lack a working token or whose game creation gave up (§3.3, §6.3).
+
 Only pairings of **published** rounds are matched or re-checked. A draft's pairings must never reach Lichess: with `pair_at − 1 day` as the cutoff, the hourly job would otherwise attach any rated two-day game two draft opponents happened to start into a round that does not exist yet, and the resulting `Game` row would block the draft's regeneration. *(Phase 4, 2026-09-17.)*
 
 For each such pairing, `sync-games` fetches the **white** player's games with `GET /api/games/user/{white}?perfType=correspondence&rated=true&since=<round.pair_at − 1 day>&ongoing=true&finished=true&opening=true&accuracy=true` and keeps candidates where:
@@ -977,7 +1030,7 @@ Since the search is anchored on a pairing, games members play against each other
 ### 8.1 Public pages (no auth)
 
 **Home / Overview** — reproduces the `Overview` sheet.
-- Ongoing games: white, black, round number, link to the Lichess game, days since start. Populated at publish time from the bulk-pairing response and kept current by `sync-games`, so this reflects reality rather than being reconstructed after the fact.
+- Ongoing games: white, black, round number, link to the Lichess game, days since start. Populated minutes after publication by the `sync-games` run that game creation queues (the bulk-pairing response gives the game ids, §6.3) and kept current by `sync-games`, so this reflects reality rather than being reconstructed after the fact.
 - Recent results feed: most recently finished games with result and round.
 - Current top 5 by power rating.
 - Active player count.
@@ -1014,7 +1067,7 @@ Since the search is anchored on a pairing, games members play against each other
 **Flow:**
 
 1. Visitor clicks "Join the league".
-2. Redirected to Lichess OAuth, requesting `challenge:write` (and optionally `msg:write`, which the player may decline).
+2. Redirected to Lichess OAuth, requesting `challenge:write`, the only player scope (§3.1).
 3. On callback: create `User` with `status = pending`, store the encrypted token, capture Lichess profile data (username, ratings, account creation date, whether flagged/closed).
 4. Account page explaining that an admin will review the application, and what happens next.
 5. Admin approves or rejects (§8.5). On approval the player becomes eligible for the next round and receives a notification (Phase 5; until then the status is visible on the account page).
@@ -1054,17 +1107,22 @@ Since the search is anchored on a pairing, games members play against each other
 - **Double games.** A toggle, **on by default**, so byes stay rare without anyone having to opt in: *"If there's an odd number of players some week, I'm happy to play two games instead of someone sitting out."* State that it happens occasionally rather than weekly, that it respects any cap they've set (it needs two free slots), and that they get one white and one black. Show how many times they've absorbed a double game. Turning it off is always allowed and carries no penalty.
 - **Bye history.** If the player received a bye, show it on their dashboard for that round with plain-language reasoning: *"Odd number of players this week and nobody was free for a double game, so you sat out. You're first in line to avoid the next one."*
 - **This week** *(Phase 4, built 2026-09-22)*. For the latest published round: the player's pairing (opponent, colour, and — until Phase 5 creates the game — a link to challenge them on Lichess), or the bye sentence above, or the `RoundExclusion` reason in plain words (at capacity, with the count and the cap; paused; inactive; removed by an admin). With it, the double-game count in the double-games section and the bye count with the last bye's round. As built: a draft is never shown (it can still change); the double-game volunteer sees both games; a pairing marked failed says "marked as not played"; the link becomes the game's once `sync-games` has found it; a player with neither a pairing nor an exclusion row was approved after the round was generated and is told they'll be in the next one; under `bye_only` the bye sentence drops its double-game clause, which would be false.
+
+  *(Phase 5, 2026-09-28.)* The paired sentence is worded for how the game is being created: **bulk** — the game link; **being created** — "your game is being created"; **challenger** — "we challenged X for you, waiting for them to accept"; **challenged** — "accept X's challenge", with the link; **by hand** (both tokens lapsed, creation gave up, or `pairing.game_creation = manual`) — as in Phase 4, the link to challenge them. A player one missed start from auto-pause sees the warning here (§6.4).
 - **My standing.** Rating, record, last-5 performance, level and XP progress.
-- **Lichess authorisation status.** Green if valid; if revoked or expired, a prominent re-authorise button explaining that games cannot be created automatically without it. *(Until `validate-tokens` ships in Phase 5, "valid" means stored and not past `expires_at`; a revocation made on Lichess's side is not detected yet, and the copy says the token was checked at sign-in.)*
-- **Resume quest.** Visible only when auto-paused, clearing `auto_paused_at`. A player paused by an admin sees the reason and no button: that pause is the admin's to lift (§8.5).
+- **Lichess authorisation status.** Green if valid; if revoked or expired, a prominent re-authorise button explaining that games cannot be created automatically without it. *(Until `validate-tokens` ships in Phase 5, "valid" means stored and not past `expires_at`; a revocation made on Lichess's side is not detected yet, and the copy says the token was checked at sign-in.)* *(Phase 5, 2026-09-28.)* The status comes from the last check (`last_validated_at`, `revoked_at`). A lapsed token raises a banner at the top of the page saying in plain words what it costs — the player's games can no longer be created automatically, and after the grace period they will not be paired at all — with the days of grace left and the re-authorise button (the ordinary sign-in). The banner shows whatever the player's notification preferences: it is the one channel certain to reach them in that state.
+- **Notifications** *(Phase 5)*. A bell with the unread count in the site header for a signed-in player; `/account/notifications` lists them, with mark one or all read; a checkbox per opt-out-able category (§10) on `/account`.
+- **Resume quest.** Visible only when auto-paused, clearing `auto_paused_at`. A player paused by an admin sees the reason and no button: that pause is the admin's to lift (§8.5). Resuming also sets `resumed_at`, so earlier missed starts no longer count towards the next pause (§6.4).
 
 Every change writes to `AuditLog`.
 
 ### 8.4 Activity suggestions
 
+**Deferred** *(decided 2026-09-24)*. Once games are created automatically, a player who stops playing still gets a game every week, and each ends by timeout — so "has not finished a game in 3 weeks" no longer describes a dormant player. The check-in is revisited once there is real data (for example, a run of losses on time). The original design, kept for reference:
+
 The old `ACTIVITY_THRESHOLD` heuristic is retained, but demoted from a hard rule to a nudge:
 
-- If a player has not finished a game in `activity.threshold_weeks * 7` days and has no ongoing games, the system notifies them (on-site, plus Lichess PM if enabled) asking whether they want to stay active, with one-click "stay active" / "pause me" links.
+- If a player has not finished a game in `activity.threshold_weeks * 7` days and has no ongoing games, the system notifies them on-site asking whether they want to stay active, with one-click "stay active" / "pause me" links.
 - No response after a further 7 days sets `is_active = false` automatically, with a notification.
 
 This replaces the admin manually flipping the `active` column.
@@ -1073,12 +1131,13 @@ This replaces the admin manually flipping the `active` column.
 
 - **Registration queue.** Pending applications with the Lichess signals from §8.2, approve/reject with reason, bulk actions. Approving several at once is one transaction — if any selected application has changed state meanwhile, none are approved. Approval also computes the player's first `PlayerStanding` row so they appear on the standings at once. A rejected tab lists past rejections and allows approval from there. *(Built 2026-09-15.)*
 - **Player management.** Search, view, edit any profile; pause/unpause; adjust `max_concurrent_games`; grant/revoke admin; ban.
-- **Round management** *(Phase 4)*. List rounds with state; view a round with the full pairing table; on a draft: edit a pairing (swap opponents between two pairings — colours re-derived by the engine's colour step; flip colours; remove a pairing, which writes a `removed_by_admin` exclusion for both players and drops the volunteer's double-game record if it was one of theirs), publish now, cancel with a reason, regenerate in place (same number, fresh pairings and diagnostics). On a published round: mark a pending pairing failed (§5.8). Edits are refused server-side on anything but a draft. Every edit is attributed in `AuditLog`, sets `edited_by`, and nulls the row's stored diagnostics so the view shows "edited" instead of numbers that no longer hold. Cancelling a published round is Phase 5 (games may exist).
+- **Round management** *(Phase 4)*. List rounds with state; view a round with the full pairing table; on a draft: edit a pairing (swap opponents between two pairings — colours re-derived by the engine's colour step; flip colours; remove a pairing, which writes a `removed_by_admin` exclusion for both players and drops the volunteer's double-game record if it was one of theirs), publish now, cancel with a reason, regenerate in place (same number, fresh pairings and diagnostics). On a published round: mark a pending pairing failed (§5.8). Edits are refused server-side on anything but a draft. Every edit is attributed in `AuditLog`, sets `edited_by`, and nulls the row's stored diagnostics so the view shows "edited" instead of numbers that no longer hold. **A published round is final** (§6.3): it cannot be cancelled. *(Amended 2026-09-28; an earlier draft planned cancelling a published round in Phase 5.)* *(Phase 5.)* Per pairing, the view shows how its game is being created (bulk, challenge, by hand), its status and the game link; for the round, a game-creation line — by hand (`manual`), being created, created at … with the bulk id, or gave up with a link to the failed job — and *Retry game creation* when creation gave up or some pairings are still to be started by hand. The retry first runs the §7.3 search for the round's pending pairings, so a game a player already started by hand is attached rather than duplicated.
 - **Pairing diagnostics** *(Phase 4)*. For any round: pool size, how an odd pool was resolved and for whom, the repeats accepted (§6.2 step 7), the settings as they were at generation (the stored `settings_used` snapshot, solver included; an imported round says it has none), per-pair rating gap, colour penalty and repeat-of-round, and every player excluded from the pool with the reason and, for capacity, the count and the cap. The page reminds the admin that the pool is not recalculated during the review window — regenerate to pick up changes (§5.8).
-- **Manual generation** *(Phase 4)*. Trigger `generate-round` off-cycle. It runs in the request (the engine is milliseconds and makes no Lichess call) and records a job run like the scheduled one; the database allows at most one draft, so a second generation — from the page or the scheduler — fails with a clear message instead of racing. Running in the request means it has no job runner to schedule the draft's publication, so a manually generated draft is published by the hourly `publish-round-sweep`, up to an hour after its window ends; *Publish now* is immediate. The same holds for `ic generate-round`.
+- **Manual generation** *(Phase 4)*. Trigger `generate-round` off-cycle. It runs in the request (the engine is milliseconds and makes no Lichess call) and records a job run like the scheduled one; the database allows at most one draft, so a second generation — from the page or the scheduler — fails with a clear message instead of racing. Running in the request means it has no job runner to schedule the draft's publication, so a manually generated draft is published by the hourly `publish-round-sweep`, up to an hour after its window ends; *Publish now* is immediate. The same holds for `ic generate-round`. *(Phase 5, 2026-09-28.)* The web layer and the CLI gain a job enqueuer, so a manually generated draft gets its own publish job and publishes when its window ends, like a scheduled one; the sweep goes back to catching lost jobs only. Generation from any path runs `evaluate-activity` first (§6.4).
+- **Tokens** *(Phase 5)*. `/admin/tokens` lists the players without a valid token, since when, and the days of grace left (§3.3), and the organiser token's state and expiry.
 - **Settings.** Edit everything in §4.2 from a form, with validation and an audit trail.
 - **Content.** Edit the rules/FAQ text.
-- **System health.** Last run and outcome of every job, recent failures with stack traces, Lichess API error rate, count of players with invalid tokens, organiser token expiry. This page is the direct answer to the original reliability problem.
+- **System health.** Last run and outcome of every job, recent failures with stack traces, Lichess API error rate, count of players with invalid tokens, organiser token expiry. This page is the direct answer to the original reliability problem. *(Phase 5, 2026-09-28.)* Until the full page (Phase 6), admin alerts are **computed, not stored**: a banner on every admin page, built from the same data as `/health`, shows a draft waiting for review and when it will publish itself (§6.1), a watched job whose latest run failed, and an organiser token that is invalid or expires within 14 days. `/health` watches the Phase 5 jobs, reports the organiser token, and returns 503 when `pairing.game_creation = lichess` and that token is invalid — the P1 alert of §3.2.
 
 ---
 
@@ -1116,30 +1175,32 @@ w_comp, b_comp, w_total_moves, b_total_moves, w_total_CPL, b_total_CPL
 
 **No email.** There is no SMTP dependency, no transactional email provider, and no email address is collected or stored. This removes an entire category of deliverability problems, spam-folder support requests, and personal data to protect.
 
-Two channels replace it:
+**One channel: the on-site notification centre.** A persisted `Notification` record per player, surfaced as a bell icon with an unread count and a list on the dashboard (§8.3). Always available, requires no external service, and is the fallback for everything.
 
-1. **On-site notification centre** (primary). A persisted `Notification` record per player, surfaced as a bell icon with an unread count and a list on the dashboard. Always available, requires no external service, and is the fallback for everything.
-2. **Lichess private message** (optional, per player). Reaches players in the place they already are — Lichess itself — which for a correspondence league is where they'll be several times a week anyway. Requires the `msg:write` scope, requested as an optional extra at registration and declinable without affecting anything else. Gated behind `LICHESS_MSG_ENABLED` and subject to the same rate limiting as all other Lichess calls. Keep these messages short and infrequent; nobody wants a chatty bot in their Lichess inbox.
+**The only Lichess message is the one bulk pairing sends.** A bulk's `message` reaches each player from the organiser account when their game is created (§3.2). There are no other Lichess private messages. *(Amended 2026-09-28.)* An earlier draft made Lichess PMs a second, per-player channel, sent with each player's `msg:write` token; that cannot work, because a message is sent as the token's owner (§3.1). League PMs would have to come from the organiser account, which may start only about 20 new conversations a day. Custom PMs, if still wanted, come from the organiser account in Phase 6 at the earliest.
 
-| Event | Recipient | Channel |
-|---|---|---|
-| Registration approved / rejected | Applicant | On-site + Lichess PM |
-| New round published | Each paired player | On-site + Lichess PM |
-| Game created (bulk) | Each paired player | On-site (direct game link) |
-| Challenge pending acceptance | Player who must accept | On-site + Lichess PM, repeated after 48h |
-| About to be auto-paused (1 missed start) | Player | On-site + Lichess PM |
-| Auto-paused | Player | On-site + Lichess PM, with resume link |
-| Inactivity check-in | Player | On-site + Lichess PM, with stay/pause links |
-| Lichess token revoked | Player | On-site banner + Lichess PM, with re-auth link |
-| Assigned a double game | Volunteer | On-site (explains both games) |
-| Received a bye | Player | On-site (explains why, and that they're prioritised next) |
-| Level up | Player | On-site (opt-out) |
-| Job failure, token expiry | Admins | On-site |
+| Event | Category | Recipient | Channel |
+|---|---|---|---|
+| Registration approved / rejected | `registration` | Applicant | On-site |
+| Round published: paired, worded for how the game is created | `round` | Each paired player | On-site; for a bulk game also the bulk's Lichess message |
+| Assigned a double game | `round` | Volunteer | On-site (explains both games) |
+| Received a bye | `round` | Player | On-site (explains why, and that they're prioritised next) |
+| Game creation gave up: challenge your opponent by hand | `round` | Both players of each pairing left | On-site |
+| Retried game creation created your game: don't start another | `round` | Both players | On-site |
+| Challenge to accept | `challenge` | Player who must accept | On-site |
+| Game not started 48 hours after publication | `unstarted` | Challenge: the player who must accept; by hand: both players | On-site, once |
+| One missed start from auto-pause | `missed_start` | Player | On-site |
+| Auto-paused | `auto_pause` | Player | On-site, with resume link |
+| Lichess token revoked | `token` | Player | On-site, and a dashboard banner, with re-auth link |
+| Level up | `level_up` | Player | On-site |
+| Draft awaiting review, job failure, organiser token invalid or expiring | — | Admins | Banner on admin pages, computed (§8.5) |
+| Inactivity check-in | — | — | Deferred with §8.4 |
 
 Notes:
 
-- A revoked token cannot send a Lichess PM. Token-problem notifications must therefore always also appear as a dashboard banner, which is the only channel guaranteed to work in that state.
-- All player-facing categories must be individually opt-out-able in the dashboard, except account-critical ones (approval, auto-pause).
+- A player whose token has lapsed may no longer be visiting the site. Token-problem notifications must therefore also appear as a dashboard banner, shown regardless of preferences.
+- All player-facing categories must be individually opt-out-able in the dashboard, except the account-critical ones: `registration`, `auto_pause`, `token`.
+- Notifications are **idempotent**: each carries a `dedupe_key` (e.g. `round:201:paired:<pairing id>`), unique when set, so a retried job never notifies twice. *(2026-09-28.)*
 - Because there is no email, **admins must not rely on notifications reaching a dormant player.** The inactivity flow in §8.4 should assume a player may never see the check-in, and its automatic deactivation is the mechanism that matters, not the message.
 
 ---
@@ -1155,7 +1216,7 @@ Notes:
 - The OAuth callback verifies `state` (from an HMAC-signed, 10-minute cookie carrying the PKCE verifier) before anything else, and is kept out of the request log so the one-time code never appears there.
 - Token revocation on account deletion, and a documented deletion path (GDPR — a European user base is likely given the existing roster). The data footprint is deliberately small: a Lichess username, an encrypted token, and game history. No email addresses are held.
 
-  **The deletion path is a precondition of opening registration to the public, built in Phase 6 against the final schema** *(decided 2026-09-15)*. Every later phase adds per-user tables, so a path written earlier would be re-opened in each of them or silently miss one. Until then the roster is the maintainers' test accounts and the documented path is an admin deleting the rows by hand. Design intent, to be implemented then: revoke the token on Lichess, delete the token, sessions, rating snapshots, profile and standing, anonymise the `User` row (username, Lichess id, profile) and **keep the `Game` rows** — opponents' results, XP and performance ratings are computed from them, and the games are public on Lichess regardless. Tables carrying a `user_id` today, the checklist for that work: `player_profiles`, `rating_snapshots`, `oauth_tokens`, `sessions`, `player_standings`, `pairings` (white/black, `edited_by`), `games` (white/black), `audit_log` (actor, and `entity_id` for user actions), `settings.updated_by`, `users.approved_by`; from Phase 4, `round_exclusions`, `byes`, `double_games`. Phase 5 extends this list as it adds tables.
+  **The deletion path is a precondition of opening registration to the public, built in Phase 6 against the final schema** *(decided 2026-09-15)*. Every later phase adds per-user tables, so a path written earlier would be re-opened in each of them or silently miss one. Until then the roster is the maintainers' test accounts and the documented path is an admin deleting the rows by hand. Design intent, to be implemented then: revoke the token on Lichess, delete the token, sessions, rating snapshots, profile and standing, anonymise the `User` row (username, Lichess id, profile) and **keep the `Game` rows** — opponents' results, XP and performance ratings are computed from them, and the games are public on Lichess regardless. Tables carrying a `user_id` today, the checklist for that work: `player_profiles`, `rating_snapshots`, `oauth_tokens`, `sessions`, `player_standings`, `pairings` (white/black, `edited_by`), `games` (white/black), `audit_log` (actor, and `entity_id` for user actions), `settings.updated_by`, `users.approved_by`; from Phase 4, `round_exclusions`, `byes`, `double_games`; from Phase 5, `notifications`, `notification_preferences`, `missed_starts`.
 
 **Performance.** Public pages read from materialised `PlayerStanding` and cached aggregate tables, never computing rolling performance ratings per request. Standings and stats pages should render in well under a second at 200+ players and 10,000+ games.
 
@@ -1186,10 +1247,10 @@ Lichess OAuth (PKCE, §3.1), the registration flow and account page (§8.2), ser
 Player dashboard at `/account` (§8.3): activity toggle, the opt-in concurrent-games cap with the live in-progress count, double-game opt-out, resume-quest, my standing, my games and the stored authorisation status. UI only: no schema change, no new job, no new Lichess call; `player.max_concurrent_ceiling` becomes the first non-scoring setting read. Not in Phase 3: `validate-tokens` and revocation detection (Phase 5, with the rest of the token automation); bye / double-game history (Phase 4, with the tables); the deletion path (Phase 6, see §11).
 
 **Phase 4 — Pairing.** *(Built 2026-09-22; see `PLAN.md`.)*
-The pure pairing engine (§6.2, greedy and blossom solvers behind a `Solver` interface, chosen with `pairing.solver`), the `byes` / `double_games` / `round_exclusions` tables and the round diagnostics columns, `generate-round` on `pairing.cron`, the draft / review-window / auto-publish flow with `publish-round` and its hourly sweep, admin round management and diagnostics (§8.5), the dashboard's this-week block (§8.3), and the in-flight capacity count (§5.8). Generated rounds are published as `manual_external` pairings: players create the games by hand and §7.3 finds them, so the phase replaces the spreadsheet's `Pairing_Maker` on its own. **No shadow mode**: the maintainer decided the site pairs for real from its first run; the first rounds use `review_window` with a long window (e.g. 24 hours) so each draft is checked on `/admin/rounds` before it publishes itself. Not in Phase 4: anything that talks to Lichess (bulk pairing, challenges, cancellation, `validate-tokens`, the `no_valid_token` exclusion), `missed_starts` / `evaluate-activity` / auto-pause, notifications, cancelling a published round — all Phase 5.
+The pure pairing engine (§6.2, greedy and blossom solvers behind a `Solver` interface, chosen with `pairing.solver`), the `byes` / `double_games` / `round_exclusions` tables and the round diagnostics columns, `generate-round` on `pairing.cron`, the draft / review-window / auto-publish flow with `publish-round` and its hourly sweep, admin round management and diagnostics (§8.5), the dashboard's this-week block (§8.3), and the in-flight capacity count (§5.8). Generated rounds are published as `manual_external` pairings: players create the games by hand and §7.3 finds them, so the phase replaces the spreadsheet's `Pairing_Maker` on its own. **No shadow mode**: the maintainer decided the site pairs for real from its first run; the first rounds use `review_window` with a long window (e.g. 24 hours) so each draft is checked on `/admin/rounds` before it publishes itself. Not in Phase 4: anything that talks to Lichess (bulk pairing, challenges, `validate-tokens`, the `no_valid_token` exclusion), `missed_starts` / `evaluate-activity` / auto-pause, notifications — all Phase 5.
 
-**Phase 5 — Automation.**
-Bulk pairing game creation, challenge fallback, ongoing sync, missed-start tracking (`MissedStart` table, `evaluate-activity`) and auto-pause, notifications, `validate-tokens` (§7) with the grace-day deactivation (§3.3), cancelling a published round.
+**Phase 5 — Automation.** *(Scope rewritten 2026-09-28; see `PLAN.md`.)*
+Creating each round's games on Lichess at publication with bulk pairing, behind the `pairing.game_creation` switch (`manual` by default), in a `create-games` job queued with the publication, which reconciles before acting and gives up to hand-started games rather than failing them (§6.3); the challenge fallback for a lapsed token (§3.3); `validate-tokens` (§7), the publication probe, the re-authorise banner and the `no_valid_token` grace rule (§3.3, §5.7); `evaluate-activity` before every generation — unstarted pairings retired, missed starts for challenges, warning and auto-pause, `cancel-challenge` (§6.4); the on-site notification centre (§10); `/admin/tokens` and computed admin alerts (§8.5); a publish job for every draft, whatever generated it. Not in Phase 5: cancelling a published round (dropped: a published round is final, §6.3); custom Lichess PMs (§10) and the inactivity check-in (§8.4), both deferred.
 
 **Phase 6 — Polish.**
 Admin settings UI, editable rules content, system health page, and the account deletion path (§11) — the last is a hard gate before registration is opened publicly.
@@ -1211,7 +1272,7 @@ These were open and are now settled. Recorded here so they are not relitigated d
 | Odd pool | Double game if a valid volunteer exists, otherwise a bye (§6.2 step 6). |
 | Double-game opt-in | **On by default**, to keep byes rare. Players may opt out. |
 | Bye selection | Longest time since last bye; never rating-based. |
-| Email notifications | **None.** No SMTP, no email stored. On-site centre and optional Lichess PM (§10). |
+| Email notifications | **None.** No SMTP, no email stored. The on-site centre is the only channel (§10). |
 | Base rating | **Any correspondence rating (even provisional), falling back to classical only when correspondence is entirely absent.** Corrects the spreadsheet's `MAX()`; provisional status no longer distinguishes the two sources (§5.1). |
 | Unrated players | **Fixed constant** `rating.unrated_default` (1500), not the league median (§5.1). |
 | Opponent rating in performance rating | **Rating at the time of the game**, stored on `Game`, not the opponent's current rating (§5.2). |
@@ -1220,7 +1281,7 @@ These were open and are now settled. Recorded here so they are not relitigated d
 | Stats page | Deferred until after Phase 4 (§8.1). |
 | Templating / migrations | `html/template` and `goose`. |
 | Registration form | **One checkbox** (fair-play agreement) on the join page, before the Lichess redirect; no timezone field (§8.2, §14.4). |
-| `msg:write` | Not requested at registration; asked for by re-authorisation when notifications ship, Phase 5 (§3.1). |
+| `msg:write` | **Never requested.** A message is sent as the token's owner, so a player's `msg:write` could only send messages from that player. The only Lichess message is the bulk's own; custom PMs, if still wanted, from the organiser account in Phase 6 (§3.1, §10). Amended 2026-09-28 from "asked for by re-authorisation in Phase 5". |
 | Existing members | Sign in through the same OAuth flow; the roster is not seeded at public launch (§8.2). |
 | Bootstrap admins | `ADMIN_LICHESS_USERNAMES`, applied at sign-in; a listed newcomer joins normally and is created approved + admin (§8.2). |
 | Rejected applicants | Cannot re-apply themselves; an admin can approve from the rejected tab (§8.2, §8.5). |
@@ -1242,6 +1303,15 @@ These were open and are now settled. Recorded here so they are not relitigated d
 | Token gate in Phase 4 | Not applied: the manual path is the fallback path (§5.7). |
 | Round numbering | `max(number) + 1` over non-cancelled rounds — the first generated round follows the last imported one (§14.2). |
 | Exclusion rows | Approved members only; `removed_by_admin` added for admin-deleted pairings (§4.1.1). |
+| Game creation switch | `pairing.game_creation` = **`manual`** (default) \| `lichess`, recorded on each round: the code ships before the organiser account exists, and one setting returns the league to hand-started games (§4.2, §6.3). |
+| Who gets which kind of game | Both tokens working → bulk; one → a challenge from the player whose token works, in their assigned colour; neither → started by hand (§3.3). |
+| Token grace | A live `no_valid_token` pool exclusion after `token.invalid_grace_days`, not a flip of `is_active`; no token row → excluded at once; only under `lichess` (§3.3, §5.7). |
+| Game creation after publication | In a `create-games` job queued in the publish transaction — database first, Lichess after — that probes tokens and reconciles before acting (§6.3). |
+| Lichess refusing a round's bulk | After 10 attempts (about four hours) the pairings are left to be started by hand and the players told, not marked `failed`; an admin can retry (§6.3). |
+| A published round | **Final.** No cancel after publication; the review window is the undo (§6.3, §8.5). |
+| `evaluate-activity` | Runs first in every generation, not after it (§6.4, §7). |
+| Unstarted pairings, missed starts | Every still-pending pairing retired at the next generation; a missed start only for the player who had to accept a challenge (§6.4). |
+| Inactivity check-in (§8.4) | **Deferred** until real data shows what dormancy looks like once games are created automatically. |
 | Licence | **AGPL-3.0-or-later** (2026-09-28). The site is a hosted service, and only the AGPL obliges a deployment running modified code to publish it; every page's footer links to the source (§8.1). Third-party code keeps its own licence (the NetworkX port in the blossom solver is BSD-3-Clause). |
 
 ---
@@ -1250,7 +1320,7 @@ These were open and are now settled. Recorded here so they are not relitigated d
 
 1. ~~History import~~ — **resolved: no** (§9, §13).
 2. ~~Round numbering~~ — **resolved: continue the sheet's sequence** via the imported open pairings (§9); concretely, a generated round takes `max(number) + 1` over non-cancelled rounds (§13, 2026-09-17).
-3. **Organiser account** — which Lichess account holds the `challenge:bulk` token, and who has access to it? This is a single point of failure and needs a named owner. *(Needed before Phase 5.)*
+3. **Organiser account** — which Lichess account holds the `challenge:bulk` token, and who has access to it? This is a single point of failure and needs a named owner. *(Needed before `pairing.game_creation` is switched to `lichess` — not for building Phase 5, which ships with game creation off, 2026-09-28.)*
 4. ~~Timezone field~~ — **resolved: dropped** (§8.2, §13). Registration is a single screen; the unused `PlayerProfile.timezone` column stays nullable in case a "deadlines in local time" feature ever wants it.
 5. ~~League median for unrated players~~ — **resolved: fixed constant** (§5.1, §13).
 6. **Game analysis** — accuracy and centipawn loss exist only for games analysed on Lichess, and the public API cannot request analysis. Did the old Python script request it some other way, or were those columns sparsely populated in the sheet? *(Affects the Stats page, after Phase 4.)*
@@ -1259,6 +1329,7 @@ These were open and are now settled. Recorded here so they are not relitigated d
 
 ## 15. Changelog
 
+- **2026-09-28** — Phase 5 plan amendments (see `PLAN.md`). `msg:write` is not a player scope and there are no custom Lichess PMs; `LICHESS_MSG_ENABLED` removed (§2.2, §3.1, §8.2, §10). Bulk pairing re-checked against v2.0.174: game ids at creation, no `pairAt`, the `message` sent by the organiser account, the rejection body, the double game in one bulk (§3.2, §6.3). Who gets a bulk game, a challenge or a hand-started one; the grace rule as a live `no_valid_token` exclusion (§3.3, §5.7). A challenge's id is its game's id, so challenges are re-checked by id (§3.4, §7.3). `Notification.dedupe_key`, `NotificationPreference` reduced to an opt-out row, `MissedStart.pairing_id` and uniqueness, `PlayerProfile.resumed_at`, `Round.game_creation` and `games_created_at` (§4.1, §4.1.1). `pairing.game_creation`, the `days_per_move` set, validation of the Phase 5 keys (§4.2). Publication queues `create-games`, which probes, reconciles, bulks, challenges and gives up to hand-started games; a published round is final (§6.3, §8.5). Unstarted pairings and missed starts (§6.4). Jobs table: `validate-tokens` at `pairing.cron` − 1h, `evaluate-activity` before generation, `create-games`, `cancel-challenge`, every draft gets its publish job (§7, §8.5). Dashboard: token status and banner, this-week wording per case, notifications (§8.3); inactivity check-in deferred (§8.4); `/admin/tokens` and computed admin alerts, a draft awaiting review included (§6.1, §8.5). Notifications redesigned around the on-site centre (§10). Deletion checklist extended (§11). Phase 4 and 5 paragraphs (§12), decisions (§13), §14.3 now gates switching game creation on, not building.
 - **2026-09-28** — Discord dropped (maintainer): no `DISCORD_WEBHOOK_URL` (§2.2), no Discord notification channel (§10), no Discord integration in Phase 6 (§12, §13).
 - **2026-09-28** — Licensed AGPL-3.0-or-later (§13); every page's footer links to the source and the licence (§8.1).
 - **2026-09-22** — Phase 4 close-out. The dashboard's "This week" section recorded as built, with the cases settled while building it (§8.3). The diagnostics show the whole settings snapshot (§8.5). A manually generated draft is published by the hourly sweep, up to an hour after its window (§8.5). The pairing tests requirement no longer asks for the unreachable relaxation ladder, and names both solvers (§11). Phase 4 marked built (§12).

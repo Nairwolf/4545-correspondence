@@ -1,1028 +1,665 @@
-# Phase 4 implementation plan — Pairing
+# Phase 5 implementation plan — Automation
 
-**Status: built and closed out 2026-09-22** (commits `7ac7596` to
-`c86bdfb`). The live checks were run by the maintainer on 2026-09-25
-and 2026-09-27 and all passed; see "Live verification" under "What
-was built".
+**Status: adopted 2026-09-28, being built.** Proposed 2026-09-24 and
+parked in `PLAN_PHASE5.md` until Phase 4's live checks were recorded;
+it replaced the Phase 4 plan here once they were (that plan and its
+record stay in git history, last at `d765c07`). Re-read against those
+checks before starting: they change nothing here (step 0 under "What
+was built"). Decisions 12–15 were taken by the maintainer on
+2026-09-24; the rest are the plan's defaults, to be confirmed or
+overturned on review.
 
 ## Context
 
-Phases 1–3 are built and closed out. Phase 4 is **pairing** (spec §12):
-the pairing engine (§6.2), the round model and its state machine (§6.1),
-scheduled generation on `pairing.cron`, the draft / review-window /
-auto-publish flow, admin round management and diagnostics (§8.5), and
-the dashboard's "why didn't I get a game / bye / double game" slot left
-open by Phase 3 (§8.3). It is the first phase that *writes* league
-state on its own initiative. The spec's "shadow mode against the
-spreadsheet" is **not** built: the maintainer decided (2026-09-17) that
-the site pairs for real from its first run; the review window, with a
-long window for the first rounds, is the safety net instead.
+Phases 1–4 are built. The site pairs a round every Monday, but every
+game is still started by hand: a published pairing is
+`manual_external` / `pending`, players challenge each other, and
+`sync-games` finds the game through §7.3 matching. That is the
+spreadsheet's fourth failure ("a meaningful share of pairings never
+become games"), and Phase 5 exists to remove it (spec §12):
 
-What Phase 4 deliberately does **not** do — all of it Phase 5 (§12):
-create games on Lichess (bulk pairing, `pairAt`, the cancel endpoint),
-the challenge fallback, token validation and the `no_valid_token`
-exclusion, missed starts / `evaluate-activity` / auto-pause,
-notifications ("round published", "you got a bye", "draft awaiting
-review"), and the `missed_starts` table (its only writer is
-`evaluate-activity`). Admin player management, the settings UI and the
-health page are Phase 6.
+- create the round's games on Lichess at publication, with **bulk
+  pairing** (§3.2, §6.3);
+- fall back to a **direct challenge** for a player whose token has
+  lapsed (§3.3);
+- keep tokens healthy: **`validate-tokens`** (§7), the re-authorise
+  prompts, the `token.invalid_grace_days` rule (§3.3);
+- **missed starts** and **auto-pause** (§6.4, `MissedStart`,
+  `evaluate-activity`), and retiring unstarted pairings automatically;
+- **on-site notifications** (§10).
 
-**Why a Phase 4 round is still useful without Lichess automation.** A
-published round's pairings are created as `creation_method =
-manual_external`, `status = pending` — exactly the shape `import-pairings`
-already produces. Players challenge each other by hand as they do today,
-and `sync-games` discovers the games through §7.3 matching with no new
-code. Phase 4 therefore replaces the spreadsheet's `Pairing_Maker`
-outright; Phase 5 only replaces the manual challenge.
+Not in Phase 5: cancelling a published round (decision 13 — dropped,
+not deferred); custom Lichess PMs (decision 12) and the §8.4
+inactivity check-in (decision 14); the admin settings UI, editable
+rules, the full health page and the GDPR deletion path (Phase 6);
+history import (Phase 7).
 
-### What Phases 1–3 already provide (reused, not rebuilt)
+Phase 4's own live checks were run by the maintainer on 2026-09-25 and
+2026-09-27 and all passed (the Phase 4 plan's "Live verification", in
+git history).
 
-- `rounds` / `pairings` tables with the §4.1 shape (`00004`), including
-  `publish_at` / `published_at` / `pair_at`, `generated_by` (`schedule`,
-  `manual`, `imported`), `pairings.edited_by`, and the
-  `UNIQUE (round_id, white_user_id, black_user_id)` import key.
-- `player_standings.power_rating` and `color_score` (materialised by
-  `standings.Recompute`), `CountOngoingGamesForUser`,
-  `scoring.CapacityAllows(max *int, ongoing)`.
-- `player_profiles`: every §5.7 input (`is_active`, `paused_by_admin`,
-  `auto_paused_at`, `max_concurrent_games` NULL = unlimited,
-  `accepts_double_game`).
-- The job pattern: one `runX(ctx, db, …, riverJobID *int64)` per job in
-  `cmd/ic`, writing `job_runs` under `context.WithoutCancel`, shared by
-  the river worker and the one-shot `ic <job>` subcommand
-  (`cmd/ic/recompute.go` is the canonical form); `jobs.NewClient` with
-  one queue, one worker.
-- `web`: the `/admin` route group behind `requireAdmin`, `s.inTx`, PRG
-  with `?error=` / `?saved=`, the `<details>`-with-reason form and the
-  amber diagnostics panel in `admin_registrations.html` / `jobs.html`,
-  the `testServer` / `addPlayer` / `addAdmin` / `postAs` harness, and
-  `createTestPairing` in `internal/standings`.
-- `settings.Load` ignores unknown keys, so the new keys can be written
-  into the table before the struct learns them.
-- `internal/lichess.Fake` — unchanged; Phase 4 makes **no Lichess call**.
+### What Phases 1–4 already provide (reused, not rebuilt)
+
+- `internal/lichess`: one serialised client, 429 wait-and-retry-once,
+  `APIError`, the `API` interface and `Fake`; `Account` and
+  `RevokeToken` already take a player's bearer token
+  (`tokencrypt.Secret`, prints `[redacted]`).
+- `oauth_tokens` with `scopes`, `expires_at`, `revoked_at`,
+  `last_validated_at`; `UpsertOAuthToken` already clears `revoked_at`
+  on every sign-in, so **the existing sign-in is the one-click
+  re-authorisation** (§3.1) — no new OAuth code.
+- `rounds.Publish` (guarded `WHERE state = 'draft'`, row lock),
+  `rounds.Scheduler` (the transactional publish-job insert),
+  `rounds.Snapshot` carrying `Rated` and `DaysPerMove` precisely so
+  Phase 5 creates games with the settings the round was paired under.
+- `sync-games`: `ListPairingsToRecheck` already re-fetches any pairing
+  with a game id and a non-terminal status (so `created` bulk games
+  need no new sync code); aborted / `noStart` → pairing `failed`;
+  `matchPendingPairings` is the §7.3 search reused to find
+  hand-started games before a retry (decision 15).
+- `standings.Recompute` already returns `leveledUp` (ignored today) —
+  the level-up notification hook.
+- `CountInFlightGamesForUser` counts pending and `created` pairings of
+  published rounds — but only those with **no game id**
+  (`p.lichess_game_id IS NULL`). *Corrected at step 0:* this plan first
+  said bulk-created games would count toward caps at once. They would
+  not: a bulk pairing gets its game id at creation and has no `games`
+  row until `sync-games` ingests it, and an unaccepted challenge keeps
+  its id and no game all week. Step 5 changes the term to "no game
+  ingested yet" (`NOT EXISTS` a `games` row for the pairing), which is
+  spec §5.8's own wording.
+- The enum `exclusion_reason` already has `no_valid_token`; the
+  `resume` handler and `auto_paused_at` exist (§8.3).
+- The job pattern (`runX` writing `job_runs` under
+  `context.WithoutCancel`), `/health`'s `jobNames`, the admin
+  `requireAdmin` group, the PRG / `?error=` pattern, the
+  `testServer` / `addPlayer` harness.
+
+### What the Lichess API check found (OpenAPI v2.0.174, 2026-09-24)
+
+Checked before planning, as §3.2 asks. Points marked *(lila)* are read
+from the server source, not documented, and go on the live-check list.
+
+- **Bulk pairing** returns the **game ids at creation** (`games[{id,
+  white, black}]`). Omitting `pairAt` starts the games immediately, so
+  the "24h vs 7 days" horizon ambiguity (§6.3) does not matter to a
+  create-at-publish design. *(lila: 7 days is enforced.)*
+- **"For correspondence games, players can have multiple pairings
+  within the same bulk"** — now documented, so the double-game
+  volunteer's two games go in one bulk.
+- A bulk is all-or-nothing; a failed bulk is free. *(lila:)* a bad
+  token comes back as `{"tokens": {"<the token>": "<reason>"}}` — the
+  key is the raw token, which we map back to a player. Other refusals
+  are `{"error": "..."}`. The body therefore contains secrets and must
+  never be logged.
+- The bulk's `message` is **sent to each player from the organiser
+  account** when the game is created (default *"Your game with
+  {opponent} is ready: {game}."*, must contain `{game}`). *(lila: it
+  ignores the players' messaging preferences.)* This is the §10 "game
+  created" Lichess message, for free.
+- **A challenge's id is the game's id once accepted** (documented), so
+  a challenge pairing is re-checked by id like a bulk game.
+  `acceptByToken` no longer exists.
+- `POST /api/challenge/{id}/cancel` cancels a challenge the bearer
+  sent (used to withdraw a missed challenge, decision 8).
+- `POST /api/token/test`: unauthenticated, up to 1000 tokens, returns
+  `{userId, scopes, expires}` or `null` per token.
+- **`POST /inbox/{username}` sends a message *as the token's owner*.**
+  So the spec's model — each player grants `msg:write` so the league
+  can PM them (§3.1, §10) — cannot work: a player's `msg:write` token
+  could only send messages *from* that player. League PMs would have
+  to come from the organiser account, which *(lila)* may start about
+  20 new conversations a day. Hence decision 12.
 
 ---
 
 ## Decisions
 
-Decisions 1–3 and 7 were taken by the maintainer on 2026-09-17; the
-rest are the plan's defaults, to be confirmed or overturned on review.
-
-1. **Solver: greedy now, blossom later if real rounds need it.** §6.2
-   step 4 prefers a minimum-weight perfect matching (blossom) and
-   accepts greedy. The engine calls the solver through one small
-   `Solver` interface; Phase 4 ships **greedy** (the spreadsheet's
-   behaviour, ~40 readable lines). The blossom port (~1 000 lines, no
-   maintained Go library) is step 6, explicitly deferrable — decided
-   only after the first live rounds show whether greedy's short-sighted
-   bottom-of-the-list pairings actually happen.
-2. **Cron parsing: `robfig/cron/v3`.** `pairing.cron` is a cron
-   expression (§4.2) and river's `PeriodicSchedule` needs a `Next()`;
-   river already depends on `robfig/cron/v3` (indirect in the module
-   graph today) and the spec's stack table names it. The commit body
-   records why a hand-written five-field parser was rejected. This is
-   the first wall-clock schedule in the codebase — the existing three
-   jobs run on intervals from process start.
-3. **No shadow mode.** The site pairs for real from its first run. The
-   first rounds run in `review_window` mode with
-   `pairing.review_window_hours` raised (e.g. 24) so each draft can be
-   checked on `/admin/rounds` before it publishes itself. Nothing
-   derived from history (recent opponents, bye and double-game
-   rotation, dashboard explanations, `sync-games`) ever reads a draft
-   or cancelled round, so an unwanted draft is simply cancelled.
-4. **The relaxation ladder (§6.2 step 7) is recorded, not run.** Since
-   `repeat_penalty` is a large *finite* number (§6.2 step 3, CLAUDE.md),
-   the cost graph is complete and a perfect matching always exists (with
-   the duplicated volunteer it is K_{n+1} minus one edge, still
-   matchable for n ≥ 3); the solver already returns the matching with
-   the fewest, least-recent repeats, so lowering `avoid_recent_rounds`
-   or `color_weight` could never make a difference to solvability. The
-   engine records on each pairing whether it is a repeat and of which
-   round, and on the round how many repeats it accepted — what the admin
-   needs to see — and does not iterate. Spec amendment listed below.
-5. **Exclusion rows are written for approved members only**, for the
-   reasons `inactive`, `paused`, `auto_paused`, `at_capacity`, `bye`,
-   and `removed_by_admin` (new). Pending applicants are not loaded into
-   the pool at all (they see their status on `/account`); the enum still
-   carries `pending_approval` and `no_valid_token` for Phase 5.
-6. **Token validity does not gate the Phase 4 pool.** §5.7 item 6 is
-   "valid token **or** the fallback path is enabled"; in Phase 4 every
-   game is created by hand, i.e. the fallback path *is* the path, and
-   seeded players have no token at all. `no_valid_token` exclusions
-   arrive with `validate-tokens` in Phase 5.
-7. **In-flight games count for capacity**: `games.status =
-   in_progress` plus pending pairings of *published* rounds that have
-   no game yet. §5.8 says "status is created or in_progress": a pairing
-   the player has been told to start is a game in flight before Lichess
-   knows about it; without the second term a capped player would be
-   re-paired every week for as long as they delayed their challenge. One
-   query (`CountInFlightGamesForUser`) replaces `CountOngoingGamesForUser`
-   everywhere — engine, standings `ongoing`, dashboard sentence — so the
-   three can never disagree. Caveat: a pairing nobody starts counts until
-   it is marked failed; Phase 5's missed-start job does that
-   automatically, and Phase 4 gives the admin a *Mark failed* action on
-   a published round's pending pairing for the meantime.
-8. **A tiny `ic setting <key> <json>` subcommand** to set the review
-   window, the mode and the weights before Phase 6's settings UI exists
-   (`UpsertSetting` plus an audit row). Optional; without it the
-   maintainer edits the `settings` table in `make psql`.
-9. **Round numbering** (§14.2, already "continue the sheet's
-   sequence"): the first generated round is `max(number) + 1` over
-   non-cancelled rounds, i.e. one past the last imported round. Stated
-   here so it is a decision, not an accident.
-
----
-
-## Schema (one migration, `00011_pairing.sql`)
-
-```sql
-CREATE TYPE exclusion_reason AS ENUM
-  ('at_capacity','inactive','paused','auto_paused','no_valid_token',
-   'bye','pending_approval','removed_by_admin');
-CREATE TYPE odd_pool_outcome AS ENUM ('even','double_game','bye');
-
-CREATE TABLE round_exclusions (              -- §4.1, append-only
-  id bigserial PRIMARY KEY,
-  round_id int NOT NULL REFERENCES rounds(id),
-  user_id uuid NOT NULL REFERENCES users(id),
-  reason exclusion_reason NOT NULL,
-  ongoing_games int, max_concurrent_games int,   -- populated for at_capacity
-  created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (round_id, user_id)
-);
-CREATE TABLE byes         (id bigserial PRIMARY KEY, round_id …, user_id …, created_at …, UNIQUE (round_id, user_id));
-CREATE TABLE double_games (id bigserial PRIMARY KEY, round_id …, user_id …, created_at …, UNIQUE (round_id, user_id));
-
-ALTER TABLE rounds
-  DROP CONSTRAINT rounds_number_key,
-  ADD COLUMN pool_size int,
-  ADD COLUMN odd_pool odd_pool_outcome,
-  ADD COLUMN repeat_pairings int,
-  ADD COLUMN settings_used jsonb;                          -- the §4.2 pairing keys as generated
-CREATE UNIQUE INDEX rounds_number_live ON rounds (number) WHERE state <> 'cancelled';
-CREATE UNIQUE INDEX rounds_one_draft  ON rounds ((true))  WHERE state = 'draft';
-
-ALTER TABLE pairings
-  ADD COLUMN position int,             -- order in the generated list (stable display)
-  ADD COLUMN rating_gap int,           -- |power(white) − power(black)| at generation
-  ADD COLUMN color_penalty int,        -- §6.2 colour_penalty for the colours actually assigned
-  ADD COLUMN repeat_of_round int;      -- last round these two met within the window, else NULL
-```
-
-Why each:
-
-- **Per-pairing diagnostics are stored, not recomputed.** Standings move
-  after generation; the admin view (§8.5) must show what the engine saw.
-  `settings_used` (a struct, marshalled — not a map — so the JSON is
-  stable) pins the weights, including `rated` and `days_per_move` for
-  Phase 5's publish, and makes a regeneration comparable. An admin edit
-  **nulls** the three diagnostic columns on the touched rows; the view
-  shows "edited" instead of numbers that would lie.
-- **Partial unique index on `rounds.number`.** A cancelled draft no
-  longer holds its number, so the next generation reuses it and the
-  sequence has no gaps. `GetRoundByNumber` gains `AND state <>
-  'cancelled'` (otherwise `:one` would return an arbitrary row);
-  `import-pairings` finding a *draft* with its number refuses, as it
-  already does for any other conflict.
-- **`rounds_one_draft`** makes "one draft at a time" a database fact.
-  The admin's *Generate now* runs in-request while the river worker may
-  be generating in another goroutine; the loser gets a unique violation
-  mapped to `ErrDraftExists` instead of a check-then-insert race.
-- `cancel_reason` is not added: the existing `notes` column is it.
-- **`UNIQUE (round_id, white, black)` is compatible with double games**:
-  the volunteer's two pairings have different opponents, and
-  `games.pairing_id UNIQUE` is one game per pairing, which is what two
-  pairing rows give. No change. (A reversed-colour duplicate `(A,B)` +
-  `(B,A)` would pass the index; an engine post-condition test forbids it.)
-- `missed_starts` is **not** created (Phase 5).
-- The §11 deletion checklist gains `round_exclusions`, `byes`,
-  `double_games` (spec amendment).
-
-### Queries (new `internal/db/queries/rounds.sql`; small edits to `pairings.sql`, `games.sql`)
-
-- **`ListUnmatchedPairings` and `ListPairingsToRecheck` gain `AND
-  r.state = 'published'`.** Without this the hourly `sync-games` would
-  query Lichess for every white player of a *draft* and, with `pair_at
-  − 1 day` as the cutoff, attach any rated 2-day game those two happen
-  to have started into a round that does not exist yet; it would also
-  block regenerate's `DELETE` through the `games.pairing_id` FK.
-- `CountInFlightGamesForUser :one` (decision 7) replaces
-  `CountOngoingGamesForUser`; callers in `standings.go` and
-  `dashboard.go` switch over.
-- `ListPairingPool :many` — one query, the engine's whole input:
-  approved users with profile, standing (`power_rating`, `color_score`),
-  in-flight count, last bye round number and bye count, last double-game
-  round and count (from **published** rounds only), `ORDER BY
-  power_rating DESC, user_id`. Eligibility is computed **live** from
-  `users` / `player_profiles`, never from `player_standings.is_eligible`,
-  which is only refreshed on ingest / toggle / approval. Readable SQL
-  with lateral subqueries so it can be diffed against
-  `Pairing_Maker_Backend`.
-- `ListRecentOpponents :many` — `(user_a, user_b, round_number)` for
-  pairings of the **last N published rounds by number** (not `number >
-  current − N`, which breaks on gaps), status not in
-  (`cancelled`, `failed`) — a game that was never played is not "met".
-- `NextRoundNumber :one` — `COALESCE(MAX(number), 0) + 1` over
-  non-cancelled rounds.
-- `GetDraftRound :one`, `GetRoundByID :one`, `GetRoundForUpdate :one`
-  (`FOR UPDATE`, taken by every publish/cancel/regenerate/edit path so
-  Phase 5 can put Lichess calls between the lock and the flip),
-  `ListRounds :many` (with pairing / bye counts),
-  `ListPairingsForRound :many` (joined usernames and both power ratings),
-  `ListExclusionsForRound`, `ListByesForRound`, `ListDoubleGamesForRound`.
-- `CreateGeneratedRound :one` (all new columns), `InsertGeneratedPairing
-  :one`, `InsertBye`, `InsertDoubleGame`, `InsertRoundExclusion`.
-- `PublishRound :one` — `UPDATE … SET state='published', published_at=$2,
-  pair_at=$2 WHERE id=$1 AND state='draft' RETURNING *`. `pair_at` is
-  set to the real publish moment so an early publish never leaves §7.3's
-  `pair_at − 1 day` cutoff ahead of games players create. The state
-  guard is the idempotency of every publish path.
-- `CancelRound :one` (same guard, sets `notes`),
-  `CancelPairingsForRound :exec`.
-- `DeleteRoundPairings/Byes/DoubleGames/Exclusions :exec` — regenerate.
-- `UpdatePairingColours :one`, `DeletePairing :execrows`, `InsertEditedPairing`
-  (swap = delete two, insert two in one tx, avoiding a transient hit on
-  the `(round, white, black)` index), `MarkPairingFailed` (exists), all
-  `WHERE` the round is a draft (or published, for *Mark failed*), setting
-  `edited_by` and nulling diagnostics.
-- `ListDraftsDue :many` — `state='draft' AND publish_at <= now()` for
-  the sweep.
-- Dashboard: `GetLatestPublishedRound`, `GetPairingForUserInRound`,
-  `GetExclusionForUserInRound`, `CountByesForUser`,
-  `CountDoubleGamesForUser`, `GetLastByeForUser`.
-
-`internal/settings` gains, with defaults from §4.2 and `applyOverride`
-cases: `PairingCron`, `PairingMode` (`review_window` | `auto_publish`),
-`ReviewWindowHours` (≥ 0), `AvoidRecentRounds` (≥ 0),
-`ColorWeight` (≥ 0), `RepeatPenalty` (> 0), `OddPoolStrategy`
-(`double_then_bye` | `bye_only`), `Rated`. `Load` validates ranges and
-enum values and fails naming the key: there is no settings UI until
-Phase 6, and a bad row typed into psql must fail the next
-`generate-round` run visibly rather than default silently.
+1. **Game creation has an on/off switch: `pairing.game_creation` =
+   `manual` (default) | `lichess`.** In plain words: with `manual` the
+   site behaves as today (players start games by hand); with `lichess`
+   it creates them. The code can ship and be tested before the
+   organiser account (§14.3, still open) exists, and if automation
+   misbehaves an admin turns it off with one `ic setting` and the
+   league carries on by hand. The token gate of §5.7 item 6 applies
+   only under `lichess`, which is exactly what spec §5.7's Phase 4 note
+   anticipates. Each round records the mode it was published under
+   (`rounds.game_creation`, below).
+2. **"Database first, Lichess after."** Every Lichess call that follows
+   from a change in our data (create a round's games, withdraw a missed
+   challenge) runs in a river job that is queued *in the same
+   transaction* as the change. In plain words: the round is marked
+   published and its "create the games" job is written in one step, so
+   either both happen or neither does; the job then talks to Lichess
+   outside any database transaction and records what it created. This
+   deliberately replaces Phase 4's idea of calling Lichess *inside* the
+   publish transaction (the comment at the top of `internal/rounds`): a
+   transaction held open across a 60-second 429 wait is bad, and worse,
+   a crash after Lichess created the games but before our commit would
+   roll back our record while the games exist. Each job is
+   **idempotent** (safe to run twice) and **reconciles before acting**:
+   `create-games` first lists the organiser's recent bulks (`GET
+   /api/bulk-pairing`) and adopts one that already matches the round's
+   pairings, so a retried job never creates the games twice.
+3. **Every publish path creates games the same way.** The web layer and
+   the CLI get a job enqueuer (an insert-only river client in the CLI,
+   the running client in `serve`), passed through the existing
+   `rounds.Scheduler` interface. A side effect worth having: a draft
+   made with *Generate now* or `ic generate-round` now gets its own
+   publish job, so it publishes when its window ends instead of up to
+   an hour later (spec §8.5 note amended).
+4. **Tokens are checked at publication, not only weekly.** The first
+   thing `create-games` does is one `POST /api/token/test` over the
+   round's players. The weekly `validate-tokens` (§7) stays — it drives
+   the pool gate, the player's re-authorise prompt and the organiser
+   token alert — but with a 24-hour review window it can be a day stale
+   by publication, and bulk pairing is all-or-nothing, so §6.3 4(a)
+   "rely on validate-tokens having run just beforehand" is not enough
+   on its own.
+5. **Who gets which kind of game** (§3.3, §6.3 step 1):
+   - both players' tokens valid → **bulk**;
+   - one valid → a **challenge sent by the player whose token works**,
+     with `color` set to their assigned colour; the other must accept;
+   - neither valid → stays **manual** (today's behaviour).
+   A token "works" when it is stored, not revoked, not expired,
+   carries `challenge:write`, and passed the publication probe.
+6. **The grace rule is a pool exclusion, not a flag flip.** §3.3 says a
+   player whose token has been invalid for more than
+   `token.invalid_grace_days` is "automatically set to inactive … until
+   they re-authorise". Flipping `is_active` would need undoing on
+   re-authorisation and would overwrite the player's own choice.
+   Instead the pool computes it live: invalid for longer than the grace
+   → excluded with `no_valid_token` (the dashboard says why and how to
+   fix it); re-authorising restores them for the next round with
+   nothing to undo. "Invalid since" is `revoked_at`, or `expires_at`
+   once passed. **A player with no token row at all** (seeded, never
+   signed in) is excluded at once, with no grace: grace is for a token
+   that lapsed, and this also means the site can never send a surprise
+   challenge to a seeded real member from a test database.
+7. **`evaluate-activity` runs just before generation, not after it.**
+   §7 says "weekly, after round generation"; §6.4 says a challenge
+   "still pending when the next round generates" is a missed start. Run
+   after generation, a player reaching their second miss would already
+   be in the new round, and their next challenge would go unaccepted
+   too. So generation (scheduled, *Generate now*, `ic generate-round`)
+   first runs `evaluate-activity` in its own transaction with its own
+   `job_runs` row, then generates. A failed evaluation is visible but
+   does not block generation.
+8. **Unstarted pairings and missed starts, precisely** (§6.4, §5.8):
+   - At evaluation, **every still-`pending` pairing of a published
+     round is marked `failed`**, whatever its kind — challenge,
+     hand-started (both tokens lapsed, automation gave up, or the whole
+     league under `manual`). It stops counting toward caps: the §5.8
+     caveat Phase 4 left to this job, and the end of the admin's
+     weekly *Mark failed* chore (the button stays for exceptions).
+   - A `MissedStart` is recorded **only for a challenge pairing, for
+     the player who had to accept** — the one case where we know who
+     did not act. For a hand-started pairing we cannot tell: either
+     player could have challenged, and Lichess shows us no challenge
+     that was sent and ignored. When automation gave up, the failure
+     was the league's, not theirs. So those pairings are retired
+     without a missed start and never lead to an auto-pause — the same
+     outcome as today, minus the chore. Never for bye or capacity-skip
+     rows either (§5.8, §6.2 6b).
+   - The missed challenge is withdrawn on Lichess (a job, decision 2)
+     so a late acceptance cannot create a game that never counts.
+   - "Consecutive" = missed starts recorded after both the player's
+     latest started league game and their latest resume. At
+     `missed_starts_to_pause − 1` they are warned; at
+     `missed_starts_to_pause` `auto_paused_at` is set and they are
+     notified with the resume link.
+9. **`validate-tokens` runs one hour before `pairing.cron`** (§7). Its
+   schedule is `pairing.cron` shifted by −1h (a ten-line wrapper around
+   the parsed cron schedule), so it follows the setting, `CRON_TZ=`
+   included.
+10. **Admin alerts are computed, not stored.** §10's "job failure,
+    token expiry → admins, on-site" is a banner on admin pages built
+    from the same data as `/health` (a watched job's latest run failed;
+    the organiser token invalid or expiring within 14 days), rather
+    than a notification row per failure. `/health` also turns 503 when
+    `game_creation = lichess` and the organiser token is invalid — the
+    P1 alert of §3.2. *Added at step 0 review (maintainer,
+    2026-09-28):* the banner also says when a draft is waiting for
+    review and when it will publish itself — spec §6.1's "admins are
+    notified", which this plan had left out. One query on the draft.
+11. **Notifications are idempotent.** `Notification` gains a nullable
+    unique `dedupe_key` (e.g. `round:201:paired:<pairing id>`), so a
+    retried job never notifies twice.
+12. **Lichess PMs: not in Phase 5** *(maintainer, 2026-09-24).* Phase 5
+    builds the on-site notification centre; the only Lichess message is
+    the one bulk pairing sends by itself. Custom PMs, if still wanted,
+    come from the organiser account in Phase 6. No player is ever asked
+    to re-authorise for `msg:write`.
+13. **A published round is final** *(maintainer, 2026-09-24).*
+    "Cancelling a published round" was never in the original spec: it
+    was written into §8.5 and §12 by the Phase 4 plan (`895c12c`) as a
+    reading of §6.3's line about cancelling a *scheduled bulk during the
+    review window* — a design Phase 4 replaced (nothing reaches Lichess
+    before publication). After publication an undo cannot be clean:
+    the games exist, Lichess has messaged the players, hand-started
+    games are out of reach, and aborting bulk games would rest on
+    undocumented behaviour. The review window is the undo; a mistake
+    after it is lived with or repaired pairing by pairing. Known gap,
+    for Phase 6's player management: voiding a single game that exists
+    (e.g. a player banned for cheating mid-week).
+14. **The inactivity check-in (§8.4): deferred** *(maintainer,
+    2026-09-24).* Once games are created automatically, a player who
+    stops playing still gets a game every week, and each ends by
+    timeout — so "has not finished a game in 3 weeks" no longer
+    describes a dormant player. Revisit with real data (e.g. a run of
+    losses on time).
+15. **When Lichess keeps refusing a round's bulk, players start those
+    games by hand** *(maintainer, 2026-09-24)*, instead of the pairings
+    being marked `failed` as §6.3 4(c) says:
+    - `create-games` gets a longer retry budget than the other jobs
+      (10 attempts, which river's default back-off spreads over roughly
+      four hours), so a short outage is ridden out first;
+    - on the last failed attempt the round's creation is marked
+      `gave_up`, the pairings stay `manual_external` / `pending`, and
+      both players are told on-site to challenge their opponent by
+      hand; the dashboard shows the Phase 4 "challenge them" link;
+    - **players who never start them** are handled by decision 8: a
+      reminder 48 hours after publication ("your game against X hasn't
+      started yet"), then the pairing is retired at the next
+      generation, no missed start, no auto-pause;
+    - *Retry game creation* on the round page first runs the §7.3
+      search for the round's pending pairings, so a game a player has
+      already started by hand is attached rather than duplicated; the
+      players whose games it then creates are told "your game has now
+      been created — don't start another".
 
 ---
 
-## Engine — `internal/pairing` (pure, no I/O)
+## Schema (one migration per step that needs it)
 
-Mirrors `internal/scoring` and `internal/matching`: plain structs in,
-plain structs out, exhaustively unit-tested. Integers throughout (power
-ratings are `int32` in the database); no `time.Now()`, no float.
+Phase 4 used one migration up front; here each feature step brings its
+own, so each commit stands alone.
+
+- **Step 2** `00012_notifications.sql`: `notifications` (§4.1, plus
+  `dedupe_key text UNIQUE`, index on `(user_id, read_at)`),
+  `notification_preferences` (§4.1; a row only for a category a player
+  turned off).
+- **Step 5** `00013_game_creation.sql`: `rounds.game_creation`
+  (enum `manual` | `creating` | `created` | `gave_up`, NOT NULL DEFAULT
+  `manual`; existing rounds are `manual`), set at publication and by
+  `create-games`; `rounds.games_created_at timestamptz`.
+- **Step 7** `00014_missed_starts.sql`: `missed_starts` (§4.1, plus
+  `pairing_id` and `UNIQUE (round_id, user_id)`),
+  `player_profiles.resumed_at timestamptz` (resets the streak).
+
+No column for challenge ids (the challenge id *is* the game id, stored
+in `pairings.lichess_game_id`). `rounds.bulk_pairing_id` already
+exists. The §11 deletion checklist gains `notifications`,
+`notification_preferences`, `missed_starts`.
+
+## Settings (added to `internal/settings`, validated at load)
+
+`pairing.game_creation` (`manual` | `lichess`, default `manual`),
+`token.invalid_grace_days` (≥ 0, 14), `activity.missed_starts_to_pause`
+(≥ 1, 2). `pairing.days_per_move` gains validation against Lichess's
+set {1, 2, 3, 5, 7, 10, 14} — a value outside it would make every bulk
+fail. `LICHESS_ORG_TOKEN` (§2.2) joins `internal/config`; a
+`create-games` run under `lichess` without it fails, naming it.
+
+## Lichess client (`internal/lichess`, step 1)
+
+New `API` methods, each taking the bearer explicitly like `Account`:
 
 ```go
-type Player struct {
-    ID            string       // users.id; the only tie-break key
-    Status        Status       // Active, Inactive, Paused, AutoPaused
-    PowerRating   int
-    ColorScore    int
-    InFlight      int          // decision 7
-    MaxConcurrent *int         // nil = unlimited — never coerced
-    AcceptsDouble bool
-    LastDoubleRound, LastByeRound *int
-    DoubleCount, ByeCount int
-}
-type Config struct {
-    RoundNumber, AvoidRecentRounds, ColorWeight, RepeatPenalty int
-    OddPool OddPoolStrategy    // DoubleThenBye | ByeOnly
-}
-type History map[[2]string]int   // unordered pair (ids sorted) → most recent round met; only ever looked up
-type Pairing struct { White, Black string; RatingGap, ColorPenalty int; RepeatOfRound *int }
-type Exclusion struct { ID string; Reason Reason; InFlight, Cap int }
-type Result struct {
-    Pairings   []Pairing
-    Exclusions []Exclusion
-    DoubleGame *string; Bye *string
-    PoolSize, RepeatPairings int
-}
-func Generate(players []Player, history History, cfg Config, solve Solver) Result
+CreateBulkPairing(ctx, organiser tokencrypt.Secret, req BulkPairingRequest) (BulkPairing, error)
+ListBulkPairings(ctx, organiser tokencrypt.Secret) ([]BulkPairing, error)
+TestTokens(ctx, tokens []tokencrypt.Secret) (map[tokencrypt.Secret]*TokenInfo, error) // batches of 1000
+CreateChallenge(ctx, challenger tokencrypt.Secret, opponent string, req ChallengeRequest) (Challenge, error)
+CancelChallenge(ctx, challenger tokencrypt.Secret, id string) error
 ```
 
-Steps, each a named function with its own table test:
+- A 400 from bulk pairing is a `*BulkRejection{Tokens
+  map[tokencrypt.Secret]string, Message string}`; its `Error()` names
+  the count and the reasons, never a token. The raw body is never kept.
+- `BulkPairing` does not require `clock` (correspondence bulks send
+  `correspondence.daysPerTurn`).
+- `Fake` grows matching state and knobs: bulks, challenges, token
+  info, tokens to reject, per-method errors, and a record of every call
+  (with which token) for assertions.
+- Tests against `httptest.Server` with fixtures shaped like the
+  documented examples, including every 400 body variant.
 
-1. **Pool** (§6.2 step 1, §5.7, §5.8): status filter → exclusion rows;
-   `scoring.CapacityAllows(max, inFlight)` → `at_capacity` rows carrying
-   the count and the cap; each survivor exactly once.
-2. **Order**: `slices.SortFunc` with the total order
-   `power_rating DESC, ID ASC` (`sort.Slice` is not stable and is not
-   used). This order is the greedy scan order and the stored `position`.
-3. **Odd pool** (step 6), decided *before* solving so the volunteer's
-   second slot is part of the matching. `bye_only` skips 6a. Otherwise
-   the volunteer is chosen by **rotation only** — `AcceptsDouble`,
-   `CapacityAllows(max, inFlight+2)` (nil passes), then longest since
-   last double (never = infinity), fewest doubles, ID — never by cost
-   or rating; the engine does not "try each candidate". No candidate →
-   the bye: longest since last bye, fewest byes, ID; **never** rating,
-   level, XP or results (the test shuffles ratings and asserts the same
-   recipient). The bye player leaves the pool with a `bye` exclusion
-   *and* a bye row; the volunteer is duplicated as a second slot. A pool
-   of one is a bye with no pairings; a pool of zero is an empty round.
-4. **Cost** (step 3): `|Δpower| + ColorWeight·colour_penalty(a,b) +
-   (RepeatPenalty if met within the window)`. `colour_penalty` returns
-   both the value and the argmin so step 6 cannot disagree with it. The
-   volunteer's two slots are not an edge at all.
-5. **Solve** via `Solver`. `Greedy`: first pair the volunteer's two
-   slots with their two cheapest **distinct** partners (otherwise the
-   scan can strand the two copies as the last unmatched pair), then walk
-   the ordered list pairing each unmatched slot with its cheapest
-   unmatched partner; ties → `(cost, lower ID, higher ID)`. `Blossom`
-   (decision 1) is the later drop-in, fed edges pre-sorted by that same
-   total order so its output does not depend on insertion order.
-6. **Colours** (step 5): the argmin from the cost; on a tie the
-   lower-rated player takes white, then lower ID. For the volunteer's
-   two games the assignment is made **jointly**: of the two ways to give
-   them one white and one black, take the smaller total leftover
-   imbalance, then the tie-break — the hard one-white-one-black
-   constraint of step 6a. The realised penalty (which may differ from
-   the per-pair argmin used in the cost) is what gets stored.
-7. **Diagnostics**: gap, penalty, repeat round per pairing;
-   `RepeatPairings` on the result.
-8. **Post-conditions** (asserted in tests on every fixture): each user
-   appears in at most one pairing, except the volunteer in exactly two
-   with one white and one black; no `(A,B)`+`(B,A)`; nobody excluded is
-   paired; `PoolSize` = paired + bye.
+## Game creation at publish (`internal/rounds/create.go`, steps 5–6)
 
-Determinism is a test, not a comment: the same input in three different
-slice orders yields identical results, and a round regenerated from the
-stored inputs equals the stored round.
+`rounds.Publish` (and `Generate` under `auto_publish`) keeps its
+guarded update, records `rounds.game_creation` from the setting and,
+under `lichess`, sets it to `creating` and enqueues `create-games
+{round_id}` in the same transaction (unique per round while pending or
+running, `MaxAttempts` 10). The job:
 
-Tests (§11, table-driven, hand-built fixtures): colour balancing (both
-worked examples from §6.2); repeat avoidance inside and just outside the
-window; **the NULL-cap test** — a player with `MaxConcurrent == nil` and
-40 in-flight games is paired in every one of 20 simulated rounds and
-never appears in an exclusion; cap 4 reproduces the §5.8 worked-example
-table; double game with and without a volunteer, two distinct opponents,
-one white one black, `inFlight + 2` gate, opt-out respected, `bye_only`,
-the `[A, B, V]` pool where A's cheapest partner is B; bye rotation
-fairness over 200 simulated rounds with an odd pool and no volunteers
-(max − min bye count ≤ 1); a pool of 2 who just met still pairs (repeat
-recorded); pools of 1 and 0; greedy vs. brute force on every pool ≤ 6
-— run against greedy regardless of decision 1, so the distance from
-optimal is known and the double-game failure mode is pinned.
+1. Loads the round and its pairings still `manual_external` /
+   `pending` / no game id. None → `created`, done.
+2. **Reconciles:** `ListBulkPairings`; a bulk whose games match some of
+   these pairings (same white and black, created after
+   `published_at`) is adopted instead of re-created. On a retry from
+   the round page, also the §7.3 search (decision 15).
+3. **Probes** the players' tokens (`TestTokens`); a failing token is
+   marked revoked on the spot and the player notified.
+4. **Partitions** (decision 5).
+5. **Bulk:** one request, `days` / `rated` from the round's
+   `settings_used`, no `pairAt` (immediate), `message` = "Infinite
+   Correspondence round {n}: your game with {opponent} is ready:
+   {game}". On a `BulkRejection` naming tokens: mark them revoked, move
+   those pairings to the challenge / manual partition, resubmit — at
+   most 3 submissions per run. Any other refusal fails the run (river
+   retries; the last attempt gives up, decision 15). The result is
+   committed right after the call: `bulk_pairing_id`, each pairing
+   `creation_method = bulk`, `status = created`, game id.
+6. **Challenges** (step 6): one call each with the challenger's token;
+   each committed on its own right after the call, so a crash can at
+   worst leave one duplicate challenge; a failed call leaves that
+   pairing manual and does not stop the others.
+7. `game_creation = created`, `games_created_at`; notifications;
+   enqueue a `sync-games` run so the Overview shows the games within
+   minutes rather than an hour.
 
----
+Pairing status only ever moves with a guarded update (`WHERE status =
+'pending' AND lichess_game_id IS NULL`), so an admin's *Mark failed* in
+the meantime wins.
 
-## Rounds service — `internal/rounds`
+## Token health (`validate-tokens`, step 4)
 
-The I/O layer around the engine; every entry point is one transaction
-and starts with `GetRoundForUpdate` where a round exists.
+Weekly at `pairing.cron − 1h` (decision 9), and `ic validate-tokens`.
+Decrypts every stored token, one `TestTokens` call per 1000, then per
+token: valid with `challenge:write` → `last_validated_at`, `expires_at`
+refreshed; `null` or missing scope → `revoked_at = now()` (if not
+already) and a `token` notification (deduplicated per revocation). The
+organiser token is tested in the same call; its state goes in the run's
+detail for `/health` and the admin banner. Outcome rules as §7.2 (all
+calls failed → failed run).
 
-- `Generate(ctx, tx, cfg, now, source, scheduler)`: `NextRoundNumber`;
-  `ListPairingPool` + `ListRecentOpponents` → `pairing.Generate`; insert
-  the round — `review_window`: `draft`, `publish_at = pair_at = now +
-  ReviewWindowHours`; `auto_publish`: `published`,
-  `published_at = publish_at = pair_at = now`. Then pairings (`manual_external`,
-  `pending`, `position`, diagnostics), byes, double games, exclusions,
-  an audit row (`round.generate`, entity `round`). A `rounds_one_draft`
-  violation is returned as `ErrDraftExists`. With a scheduler present
-  (the server) and a draft, it `InsertTx`es the `publish-round`
-  job with args `{RoundID, PublishAt}` and `UniqueOpts{ByArgs}` —
-  `PublishAt` is in the args because river treats a completed job with
-  the same args as a duplicate, so a regenerated round would otherwise
-  keep the *old* schedule. The CLI passes no scheduler; the hourly sweep
-  covers it (documented).
-- `Publish(ctx, tx, roundID, now, actor)` — lock, `PublishRound`
-  (guarded); zero rows means "already published or cancelled", which
-  every caller treats as success (the scheduled job, the sweep and an
-  admin's *Publish now* can race; the row guard makes the first one win).
-  Audit `round.publish`.
-- `Cancel(ctx, tx, roundID, reason, actor)` — drafts only; cancels the
-  pairings; cancels the pending `publish-round` job (`JobCancelTx`) if
-  any; audit `round.cancel`. Cancelling a **published** round is out of
-  scope for Phase 4 (games may exist; §6.3's bulk cancel is Phase 5).
-- `Regenerate(ctx, tx, roundID, cfg, now, actor)` — draft only: delete
-  its pairings / byes / doubles / exclusions, rerun the engine into the
-  same row (same number; `generated_at`, diagnostics and `settings_used`
-  refreshed; `publish_at` unchanged), cancel and re-insert the publish
-  job. Audit `round.regenerate` with the old pairing list as `before`.
-- Pairing edits, drafts only, server-side enforced, each with
-  `edited_by`, nulled diagnostics and an audit row (`pairing.flip`,
-  `pairing.remove`, `pairing.swap`): flip colours; remove (both players
-  get a `removed_by_admin` exclusion so the dashboard can say so; if the
-  removed pairing was one of the volunteer's two, their `double_games`
-  row goes too); swap opponents between two pairings (`A.white–B.black`,
-  `B.white–A.black`, colours re-derived by the engine's colour step so a
-  swap never worsens balance). *Mark failed* on a published round's
-  pending pairing (`pairing.fail`) is the manual stand-in for Phase 5's
-  missed-start job (decision 7).
-- The `audit` helper in `auth.go` hard-codes `entity_type = "user"`;
-  it gains an `entityType` parameter (`import_pairings.go` already
-  writes `round` / `pairing` types directly — one helper, not two).
-- `import-pairings` (`getOrCreateRound`): unchanged apart from the
-  `GetRoundByNumber` guard; finding a `draft` with its number is
-  refused like any other conflict. It stays a transition/dev tool.
+Pool: `ListPairingPool` gains a base-table `LEFT JOIN oauth_tokens`
+(check the generated struct for pointer types — CLAUDE.md);
+`rounds.statusOf` gains the `no_valid_token` case last, after
+inactive, paused and auto-paused (§5.7's order), only under `lichess`.
+The engine gets `StatusNoValidToken` → `ReasonNoValidToken`, with table
+tests.
 
-### Jobs (`cmd/ic`, same pattern as `recompute.go`)
+## Unstarted pairings, missed starts, auto-pause (`evaluate-activity`, step 7)
 
-| Job | Trigger | Body |
+As decisions 7 and 8. Lives in `internal/activity` (the streak rule is
+a pure function with its own unit tests); called by the three
+generation entry points through one helper; `ic evaluate-activity`.
+`handleResume` sets `resumed_at`. `cancel-challenge {pairing_id}` is
+enqueued for each missed challenge. The 48-hour "hasn't started yet"
+reminder (challenge and hand-started pairings alike) is sent by the
+hourly `sync-games`, deduplicated per pairing.
+
+## Notifications (`internal/notify`, step 2 onward)
+
+- `notify.Send(ctx, q, Notice{User, Category, Title, Body, Link, Key})`
+  checks the player's preference (except account-critical categories:
+  `registration`, `auto_pause`, `token`) and inserts with `ON CONFLICT
+  (dedupe_key) DO NOTHING`, in the caller's transaction.
+- Categories and emitters: `registration` (approve / reject,
+  `admin.go`); `round` (paired / bye / double game at publication,
+  worded for how the game is created; "couldn't be created, challenge
+  X" when creation gives up; "now created" after a retry); `challenge`
+  (you must accept); `unstarted` (the 48h reminder); `missed_start`
+  (the warning); `auto_pause`; `token`; `level_up` (`syncOneGame`, from
+  `Recompute`'s `leveledUp`).
+- UI: a bell with the unread count in `layout.html` (one count query
+  for a signed-in user); `/account/notifications` (list, mark one or
+  all read); a "Notifications" block on `/account` with a checkbox per
+  opt-out-able category. The token banner on `/account` shows
+  regardless (§10: the only channel certain to work then).
+
+## Admin and dashboard changes
+
+- **Round page:** per pairing — creation method, status, game link;
+  round — game-creation line (`manual` / creating / created at … with
+  the bulk id / gave up, see job) and *Retry game creation* when it
+  gave up or some pairings are still hand-started.
+- **`/admin/tokens`** (nav "Tokens"): players without a valid token,
+  since when, days of grace left (§3.3 item 3); the organiser token's
+  state and expiry.
+- **Admin banner** (decision 10).
+- **`/health`:** `jobNames` gains `validate-tokens`, `create-games`,
+  `evaluate-activity`; an `organiser_token` field.
+- **`/account`:** real token status from `last_validated_at` and
+  `revoked_at` (the "checked at sign-in" copy goes); the re-authorise
+  banner with the consequence in plain words and the grace countdown;
+  "This week" worded per case — bulk: the game link; being created:
+  "your game is being created"; challenger: "we challenged X for you,
+  waiting for them to accept"; challenged: "accept X's challenge" with
+  the link; hand-started: as today; the missed-start warning;
+  notification preferences.
+
+## Jobs after Phase 5
+
+| Job | Trigger | New? |
 |---|---|---|
-| `generate-round` | `pairing.cron` via a `PeriodicSchedule` from `robfig/cron` (decision 2); also `ic generate-round` and the admin button | `rounds.Generate(source=schedule)`; `ErrDraftExists` is a *failed* run with that message, visible on `/admin/jobs` and `/health` |
-| `publish-round` | scheduled once at `publish_at`, unique on `{RoundID, PublishAt}` | `rounds.Publish`; no-op if not draft |
-| `publish-round-sweep` | `PeriodicInterval(time.Hour)` | `ListDraftsDue` → `Publish` each; the safety net of §7 |
-
-`jobs.Handlers` gains `GenerateRound`, `PublishRound(roundID)`,
-`PublishSweep`; `ops.jobNames` gains the three so `/health` watches
-them. `pairing.cron` is read once at start-up; changing it needs a
-restart until Phase 6's settings UI can call `PeriodicJobs().Remove/Add`
-— documented in the README. River does not catch up a firing missed
-while the binary was down; §6.1's manual generation covers that, and the
-admin page says so.
-
----
-
-## Admin — `/admin/rounds`
-
-Routes in the existing `requireAdmin` group:
-
-```
-GET  /admin/rounds                          list: number, state, generated, publish_at, pairings, byes, source; "Generate now"
-POST /admin/rounds/generate                 synchronous rounds.Generate(source=manual) recording a job_runs row; ?error=draft-exists
-GET  /admin/rounds/{id}                     round view (below)
-POST /admin/rounds/{id}/publish             Publish now (draft only)
-POST /admin/rounds/{id}/cancel              reason required (the <details> pattern)
-POST /admin/rounds/{id}/regenerate
-POST /admin/rounds/{id}/pairings/{pid}/flip
-POST /admin/rounds/{id}/pairings/{pid}/remove
-POST /admin/rounds/{id}/pairings/{pid}/fail  published rounds, pending pairings only
-POST /admin/rounds/{id}/pairings/swap       fields: a, b (pairing ids)
-```
-
-Round view, top to bottom: state banner (draft: "auto-publishes at …"
-/ published / cancelled + reason); **diagnostics panel** (§8.5): pool size, odd-pool
-outcome with who and why, repeat pairings accepted, settings used, the
-§5.8 reminder that the pool is not recalculated during the review window
-(regenerate to pick up changes); **exclusions** grouped by reason with
-count / cap for capacity; **pairings table** — position, white, black,
-both power ratings, gap, colour penalty, repeat-of-round, edited marker,
-per-row Flip / Remove (drafts) or Mark failed (published, pending);
-swap form; round actions. Generation runs in-request: the engine on a
-200-player pool is milliseconds and there is no Lichess call, so the web
-layer needs no river client (the publish job for an admin-generated
-draft is picked up by the sweep, at most an hour late — or `Deps` gains
-a narrow `Scheduler` interface; decided at step 4 by how small it is).
-Nav gains **Rounds** (`nav = "rounds"`); page list gains `admin_rounds`,
-`admin_round`. New Tailwind classes → `make css`.
-
-## Dashboard slot (`/account`)
-
-- **This week**, approved members only, about the latest *published*
-  round (a draft is never shown — it can still change). Exactly one of:
-  - **paired** — opponent and colour; a link to the game once
-    `sync-games` has found it, otherwise to the opponent's Lichess
-    profile to challenge them (until Phase 5 creates the game);
-  - **paired twice** (the double-game volunteer) — both games, one
-    white and one black;
-  - **pairing marked failed** — the opponent, "marked as not played";
-  - **bye** — the neutral §8.3 sentence, never worded as a penalty;
-  - **excluded** — the reason in plain words: at capacity with the
-    numbers, paused / auto-paused / inactive in one short line (the
-    banners above carry the detail), removed by an admin;
-  - **not in the pool** (no pairing, no exclusion row) — approved after
-    the round was paired: "you'll be in the next one";
-  - no published round yet → the section is absent.
-- **Bye history** in the same section: count and last round.
-  **Double games**: "You've played N double games" in the existing
-  section.
-- **`GetPairingForUserInRound` becomes `:many`** (and so
-  `ListPairingsForUserInRound`): as `:one` it is a `QueryRow`, which
-  would silently show the double-game volunteer only one of their two
-  opponents.
-- `standings.Recompute` sets `is_eligible = approved ∧ active ∧
-  ¬paused_by_admin ∧ auto_paused_at IS NULL` (the `00006` comment) as a
-  display column; the pool query never reads it. `handleResume` gains
-  the same in-transaction `Recompute` as `handleSetActivity`, otherwise
-  a resumed player stays ineligible until the nightly recompute. The
-  `dashboard.go` comment saying eligibility derives from `is_active`
-  alone is updated.
-
----
+| `validate-tokens` | `pairing.cron − 1h`; `ic validate-tokens` | new |
+| `evaluate-activity` | first step of every generation; `ic evaluate-activity` | new |
+| `generate-round` | `pairing.cron`, *Generate now*, `ic` | unchanged |
+| `publish-round` / `publish-round-sweep` | as Phase 4; every draft now gets its job | unchanged |
+| `create-games` | queued by publication under `lichess`; *Retry*; `ic create-games <n>` | new |
+| `cancel-challenge` | queued by a missed start | new |
+| `sync-games` | hourly, and once after `create-games`; sends the 48h reminder | small change |
 
 ## Module layout (additions)
 
 ```
-internal/db/migrations/00011_pairing.sql
-internal/db/queries/rounds.sql                 new queries; pairings.sql / games.sql edits above
-internal/settings/settings.go                  eight pairing keys (+ pairing.solver, step 6b), validation, tests
-internal/pairing/{pairing,pool,odd,cost,colours,solver_greedy}.go + _test.go   pure engine
-internal/pairing/solver_blossom.go             step 6a; selectable through pairing.solver in 6b
-internal/rounds/{rounds,generate,publish,edit}.go + _integration_test.go
-internal/jobs/jobs.go                          three handlers, cron schedule
-cmd/ic/{generate_round,publish_round,setting}.go, main.go, serve.go, import_pairings.go
-internal/web/rounds.go, templates/admin_rounds.html, admin_round.html, layout.html (nav), server.go (pages), router.go
-internal/web/dashboard.go, templates/account.html   this-week slot
-internal/web/auth.go                            audit() entity type parameter
-internal/standings/standings.go                 is_eligible, in-flight count
-README.md, CLAUDE.md, docs/infinite-correspondence-spec.md
+internal/lichess/{bulk,challenge,tokens}.go (+ tests, fake.go)
+internal/notify/notify.go (+ tests)
+internal/activity/activity.go (+ tests)
+internal/rounds/create.go (+ integration tests)
+internal/pairing/pool.go                      StatusNoValidToken
+internal/jobs/jobs.go                          new kinds, offset schedule, insert-only client
+internal/db/migrations/00012–00014, queries/{notifications,tokens,activity}.sql
+cmd/ic/{validate_tokens,create_games,evaluate_activity}.go
+internal/web/{notifications,tokens}.go, templates/{notifications,admin_tokens}.html, layout.html, account.html, admin_round.html
 ```
 
-Dependency direction: `web`, `cmd/ic` → `rounds` → `pairing`, `gen`;
-`pairing` imports only `scoring`. New Go dependency: `robfig/cron/v3`
-(decision 2) — none otherwise.
+Dependency direction unchanged: `web`, `cmd/ic` → `rounds`,
+`activity`, `notify` → `pairing`, `lichess`, `gen`. **No new Go
+dependency.**
 
 ---
 
 ## Build order
 
-Each step is a self-contained commit point; work stops after each for
-review (`CLAUDE.md`). No test touches the live API.
+Each step is a commit point; work stops after each for review
+(CLAUDE.md). No test touches the live API.
 
-1. **Schema, queries, settings** — migration, `rounds.sql`, the
-   `sync-games` published-only filter (with a test: a draft pairing is
-   never returned), `CountInFlightGamesForUser` and its two callers,
-   `make sqlc`, settings keys with validation tests, the
-   `GetRoundByNumber` guard.
-   Suggested: `feat(db): rounds, byes, double games and exclusions for pairing`.
-2. **Engine** — `internal/pairing` with the greedy solver and the full
-   §11 unit suite (no DB).
-   Suggested: `feat(pairing): deterministic pairing engine with greedy solver`.
-3. **Rounds service and jobs** — `internal/rounds`, the three jobs,
-   cron schedule, `ic generate-round` / `ic publish-round <n>` /
-   `ic setting`; integration tests: a generated round round-trips the
-   engine's result; the NULL-cap player is paired with 40 in-flight
-   games; one exclusion row per reason; a review-window draft schedules
-   exactly one publish job and regenerate reschedules it; auto-publish
-   publishes in-tx with `pair_at = published_at`; a second generate
-   fails with `ErrDraftExists`; publish is
-   idempotent under three callers; regenerate replaces rows and keeps
-   the number; history queries ignore drafts and cancelled rounds.
-   Suggested: `feat(rounds): scheduled round generation, review window and publication`.
-4. **Admin rounds** — pages, handlers, guard test (`TestAdmin_RoleChecks`
-   pattern), one test per action (edits on a published round → 409),
-   edited rows carry `edited_by`, nulled diagnostics and an audit row,
-   `make css`.
-   Suggested: `feat(admin): round management and pairing diagnostics`.
-5. **Dashboard slot and eligibility** — this-week block, counts,
-   `is_eligible`; a test per sentence.
-   Suggested: `feat(web): this week's pairing, byes and exclusions on the dashboard`.
-6. **Blossom solver, selectable by a setting** *(decision 1, amended
-   2026-09-22: the maintainer keeps both solvers and lets the admin
-   choose, rather than replacing greedy)*. A new setting
-   `pairing.solver` = `"greedy"` (default, today's behaviour) |
-   `"blossom"`; each round records its solver in `settings_used` and
-   the admin round view shows it. Two commit points:
-   - **6a — the solver, not wired in.** `internal/pairing/solver_blossom.go`:
-     a hand port of van Rantwijk's `mwmatching.py` (licence checked
-     first; no Go dependency), run as maximum-cardinality
-     maximum-weight matching on `M − cost`, which on a graph where
-     every complete pairing has the same size is exactly the
-     minimum-cost perfect matching. Edges fed in the §6.2 step 4 order
-     `(cost, lower id, higher id)`. Tests: same total cost as brute
-     force on the corpus up to 8 slots; valid matchings; the
-     A 2000 / B 1990 / C 1600 / D 1590 rematch example; determinism
-     under shuffled input; a 200-player pool plus a benchmark; the
-     engine's table tests under both solvers.
-     Suggested: `feat(pairing): minimum-weight perfect matching solver`.
-   - **6b — the setting and the wiring.** `settings.Solver` with
-     validation; `rounds.Snapshot.Solver` and `solverFor(cfg)` at both
-     `pairing.Generate` call sites; the admin *Generate now* and
-     *Regenerate* handlers reload settings per request instead of
-     using the start-up copy (otherwise a solver switch, or any
-     pairing-weight change, is ignored until a restart); the solver in
-     the diagnostics panel; spec §4.2 / §6.2 / §13 / §15, README.
-     Suggested: `feat(rounds): choose the pairing solver with pairing.solver`.
-7. **Docs and close-out** — README (routes, subcommands, cron restart
-   note, first-rounds runbook), `CLAUDE.md` repository-state paragraph,
-   spec amendments below, this file's "what was built" section.
-   Suggested: `docs: close out Phase 4`.
+0. **Plan and spec** — once Phase 4's live checks are recorded in
+   `PLAN.md`: this plan replaces it (as at the Phase 3→4 transition; the
+   Phase 4 record stays in git history), `PLAN_PHASE5.md` is removed,
+   and the spec amendments below are applied. *(Done 2026-09-28.)*
+   Suggested: `docs: plan Phase 5 automation and amend the spec`.
+1. **Lichess client** — the five methods, types, `BulkRejection`,
+   `Fake`, httptest tests; `LICHESS_ORG_TOKEN`; `days_per_move`
+   validation. No behaviour change.
+   Suggested: `feat(lichess): bulk pairing, challenges and token test`.
+2. **Notification centre** — migration, `internal/notify`, bell, page,
+   preferences, and the emitters that need no automation: registration
+   decision, level-up, round published / bye / double game (worded for
+   today's hand-started games).
+   Suggested: `feat(notify): on-site notification centre`.
+3. **Job enqueuer everywhere** — insert-only river client for the CLI,
+   the running client in web `Deps`, `rounds.Scheduler` passed at every
+   generation; drafts from *Generate now* / `ic` get their publish job.
+   Suggested: `refactor(jobs): enqueue jobs from the web and CLI`.
+4. **Token health** — settings `pairing.game_creation`,
+   `token.invalid_grace_days`; `validate-tokens` and the offset
+   schedule; the pool gate and engine status; `/account` token status
+   and banner; `/admin/tokens`; `/health` and the admin banner (the
+   draft awaiting review included).
+   Suggested: `feat(tokens): validate-tokens and the no_valid_token gate`.
+5. **Bulk pairing at publish** — migration, `create-games` (reconcile,
+   probe, bulk, rejections, record, give up to hand-started),
+   notifications, round page status and *Retry* (with the §7.3 search
+   first), `ic create-games`, "This week" for bulk games. One-token
+   pairings stay hand-started in this step. `CountInFlightGamesForUser`
+   counts a pairing until its game is ingested, not until it has a game
+   id (see "What Phases 1–4 already provide"), with a test: a capped
+   player with a bulk-created, not yet synced game is at capacity.
+   Suggested: `feat(rounds): create the round's games with bulk pairing`.
+6. **Challenge fallback** — one-token pairings → a challenge from the
+   token holder; "This week" for both sides.
+   Suggested: `feat(rounds): challenge fallback for a lapsed token`.
+7. **Unstarted pairings, missed starts, auto-pause** — migration,
+   `internal/activity`, `evaluate-activity` before generation,
+   retiring unstarted pairings, `cancel-challenge`, the 48h reminder,
+   `activity.missed_starts_to_pause`, resume reset, dashboard warning.
+   Suggested: `feat(activity): missed starts and auto-pause`.
+8. **Docs and close-out** — README (settings, jobs, the switch-on
+   runbook), `CLAUDE.md` repository state, spec, "What was built".
+   Suggested: `docs: close out Phase 5`.
 
----
+## Spec amendments (step 0, applied to `docs/infinite-correspondence-spec.md` on 2026-09-28, with a §15 entry)
 
-## Spec amendments (applied to `docs/infinite-correspondence-spec.md` on 2026-09-17, with a §15 changelog entry)
+- **§3.1 / §10 / §13** — `msg:write` is not a player scope: a message
+  is sent as the token's owner. Players are never asked for it; the
+  bulk `message` is the "game created" Lichess message; custom PMs are
+  Phase 6 at the earliest, from the organiser account (decision 12).
+  The §10 note "a revoked token cannot send a Lichess PM" goes with it.
+- **§3.3** — decisions 5 and 6 (who challenges whom; grace as a live
+  `no_valid_token` exclusion; no token row = excluded at once).
+- **§3.4 / §7.3** — a challenge's id is its game's id; challenge
+  pairings are re-checked by id, not searched.
+- **§4.1** — `Notification.dedupe_key`; `MissedStart.pairing_id` and
+  uniqueness; `PlayerProfile.resumed_at`; `Round.game_creation` and
+  `games_created_at`.
+- **§4.2** — `pairing.game_creation`; `days_per_move` allowed values.
+- **§5.7** — item 6 applies under `pairing.game_creation = lichess`.
+- **§6.3** — decisions 2, 4, 5 and 15: publication queues
+  `create-games`; tokens probed first; one bulk including the double
+  game (documented since v2.0.174); `pairAt` omitted, horizon moot;
+  reconciliation; the rejection body; give up to hand-started games,
+  not `failed`. The last paragraph (cancelling a scheduled bulk) goes:
+  no bulk is ever scheduled ahead.
+- **§6.4 / §7** — decisions 7–9: every unstarted pairing retired at
+  the next generation, missed starts only for challenges; the jobs
+  table as above.
+- **§8.3 / §8.5** — token status and banner, "This week" per case,
+  notifications; `/admin/tokens`, *Retry game creation*; **a published
+  round is final** (decision 13), replacing "Cancelling a published
+  round is Phase 5"; a manually generated draft publishes on time.
+- **§8.4** — deferred, with the reason (decision 14).
+- **§11** — deletion checklist gains the three tables.
+- **§12** — Phase 5 paragraph rewritten to this scope; "cancelling a
+  published round" removed from Phases 4 and 5.
+- **§13** — decisions 1, 5, 6, 7, 12–15 recorded.
+- **§14.3** — still open; now a prerequisite for switching
+  `pairing.game_creation` to `lichess`, not for building.
 
-- **§4.1** — `Round` gains `pool_size`, `odd_pool`,
-  `repeat_pairings`, `settings_used`; `number` unique among
-  non-cancelled rounds; at most one draft. `Pairing` gains `position`,
-  `rating_gap`, `color_penalty`, `repeat_of_round`; note that a
-  generated round's pairings are `manual_external` until Phase 5
-  overwrites the method at publish. `RoundExclusion` unique per
-  (round, user), reason gains `removed_by_admin`.
-- **§4.2** — ranges validated at load; `pairing.cron` applies on restart.
-- **§5.7** — item 6: in Phase 4 the fallback path is the only path, so
-  tokens do not gate the pool (decision 6).
-- **§5.8** — `ongoing_games` counts in-progress games plus pending
-  pairings of published rounds (decision 7).
-- **§6.2 step 5 / 6a** — the odd-pool choice precedes solving; the
-  volunteer's colours are assigned jointly after matching; the realised
-  penalty is stored.
-- **§6.2 step 7** — decision 4's wording: unreachable with a finite
-  penalty; repeats are recorded, not relaxed.
-- **§6.3** — Phase 4 publication is the state change only, `pair_at`
-  becomes the actual publish time; pairings are discovered by §7.3.
-- **§7** — `publish-round-sweep` named; `pairing.cron` read at
-  start-up; missed firings are covered by manual generation.
-- **§7.3** — only pairings of published rounds are matched.
-- **§8.3 / §8.5** — mark what is built; removed pairings; *Mark
-  failed*; generation runs in-request.
-- **§11** — the deletion checklist gains the three tables.
-- **§12** — Phase 4 paragraph rewritten to this scope; shadow mode
-  replaced by "first rounds under a long review window"; `missed_starts`
-  and `evaluate-activity` listed under Phase 5.
-- **§13 / §14** — decisions 1–9 as answered; §14.2 closed with the
-  concrete rule.
+## Deferred
+
+- Custom Lichess PMs → Phase 6, if still wanted (12).
+- §8.4 inactivity check-in → after live data (14).
+- Voiding a single existing game (e.g. a banned player) → Phase 6
+  player management (13).
+- Admin player management, settings UI, health page → Phase 6
+  (unchanged).
 
 ---
 
 ## What was built
 
-Steps 1–4 were summarised at close-out from their commits and the
-code; steps 5 onward were recorded as they landed.
+Each step is recorded here as it lands.
 
-### Step 1 — schema, queries, settings (`7ac7596`)
+### Step 0 — plan and spec (2026-09-28)
 
-- **The migration is exactly the planned schema** (`00011_pairing.sql`):
-  the three tables, the two enums, the round and pairing diagnostics
-  columns, `rounds_number_live` and `rounds_one_draft`.
-- **`sync-games` matches only published rounds**, pinned by an
-  integration test that a draft's pairing is never returned.
-  `CountInFlightGamesForUser` replaced `CountOngoingGamesForUser`
-  everywhere (decision 7), and the old query is gone.
-- **Deviation: `ListPairingPool` is not one statement with everything
-  in it.**
-  - It `LEFT JOIN`s the standings: a seeded or just-approved player
-    can have no standing row yet, and dropping them from the pool
-    would be a silent NULL bug. The rounds service pairs such a player
-    at `rating.unrated_default`.
-  - The round number of a player's last bye and last double game is
-    **not** in the pool query. Computed in a derived table, sqlc typed
-    that genuinely nullable number as a plain `int32`, with no warning.
-    It is read per player instead (`GetLastByeForUser` /
-    `GetLastDoubleGameForUser`, `pgx.ErrNoRows` meaning "never"). This
-    discovery is the CLAUDE.md rule about checking sqlc's generated
-    types after any query with a subquery, derived table or cast.
-
-### Step 2 — the engine, greedy solver (`5b8e3be`)
-
-Built as planned: a pure module, every step a named function with its
-own table test, determinism tested with shuffled inputs.
-
-- **Deviation, spec over plan:** the double-game capacity gate follows
-  spec §6.2 6a, `ongoing + 2 ≤ cap`. The plan's
-  `CapacityAllows(max, inFlight+2)` was one stricter: with a cap of 4
-  and 2 games in flight, the plan's reading would have refused a
-  double game the player can take, ending exactly at the cap. The
-  maintainer agreed the spec was right.
-- **The brute-force reference solver** in the tests measured greedy
-  against the optimum from the start (743 of 1 000 small pools
-  optimal, 49 avoidable rematches). Those numbers are what step 6 was
-  later decided on.
-
-### Step 3 — rounds service and jobs (`0544276`)
-
-Built as planned: `internal/rounds`, the three jobs, `ic
-generate-round` / `ic publish-round` / `ic setting`.
-
-- **New dependency: `robfig/cron/v3`**, promoted from indirect to
-  direct (decision 2).
-- **Only the weekly job schedules its draft's publication.** `serve`
-  passes a river-backed `Scheduler`. The CLI has no job runner and
-  passes none, so its drafts are published by the hourly sweep.
-- **The publish job is unique on `{RoundID, PublishAt}`**, as planned,
-  so a regenerated draft's schedule is never mistaken for the old one.
-- **Found at close-out: `pairing.cron` runs in the server's own
-  timezone.** River hands the schedule the process's local time. The
-  default `0 12 * * 1` is therefore Monday noon wherever `serve` runs
-  (UTC in a typical container). robfig/cron accepts a `CRON_TZ=`
-  prefix to pin it; the README runbook says so.
-
-### Step 4 — admin round management (`c4a38aa`)
-
-Built as planned: the round list and round view, every planned action,
-edits refused with 409 on anything but a draft, `edited_by`, nulled
-diagnostics and an audit row on every edit.
-
-- **Swap re-derives colours with the engine's own colour step**:
-  `pairing.AssignColours` was exported for it.
-- **Open question settled: no scheduler in the web layer.** A draft
-  generated with *Generate now* schedules no publish job, so the
-  hourly sweep publishes it, up to an hour after its window ends.
-  *Publish now* is immediate. Found at close-out: the comment at the
-  top of `internal/web/rounds.go` claimed such a draft had "its own
-  scheduled job"; it is corrected, and the behaviour is now in spec
-  §8.5 and the README runbook.
-- **Found at close-out:** the diagnostics panel did not show the
-  settings snapshot spec §8.5 promises. It was fixed during step 7
-  (`c86bdfb`).
-
-### Step 5 — dashboard slot and eligibility (2026-09-22, `bdc6976`)
-
-Built as planned in *Dashboard slot* above, with these notes:
-
-- **The bye sentence is the spec's (§8.3)**, not the shorter line
-  first planned: "Odd number of players this week and nobody was free
-  for a double game, so you sat out. You're first in line to avoid the
-  next one." It reads the round's own `settings_used`: under
-  `bye_only` the double-game clause is dropped, because it would be
-  false.
-- **The query is `ListPairingsForUserInRound`**, not
-  `GetPairingForUserInRound`: `List…` is this codebase's prefix for a
-  `:many` query. The generated row struct was checked (CLAUDE.md):
-  `OpponentUsername string`, `IsWhite bool`, both from NOT NULL
-  columns.
-- **A dashboard fixture must be the latest round whatever the database
-  holds**, since the integration tests run in a rolled-back
-  transaction on the dev database (6 published rounds, up to 200).
-  The fixtures use round numbers 9000+. The "no published round" test
-  skips on such a database.
-- No new Tailwind class: everything the section uses was already in
-  `app.css`.
-
-### Step 6a — the blossom solver, not yet wired in (2026-09-22)
-
-`internal/pairing/solver_blossom.go`: `Blossom`, a second `Solver`. Of
-every way to pair all the slots, it returns one with the lowest total
-cost. Nothing calls it yet; 6b adds the `pairing.solver` setting.
-
-**Why it exists.** Greedy never looks ahead: pairing the top of the
-list well can leave an avoidable rematch at the bottom. Worked
-example: A 2000, B 1990, C 1600, D 1590, with C and D having just met.
-Greedy pairs A–B (gap 10) and leaves C–D to meet again (cost
-≈ 1 000 020). A–C and B–D costs ≈ 800 with no rematch. On the
-brute-force corpus (1 000 pools of 2–6 players), greedy finds the best
-pairing in 743 and forces an avoidable rematch in 49.
-
-**The source, and why (maintainer's choice, 2026-09-22).** The plan
-named van Rantwijk's 2008 `mwmatching.py`. That file turned out to
-carry **no licence at all**, so it is not free to copy. Three sources
-were considered:
-- **NetworkX's `max_weight_matching` — chosen.** BSD-3-Clause; the same
-  algorithm (Galil 1986, O(n³), with the "pair everyone" option); its
-  `min_weight_matching` uses exactly the `M − cost` transformation
-  below.
-- The author's 2023 rewrite (MIT): rejected. It is more code, with
-  extra data structures for a speed a few hundred players never need.
-- A fresh implementation from Galil's paper: rejected. Slowest to
-  write and riskiest.
-
-The BSD licence asks that NetworkX's copyright notice and licence text
-travel with the copied code: they are the comment at the top of
-`solver_blossom.go`, separated from the package clause so they are not
-the package doc. No Go dependency was added. The repository had no
-LICENSE file at the time; it has since been licensed AGPL-3.0-or-later
-(2026-09-28), which may include BSD-3-Clause code as long as the notice
-stays.
-
-**How the port maps onto Go:**
-- **Lowest cost as highest weight.** The algorithm maximises total
-  weight, so each edge weighs `M − cost` with `M` = the largest cost
-  + 1. It runs in maximum-cardinality mode, and every complete pairing
-  has the same number of pairs, so the heaviest pairing is exactly the
-  cheapest. Costs are integers, so the arithmetic is exact; NetworkX's
-  `delta1` step (only used without maximum cardinality) is dropped.
-- **Determinism.** NetworkX's dictionaries become fields on one
-  `*blossom` per vertex or blossom. Every dictionary it *iterates*
-  becomes an ordered slice, reproducing Python's insertion order.
-  Maps remain only for lookups, because Go's map iteration order is
-  random. Edges, and so each vertex's neighbours, are fed in §6.2 step
-  4's order: cost, lower id, higher id, then slot index for the
-  volunteer's two slots.
-- **Plain recursion.** NetworkX flattens two recursive functions into
-  loops ("trampolines") because of Python's recursion limit. Go has
-  none, so they are ordinary recursion, with the same call order.
-- **The optimality certificate** (`verifyOptimum`, NetworkX's
-  `verifyOptimum`) is ported, but only the tests call it; `Match`
-  does not run it on every round.
-
-**Verification:**
-- **Against brute force:** optimal on all 1 800 corpus pools of up to
-  **10 slots** (the plan said 8; 10 still checks all 945 possible
-  pairings instantly). The cost is compared, not the pairing, since
-  two pairings can tie.
-- **League-sized pools** (51, 120, 199, 200 players): the certificate
-  holds; blossom never has more rematches, nor a higher cost, than
-  greedy.
-- **Determinism:** a 99-player pool in shuffled orders gives an
-  identical round.
-- **Speed:** about 23 ms and 12.8 MB for a 200-player pool
-  (`BenchmarkBlossom_200Players`).
-- **Coverage:** every function at 100%, apart from `Match`'s
-  unreachable panic and the certificate's error returns, which never
-  firing is the point.
-- **The engine's table tests run under both solvers.** `generate`
-  checks the §6.2 invariants on each result and that blossom never
-  accepts more rematches, then returns greedy's result: the fixtures'
-  expected pairings were written against greedy's tie-breaks. Every
-  one of those specific expectations was also checked once against
-  blossom and passes. Where the two differ, the pairings are equally
-  cheap, except on one 6-slot fixture where blossom's (1 450) beats
-  greedy's (1 650).
-- **Greedy's measurement is unchanged** (743 / 1 000, 49 rematches):
-  the corpus now comes from a shared `corpusGraph` helper that draws
-  the same random numbers as before.
-
-Automated verification, green: `go build`, `go vet` (both tags),
-gofmt, `make test`, `make test-integration`.
-
-### Step 6b — `pairing.solver`, and settings read per click (2026-09-22)
-
-Built as planned in the build order above, with these notes:
-
-- **The setting.** `pairing.solver` = `"greedy"` (default) |
-  `"blossom"`, validated at load like the other enum keys: an unknown
-  value or a wrong type fails, naming the key. `rounds.solverFor(cfg)`
-  replaces the hard-coded `pairing.Greedy{}` at both `pairing.Generate`
-  call sites. The scheduled `generate-round` job and `ic
-  generate-round` already reload settings on every run, so they need
-  no other change.
-- **Each round records its solver.** `rounds.Snapshot` gains `Solver`,
-  so `settings_used` says which one produced the round. The round
-  view's Diagnostics panel shows it. A round generated before this
-  step has no solver in its snapshot and was greedy; the view says
-  so. An imported round has no snapshot and shows "—".
-- **Admin actions read settings per click.** *Generate now*,
-  *Regenerate* and **Swap** now read the settings inside their own
-  transaction instead of using the server's start-up copy. Swap was
-  not in the plan, but it re-derives colours from the same settings
-  and had the same staleness problem. The other start-up reads (XP
-  weights on public pages, the dashboard's cap ceiling) are not about
-  pairing and are left for Phase 6's settings page.
-- **The web round tests are now independent of stored settings.**
-  Because the handlers read the settings table itself,
-  `isolatePairingPool` also deletes every override inside the test's
-  rolled-back transaction. Otherwise an `ic setting pairing.mode
-  '"auto_publish"'` on the dev database would break every test that
-  expects a draft. (The dev database holds no overrides today.)
-- **Found, not fixed:** spec §8.5 says the diagnostics show "the
-  settings as they were at generation". The round view shows only the
-  solver from `settings_used`, not the weights and window. That gap
-  dates from step 4; noted for close-out.
-- **README:** the `ic` list gains `generate-round`, `publish-round`
-  and `setting`, with the solver example. The rest of the README's
-  Phase 4 work (routes, cron restart note, first-rounds runbook) stays
-  in step 7.
-
-Tests: settings validation (valid value, unknown value, wrong type,
-the default); the rounds service runs the configured solver and
-records it, using the A/B/C/D rematch example (greedy: one rematch,
-blossom after regenerate: none). Through the admin pages: switching
-to blossom takes effect on the next Regenerate with no restart, the
-page names the solver, and switching back restores greedy's pairing
-exactly. An invalid value makes *Generate now* fail with a
-`generate-round` run marked failed and naming `pairing.solver`.
-
-Spec amended (§4.2, §6.2 step 4, §12, §13, §15 entry dated
-2026-09-22).
-
-Automated verification, green: `go build`, `go vet` (both tags),
-gofmt, `make test`, `make test-integration` (every package).
-
-### Step 7 — docs and close-out (2026-09-22)
-
-- **One code fix, committed on its own** (`c86bdfb`, maintainer's
-  choice): the round page lists the whole settings snapshot under
-  "Settings at generation", as spec §8.5 promises. The test changes a
-  setting after generating and checks the page still shows the value
-  in force at generation. An imported round says it has none.
-- **README:** the admin routes; which jobs `serve` runs and when; the
-  `ic` list; and a **runbook for the first live rounds** — before the
-  first Monday (long review window, the cron timezone), reviewing a
-  draft, publication timing, what players must create for
-  `sync-games` to find a game, *Mark failed*, and a missed Monday.
-- **CLAUDE.md:** the repository state covers Phase 4; the build-order
-  line no longer says "shadow mode"; the testing expectations name
-  both solvers and drop the unreachable relaxation ladder.
-- **Spec:** §8.3 "This week" recorded as built with its settled cases;
-  §8.5 the settings snapshot and the manual draft's publication by the
-  sweep; §11 the same testing change; §12 Phase 4 marked built; a §15
-  entry.
-- **Comment corrected** at the top of `internal/web/rounds.go` (see
-  step 4).
-- **Live verification** was not part of the close-out; it was run
-  afterwards and is recorded below.
-
-Automated verification, green: `go build`, `go vet` (both tags),
-gofmt, `make test`, `make test-integration` (every package).
-
-### Live verification (maintainer, 2026-09-25 and 2026-09-27)
-
-All six checks listed under "Verification" below passed. They ran
-on the dev database: rounds 195–200 imported, the maintainer plus
-seven demo players approved (SleepyBishop inactive), and made-up game
-ids, so Lichess never had a real game to find. The order differed
-from the list:
-- The solver comparison moved onto the first draft, where this data
-  gives the two solvers different answers.
-- The at-capacity check moved into the cron check. A limit of 1 only
-  excludes the maintainer once a published round has given them a
-  game.
-
-- **Generation from the CLI (check 1).** `ic generate-round`, with a
-  24-hour window, made draft 201, one past the imported rounds, source
-  manual.
-  - Pool of 7, so one player plays two games. It was RookieOne:
-    nobody had had a double game yet, so the tie-break fell to the
-    user id.
-  - SleepyBishop was excluded as inactive.
-  - `/health` showed the run.
-  - `ic sync-games` recorded `pairings_checked: 0` while the draft
-    held four pairings with no game, so a draft never reaches Lichess.
-- **Hand check (check 2).** Greedy's draft:
-
-  | White | Black | Gap | Colour penalty | Repeat of |
-  |---|---|---|---|---|
-  | HikaruSpeed | QueensGambit | 85 | 2 | 196 |
-  | RookieOne | MagnusMagnet | 35 | 0 | — |
-  | Nairwolf | RookieOne | 13 | 3 | — |
-  | PawnStorm42 | KnightTerror | 489 | 2 | 199 |
-
-  - Every colour went to the player owed it.
-  - PawnStorm42 and KnightTerror were both at −1, so one had to take
-    black. On that tie the lower-rated player takes white:
-    PawnStorm42.
-  - The volunteer played one white and one black.
-  - The 3 on the volunteer's second game is scored from their colour
-    balance before the round. Across the round their balance does not
-    move. This is the stored "realised penalty" of spec §6.2 step 5
-    working as specified, not a bug.
-- **Solvers (check 6).** Among the six players other than the
-  maintainer, only two pairs had not met in rounds 196–200:
-  KnightTerror–QueensGambit and MagnusMagnet–RookieOne. So every
-  possible pairing has at least one repeat.
-  - Greedy accepted 2.
-  - Blossom, after *Regenerate*, accepted 1, with the pairing worked
-    out by hand beforehand: HikaruSpeed–Nairwolf,
-    KnightTerror–QueensGambit, RookieOne–MagnusMagnet, and
-    PawnStorm42–RookieOne (a repeat of round 198).
-  - Switching back to greedy and regenerating restored its pairing
-    exactly.
-  - The diagnostics panel named the solver each time.
-- **Cancel and reuse the number (check 3).** Cancelling with a reason,
-  then *Generate now*, made a new draft 201, identical to the
-  cancelled one.
-- **Edit and publish (check 4).**
-  - *Flip* on PawnStorm42–KnightTerror showed the edited tag, blanked
-    the row's diagnostics and wrote a `pairing.flip` audit row.
-  - *Publish now*: `pair_at` equalled `published_at`, and the
-    dashboard said "You play RookieOne with white."
-- **Schedule and self-publication (check 5, with the at-capacity part
-  of check 4).** Setup: maintainer's game limit set to 1, a 1-hour
-  window, `pairing.cron` = `CRON_TZ=UTC 52 19 * * *`, then a server
-  restart.
-  - The job fired at 19:52 UTC, which is 21:52 on the server's Paris
-    clock, so the `CRON_TZ` prefix is honoured.
-  - Draft 202, source schedule, a pool of 6 (even).
-  - Exclusions: the maintainer as at capacity, 1 game of 1, and
-    SleepyBishop as inactive. The maintainer's round-201 game, never
-    started on Lichess, counted as in flight (decision 7).
-  - Exactly one `publish-round` job, scheduled at `publish_at`.
-  - Half a second after `publish_at`, that job published the round.
-    The hourly sweep, four minutes earlier, had rightly found nothing
-    due.
-  - The `round.publish` audit row has no actor, and `pair_at` equals
-    `published_at`.
-  - The at-capacity exclusion row that the dashboard's sentence is
-    built from was in place.
-- **Clean-up.** Window back to 24 hours, `pairing.cron` pinned to
-  `CRON_TZ=UTC 0 12 * * 1`, the maintainer's limit removed, server
-  restarted.
-
-Findings:
-- **Greedy accepted an avoidable rematch in both generated rounds.**
-  - In round 201 it accepted 2 where 1 was possible.
-  - In round 202 it did so again. Only KnightTerror–QueensGambit and
-    MagnusMagnet–PawnStorm42 were fresh pairs; greedy gave
-    HikaruSpeed the nearest rating, MagnusMagnet, first, which forced
-    a second rematch lower down.
-  - Seven demo players who have nearly all met is an extreme pool. A
-    league of 50 or more has far more fresh opponents.
-  - Still, it is the pattern decision 1 said to watch for in the
-    first live rounds. `pairing.solver` stays `greedy`; the default is
-    the maintainer's call.
-- **No code change came out of the checks.**
-- **The dev database now holds published rounds 201 and 202** with
-  pending demo pairings. Those count as games in flight, and
-  `sync-games` looks for them every hour. *Mark failed* clears one if
-  it gets in the way.
-- **The production generation time is not chosen yet.** The dev
-  database is pinned to Monday noon UTC.
+- **Re-read against Phase 4's live checks.** They passed with no code
+  change, and nothing in them changes this plan. Two findings carry
+  over:
+  - The dev database holds published rounds 201 and 202 with pending
+    demo pairings nobody will start. Step 7's `evaluate-activity`
+    retires them at the first generation after it lands. They are
+    hand-started, so no missed start is recorded.
+  - Greedy accepted an avoidable rematch in both live rounds. The
+    default solver stays the maintainer's call; it is not Phase 5's
+    business.
+- **Found: the in-flight count skips any pairing with a game id**
+  (corrected under "What Phases 1–4 already provide"). The fix is
+  scheduled in step 5, where `created` pairings first appear.
+- **Spec amended** as listed under "Spec amendments", with a §15
+  entry. The listed decisions also forced these edits, not on the
+  list:
+  - §2.2: `LICHESS_MSG_ENABLED` removed. It switched the per-player
+    PMs that decision 12 drops; Phase 6 can bring a flag back with
+    organiser PMs. `LICHESS_ORG_TOKEN` is needed only under `lichess`.
+  - §3.2: the bulk field table and notes. No `pairAt`; `days` /
+    `rated` from the round; the organiser's message; the rejection
+    body. The claim that cancelling a bulk before `pairAt` is how the
+    review window works is gone.
+  - §4.1: `NotificationPreference` reduced to `(user_id, category)`,
+    a row meaning "turned off" — the shape this plan's schema section
+    gives it. Its `on_site` / `lichess_pm` flags had nothing left to
+    switch. `Round.pair_at` is no longer described as sent to
+    Lichess; `Pairing.lichess_game_id` holds a challenge's id.
+  - §5.8: a pending pairing is retired by `evaluate-activity`; a
+    bulk-created game counts from its creation (the step 5 fix).
+  - §8.1: the Overview is filled by the `sync-games` run queued after
+    creation, not "from the bulk-pairing response".
+  - §8.2: the join flow no longer mentions `msg:write`.
+  - §10: the table gains a category column matching `internal/notify`
+    (step 2). "Challenge pending, repeated after 48h" becomes the
+    `challenge` notice plus the `unstarted` 48-hour reminder.
+  - `CLAUDE.md`: the "No email" rule now says on-site only, and never
+    ask for `msg:write`. The pointer to `PLAN.md` says earlier phases
+    are in its git history.
+- **Decided at review (maintainer): a draft awaiting review goes in
+  the admin banner** (decision 10, step 4). Spec §6.1 says admins are
+  notified of a new draft; the plan had no such notice. §6.1, §8.5
+  and §10 now say it is the banner.
+- **Kept out of the spec: the bulk `message` text.** The plan's
+  example begins "Infinite Correspondence round {n}". The spec only
+  says "naming the league and the round", and step 5 decides where the
+  name comes from (one league per deployment: no new hard-coded league
+  text).
 
 ---
 
-## Verification (end of Phase 4)
+## Verification
 
-Automated: `go build`, `go vet` (both tags), gofmt, `make test`,
-`make test-integration` green after every step.
+**Automated, after every step:** `go build`, `go vet` (both tags),
+gofmt, `make test`, `make test-integration`. Key tests:
 
-Live, by the maintainer — **run 2026-09-25 and 2026-09-27, all
-passed** (see "Live verification" above):
+- Client: every method against httptest, including all 400 shapes;
+  `BulkRejection.Error()`, job detail and job error text never contain
+  a token.
+- `create-games`: partition by token state; a double game in one bulk;
+  `days` / `rated` from `settings_used`, not current settings; a
+  rejection naming a token moves that pairing and resubmits; the last
+  attempt gives up to hand-started games and notifies both players;
+  running the job twice creates one bulk; a simulated crash after the
+  Lichess call is reconciled, not duplicated; a retry attaches a
+  hand-started game instead of creating a second; *Mark failed* during
+  creation wins; notifications once.
+- `validate-tokens`: revoked / missing scope / expired / valid; the
+  grace boundary; a player with no token row excluded under `lichess`
+  and paired under `manual`; the NULL-cap test still green.
+- `evaluate-activity`: every pending pairing → failed; a missed start
+  only for the challenged player of a challenge pairing, none for bulk,
+  hand-started, bye or capacity skip; streak reset by a started game
+  and by resume; warning at 1, pause at 2; the auto-paused player is
+  excluded from the round generated right after; the 48h reminder sent
+  once.
 
-1. `make migrate`; `ic setting pairing.review_window_hours 24`; `ic
-   generate-round` → a draft appears on `/admin/rounds` with
-   diagnostics and the next number after the imported rounds; `/health`
-   shows the run; `ic sync-games` makes no Lichess call for the draft.
-2. Sanity-check the draft by hand against the standings: rating gaps
-   small, colours going to the player who is due them, no repeat within
-   the window unless the diagnostics say the pool forced it.
-3. Cancel the draft with a reason; generate again → same number reused.
-4. Generate from the admin page, edit a pairing, then publish it:
-   *Publish now*, or wait for the hourly sweep, which publishes it up
-   to an hour after the window ends. A paired player's dashboard
-   shows the opponent, a capped player's shows the at-capacity
-   sentence with numbers, and `pair_at` equals `published_at`.
-5. Restart `serve` and confirm the cron schedule fires at the
-   configured time (use a near-future cron for the check). It runs in
-   the server's timezone unless the expression starts with
-   `CRON_TZ=`. The scheduled draft publishes itself when its window
-   ends.
-6. On a draft, check the diagnostics panel's "Settings at
-   generation", then `ic setting pairing.solver '"blossom"'` and
-   *Regenerate*: the panel says "blossom", and the repeats accepted
-   are the same or fewer. Switch back and regenerate: greedy's pairing
-   returns unchanged.
+**Live, by the maintainer**, on a scratch database whose only approved
+players are test accounts (an organiser account and two or three
+players), `pairing.game_creation = lichess`:
+
+1. Publish a two-player round: games appear on Lichess at once, ids on
+   the pairings, the organiser's message arrives, `sync-games` ingests
+   them.
+2. A three-player round with a double game: one bulk, the volunteer
+   has one white and one black.
+3. Revoke one test account's token on Lichess: the publication probe
+   catches it; that pairing becomes a challenge from the other player;
+   accept it and check the game is found by id.
+4. Let a challenge go unaccepted, generate again: pairing failed,
+   missed start recorded, challenge withdrawn on Lichess.
+5. Blank `LICHESS_ORG_TOKEN` and publish: creation gives up after its
+   retries (shorten them for the test), players are told to start by
+   hand; start one game by hand, restore the token, *Retry*: the
+   hand-started game is attached, the other created.
+6. `ic validate-tokens`; `/admin/tokens` and `/health` show the
+   organiser token's expiry.

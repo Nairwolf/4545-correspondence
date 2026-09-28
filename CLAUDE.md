@@ -35,10 +35,12 @@ registration — see spec §11).
 `docs/infinite-correspondence-spec.md`
 is still the source of truth for behaviour; read it before changing
 anything under `internal/`, and update it when a decision changes rather
-than letting code and spec diverge. `PLAN.md` records what was actually
-built at each step, including the live-verification results and the
-handful of deliberate deviations from the spec's original sketch — read
-it alongside the spec, not instead of it.
+than letting code and spec diverge. `PLAN.md` holds the current
+phase's plan (Phase 5 now) and records what was actually built at each
+step, including the live-verification results and the handful of
+deliberate deviations from the spec's original sketch — read it
+alongside the spec, not instead of it. Earlier phases' plans and
+records are in its git history.
 
 Build/test commands:
 
@@ -92,7 +94,7 @@ Key modules and their properties:
 - **Byes are never selected by rating, level, XP, or results** — longest time since last bye, then fewest byes, then user id. A bye must never look like punishment.
 - **Capacity skips are not an inactivity signal.** They must never feed missed starts, auto-pause, or the inactivity check-in.
 - **After `make sqlc`, check the generated struct for any query with a subquery, a derived table (a joined `SELECT ...` or CTE), or a `CASE`/cast expression in its column list.** sqlc will silently type a genuinely nullable result (e.g. `MAX()` over a group that can be empty) as a plain, non-nullable Go field instead of a pointer — no warning, no error, and adding a cast makes it *more* confident of the wrong answer, not less. This is the same failure shape as the `max_concurrent_games` NULL bug above, just introduced by the codegen step instead of application code. The fix is to restructure the query — a separate single-purpose lookup, or a genuine base-table `LEFT JOIN` rather than a joined subquery — until the generated field is the pointer type the nullability actually requires, not to trust that a clean `sqlc generate` run means the types are right.
-- **No email anywhere.** No SMTP, no address collected or stored. Notifications are on-site (always) and optional Lichess PM.
+- **No email anywhere.** No SMTP, no address collected or stored. Notifications are on-site only; the one Lichess message is the one bulk pairing sends by itself. Never ask players for `msg:write`: a message is sent as the token's owner (spec §3.1, §10).
 
 ## Behaviour that is configuration, not code
 
