@@ -92,7 +92,7 @@ Key modules and their properties:
 - **Byes are never selected by rating, level, XP, or results** — longest time since last bye, then fewest byes, then user id. A bye must never look like punishment.
 - **Capacity skips are not an inactivity signal.** They must never feed missed starts, auto-pause, or the inactivity check-in.
 - **After `make sqlc`, check the generated struct for any query with a subquery, a derived table (a joined `SELECT ...` or CTE), or a `CASE`/cast expression in its column list.** sqlc will silently type a genuinely nullable result (e.g. `MAX()` over a group that can be empty) as a plain, non-nullable Go field instead of a pointer — no warning, no error, and adding a cast makes it *more* confident of the wrong answer, not less. This is the same failure shape as the `max_concurrent_games` NULL bug above, just introduced by the codegen step instead of application code. The fix is to restructure the query — a separate single-purpose lookup, or a genuine base-table `LEFT JOIN` rather than a joined subquery — until the generated field is the pointer type the nullability actually requires, not to trust that a clean `sqlc generate` run means the types are right.
-- **No email anywhere.** No SMTP, no address collected or stored. Notifications are on-site (always), optional Lichess PM, optional Discord webhook.
+- **No email anywhere.** No SMTP, no address collected or stored. Notifications are on-site (always) and optional Lichess PM.
 
 ## Behaviour that is configuration, not code
 
@@ -107,7 +107,7 @@ Everything in spec §4.2 lives in the `Setting` table as runtime-editable JSON w
 3. Self-service (player dashboard)
 4. Pairing (engine, rounds, review window, diagnostics) — no shadow mode: the site pairs for real from its first round, with a long review window on the first drafts as the safety net (maintainer decision, 2026-09-17)
 5. Automation (bulk pairing, challenge fallback, auto-pause, notifications)
-6. Polish (admin settings, health page, Discord)
+6. Polish (admin settings, health page)
 7. Optional history migration (§9) — only if maintainers confirm
 
 Out of scope permanently: the spreadsheet's Awards / Awards_Backend sheets (the detection rule was lost and will not be carried over).

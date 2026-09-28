@@ -104,7 +104,6 @@ LICHESS_ORG_TOKEN              # organiser token, scope: challenge:bulk
 TOKEN_ENCRYPTION_KEY           # 32 bytes, hex-encoded: AES-256-GCM key for stored player OAuth tokens
 SESSION_SECRET                 # >= 32 chars: signs the short-lived OAuth-state cookie
 ADMIN_LICHESS_USERNAMES        # comma-separated bootstrap admin list
-DISCORD_WEBHOOK_URL            # optional, league-wide announcements
 LICHESS_MSG_ENABLED            # optional, send notifications as Lichess PMs
 ```
 
@@ -1117,16 +1116,15 @@ w_comp, b_comp, w_total_moves, b_total_moves, w_total_CPL, b_total_CPL
 
 **No email.** There is no SMTP dependency, no transactional email provider, and no email address is collected or stored. This removes an entire category of deliverability problems, spam-folder support requests, and personal data to protect.
 
-Three channels replace it:
+Two channels replace it:
 
 1. **On-site notification centre** (primary). A persisted `Notification` record per player, surfaced as a bell icon with an unread count and a list on the dashboard. Always available, requires no external service, and is the fallback for everything.
 2. **Lichess private message** (optional, per player). Reaches players in the place they already are — Lichess itself — which for a correspondence league is where they'll be several times a week anyway. Requires the `msg:write` scope, requested as an optional extra at registration and declinable without affecting anything else. Gated behind `LICHESS_MSG_ENABLED` and subject to the same rate limiting as all other Lichess calls. Keep these messages short and infrequent; nobody wants a chatty bot in their Lichess inbox.
-3. **Discord webhook** (optional, league-wide). Announcements to the community channel, not per-player messages.
 
 | Event | Recipient | Channel |
 |---|---|---|
 | Registration approved / rejected | Applicant | On-site + Lichess PM |
-| New round published | Each paired player | On-site + Lichess PM; Discord summary |
+| New round published | Each paired player | On-site + Lichess PM |
 | Game created (bulk) | Each paired player | On-site (direct game link) |
 | Challenge pending acceptance | Player who must accept | On-site + Lichess PM, repeated after 48h |
 | About to be auto-paused (1 missed start) | Player | On-site + Lichess PM |
@@ -1136,7 +1134,7 @@ Three channels replace it:
 | Assigned a double game | Volunteer | On-site (explains both games) |
 | Received a bye | Player | On-site (explains why, and that they're prioritised next) |
 | Level up | Player | On-site (opt-out) |
-| Job failure, token expiry | Admins | On-site + Discord |
+| Job failure, token expiry | Admins | On-site |
 
 Notes:
 
@@ -1194,7 +1192,7 @@ The pure pairing engine (§6.2, greedy and blossom solvers behind a `Solver` int
 Bulk pairing game creation, challenge fallback, ongoing sync, missed-start tracking (`MissedStart` table, `evaluate-activity`) and auto-pause, notifications, `validate-tokens` (§7) with the grace-day deactivation (§3.3), cancelling a published round.
 
 **Phase 6 — Polish.**
-Admin settings UI, editable rules content, system health page, Discord integration, and the account deletion path (§11) — the last is a hard gate before registration is opened publicly.
+Admin settings UI, editable rules content, system health page, and the account deletion path (§11) — the last is a hard gate before registration is opened publicly.
 
 **Phase 7 — Optional.**
 Historical data migration (§9), only if confirmed.
@@ -1213,7 +1211,7 @@ These were open and are now settled. Recorded here so they are not relitigated d
 | Odd pool | Double game if a valid volunteer exists, otherwise a bye (§6.2 step 6). |
 | Double-game opt-in | **On by default**, to keep byes rare. Players may opt out. |
 | Bye selection | Longest time since last bye; never rating-based. |
-| Email notifications | **None.** No SMTP, no email stored. On-site centre, optional Lichess PM, optional Discord (§10). |
+| Email notifications | **None.** No SMTP, no email stored. On-site centre and optional Lichess PM (§10). |
 | Base rating | **Any correspondence rating (even provisional), falling back to classical only when correspondence is entirely absent.** Corrects the spreadsheet's `MAX()`; provisional status no longer distinguishes the two sources (§5.1). |
 | Unrated players | **Fixed constant** `rating.unrated_default` (1500), not the league median (§5.1). |
 | Opponent rating in performance rating | **Rating at the time of the game**, stored on `Game`, not the opponent's current rating (§5.2). |
@@ -1261,6 +1259,7 @@ These were open and are now settled. Recorded here so they are not relitigated d
 
 ## 15. Changelog
 
+- **2026-09-28** — Discord dropped (maintainer): no `DISCORD_WEBHOOK_URL` (§2.2), no Discord notification channel (§10), no Discord integration in Phase 6 (§12, §13).
 - **2026-09-28** — Licensed AGPL-3.0-or-later (§13); every page's footer links to the source and the licence (§8.1).
 - **2026-09-22** — Phase 4 close-out. The dashboard's "This week" section recorded as built, with the cases settled while building it (§8.3). The diagnostics show the whole settings snapshot (§8.5). A manually generated draft is published by the hourly sweep, up to an hour after its window (§8.5). The pairing tests requirement no longer asks for the unreachable relaxation ladder, and names both solvers (§11). Phase 4 marked built (§12).
 - **2026-09-22** — Blossom solver, selectable. `pairing.solver` added (`greedy` default | `blossom`), validated at load (§4.2). The blossom solver is a port of NetworkX's `max_weight_matching` (the 2008 `mwmatching.py` it descends from has no licence), run on `M − cost` weights in maximum-cardinality mode; each round records its solver in `settings_used`, shown on the round view (§6.2 step 4). The admin's generate, regenerate and swap actions read settings per click rather than the server's start-up copy (§4.2). Decision on the solver amended (§13), Phase 4 paragraph updated (§12).

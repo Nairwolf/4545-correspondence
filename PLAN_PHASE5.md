@@ -29,8 +29,8 @@ become games"), and Phase 5 exists to remove it (spec §12):
 Not in Phase 5: cancelling a published round (decision 13 — dropped,
 not deferred); custom Lichess PMs (decision 12) and the §8.4
 inactivity check-in (decision 14); the admin settings UI, editable
-rules, the full health page, Discord and the GDPR deletion path
-(Phase 6); history import (Phase 7).
+rules, the full health page and the GDPR deletion path (Phase 6);
+history import (Phase 7).
 
 Phase 4's own live checks (Phase 4 PLAN.md, "Verification (end of
 Phase 4)") have not been run yet. They are a prerequisite for switching
@@ -216,8 +216,8 @@ from the server source, not documented, and go on the live-check list.
 12. **Lichess PMs: not in Phase 5** *(maintainer, 2026-09-24).* Phase 5
     builds the on-site notification centre; the only Lichess message is
     the one bulk pairing sends by itself. Custom PMs, if still wanted,
-    come from the organiser account in Phase 6 alongside Discord. No
-    player is ever asked to re-authorise for `msg:write`.
+    come from the organiser account in Phase 6. No player is ever asked
+    to re-authorise for `msg:write`.
 13. **A published round is final** *(maintainer, 2026-09-24).*
     "Cancelling a published round" was never in the original spec: it
     was written into §8.5 and §12 by the Phase 4 plan (`895c12c`) as a
@@ -535,7 +535,7 @@ Each step is a commit point; work stops after each for review
 
 ## Deferred
 
-- Custom Lichess PMs → Phase 6 with Discord, if still wanted (12).
+- Custom Lichess PMs → Phase 6, if still wanted (12).
 - §8.4 inactivity check-in → after live data (14).
 - Voiding a single existing game (e.g. a banned player) → Phase 6
   player management (13).
