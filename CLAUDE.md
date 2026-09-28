@@ -122,9 +122,9 @@ Unresolved with the maintainers: whether history is imported at all, round numbe
 
 ## Git workflow
 
-**Never run `git commit`.** The maintainer commits all work themselves, and commits must carry no `Co-Authored-By` trailer or any other attribution to Claude.
+**Commit only after the maintainer approves.** Work in atomic units: keep each change set to one coherent, self-contained piece of work, small enough to review in one sitting, rather than letting unrelated changes pile up in the working tree. When a unit is complete, stop implementing — don't roll into the next unit — summarise what changed, propose a commit message and ask the maintainer to review. Run `git commit` only once they approve, after applying any change they ask for to the code or the message; the maintainer will often rephrase the message, and their version is the one committed. Approval covers that one commit, not the next. Pushing stays with the maintainer.
 
-Work in atomic units: keep each change set to one coherent, self-contained piece of work rather than letting unrelated changes pile up in the working tree. When a unit is complete, say so explicitly — "this is a good point to commit" — and summarise what changed. Suggesting a commit message is welcome, but treat it as a starting point: the maintainer writes the final message and will usually rephrase it.
+Commits keep Claude Code's default `Co-Authored-By` attribution trailer.
 
 Suggested commit messages must follow [Conventional Commits](https://www.conventionalcommits.org/) — `type(optional scope): summary`, e.g. `feat(scoring): add FIDE performance-rating table` or `docs(spec): correct bulk-pairing endpoint`. Pick `type` from `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `build`, `ci`; add `!` or a `BREAKING CHANGE:` footer only for an actual breaking change.
 
