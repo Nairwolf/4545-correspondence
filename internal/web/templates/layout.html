@@ -38,8 +38,15 @@
     {{template "content" .}}
   </main>
   <footer class="mx-auto max-w-5xl px-4 py-8 text-xs text-zinc-600">
-    Games are played on <a class="underline hover:text-zinc-400" href="https://lichess.org">lichess.org</a>.
-    This site orchestrates and reports.
+    <p>
+      Games are played on <a class="underline hover:text-zinc-400" href="https://lichess.org">lichess.org</a>.
+      This site orchestrates and reports.
+    </p>
+    {{- /* AGPL-3.0 §13: a deployment running modified code must point this link at its own source. */}}
+    <p class="mt-1">
+      Free software under the <a class="underline hover:text-zinc-400" href="https://www.gnu.org/licenses/agpl-3.0.html">GNU AGPL</a>.
+      <a class="underline hover:text-zinc-400" href="https://github.com/Nairwolf/4545-correspondence">Source code</a>.
+    </p>
   </footer>
 </body>
 </html>

@@ -754,8 +754,10 @@ were considered:
 The BSD licence asks that NetworkX's copyright notice and licence text
 travel with the copied code: they are the comment at the top of
 `solver_blossom.go`, separated from the package clause so they are not
-the package doc. No Go dependency was added. **This repository still
-has no LICENSE file**; that decision is open, not blocking.
+the package doc. No Go dependency was added. The repository had no
+LICENSE file at the time; it has since been licensed AGPL-3.0-or-later
+(2026-09-28), which may include BSD-3-Clause code as long as the notice
+stays.
 
 **How the port maps onto Go:**
 - **Lowest cost as highest weight.** The algorithm maximises total

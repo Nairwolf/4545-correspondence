@@ -1006,6 +1006,8 @@ Since the search is anchored on a pairing, games members play against each other
 - Accuracy / centipawn-loss figures exist only for games someone has requested analysis on at Lichess; show "n of m games analysed" next to any such figure.
 - Players paired per round, as a time series.
 
+**Every page** — the footer links to the source code and the licence (§13): AGPL-3.0 §13 asks that a site's users be offered its source.
+
 > **Not built:** the spreadsheet's Awards page (Archbishop of Accuracy, Compensation Addict, Ace) is out of scope and is not being ported.
 
 ### 8.2 Registration and authentication
@@ -1242,6 +1244,7 @@ These were open and are now settled. Recorded here so they are not relitigated d
 | Token gate in Phase 4 | Not applied: the manual path is the fallback path (§5.7). |
 | Round numbering | `max(number) + 1` over non-cancelled rounds — the first generated round follows the last imported one (§14.2). |
 | Exclusion rows | Approved members only; `removed_by_admin` added for admin-deleted pairings (§4.1.1). |
+| Licence | **AGPL-3.0-or-later** (2026-09-28). The site is a hosted service, and only the AGPL obliges a deployment running modified code to publish it; every page's footer links to the source (§8.1). Third-party code keeps its own licence (the NetworkX port in the blossom solver is BSD-3-Clause). |
 
 ---
 
@@ -1258,6 +1261,7 @@ These were open and are now settled. Recorded here so they are not relitigated d
 
 ## 15. Changelog
 
+- **2026-09-28** — Licensed AGPL-3.0-or-later (§13); every page's footer links to the source and the licence (§8.1).
 - **2026-09-22** — Phase 4 close-out. The dashboard's "This week" section recorded as built, with the cases settled while building it (§8.3). The diagnostics show the whole settings snapshot (§8.5). A manually generated draft is published by the hourly sweep, up to an hour after its window (§8.5). The pairing tests requirement no longer asks for the unreachable relaxation ladder, and names both solvers (§11). Phase 4 marked built (§12).
 - **2026-09-22** — Blossom solver, selectable. `pairing.solver` added (`greedy` default | `blossom`), validated at load (§4.2). The blossom solver is a port of NetworkX's `max_weight_matching` (the 2008 `mwmatching.py` it descends from has no licence), run on `M − cost` weights in maximum-cardinality mode; each round records its solver in `settings_used`, shown on the round view (§6.2 step 4). The admin's generate, regenerate and swap actions read settings per click rather than the server's start-up copy (§4.2). Decision on the solver amended (§13), Phase 4 paragraph updated (§12).
 - **2026-09-17** — Phase 4 plan amendments. `Round` gains `pool_size`, `odd_pool`, `repeat_pairings`, `settings_used`, a number unique among non-cancelled rounds and a one-draft rule; `Pairing` gains `position`, `rating_gap`, `color_penalty`, `repeat_of_round`; `RoundExclusion` gains `removed_by_admin` and a per-round uniqueness (§4.1, §4.1.1). Settings validated at load, `pairing.cron` applied on restart (§4.2). Token gate not applied before Phase 5 (§5.7). In-flight count includes pending pairings of published rounds (§5.8). Greedy solver chosen, volunteer slots paired first and coloured jointly, odd pool resolved before solving, the relaxation ladder replaced by recorded repeats (§6.2). Phase 4 publication is the state change with `pair_at` = publish time (§6.3). `publish-round-sweep` named, job uniqueness on `{round, publish_at}`, cron read at start-up (§7). Only published rounds are matched (§7.3). This-week dashboard block (§8.3); round management, diagnostics and manual generation detailed (§8.5). Deletion checklist extended (§11). Phase 4 scope rewritten, shadow mode dropped (§12). Decisions recorded (§13, §14).
