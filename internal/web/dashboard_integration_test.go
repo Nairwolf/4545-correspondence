@@ -287,8 +287,10 @@ func TestDashboard_AuthorisationAndGames(t *testing.T) {
 	}
 
 	// Games: one in progress, twelve finished → ten shown plus a pointer.
+	// The game in progress is in the latest round, as in a real league,
+	// so "This week" shows it and not the twelfth finished game.
 	now := time.Now()
-	addGame(t, q, 1, u, opp, "live", nil, now)
+	addGame(t, q, 22, u, opp, "live", nil, now)
 	win := gen.GameResultWhiteWin
 	for i := 0; i < 12; i++ {
 		addGame(t, q, int32(10+i), u, opp, "fin"+string(rune('a'+i)), &win, now.Add(-time.Duration(i+1)*24*time.Hour))

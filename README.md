@@ -14,7 +14,7 @@ make db-up             # start Postgres (host port 55432 — 5432 is often taken
 make migrate           # apply schema migrations
 make psql              # open a psql shell on the dev database, for ad-hoc inspection
 make test              # unit tests
-make test-integration  # integration tests (needs TEST_DATABASE_URL)
+make test-integration  # integration tests, on their own database (needs make db-up)
 make run               # run the server (HTTP site + background jobs)
 ```
 
@@ -59,9 +59,14 @@ join) and approve the application at `/admin/registrations`. The new
 member's `/account` then shows the dashboard: pause/resume, an optional
 limit on games in progress, the double-game opt-out and their games.
 
-The integration tests run against the dev database inside a transaction
-that is rolled back, so real rows (your own sessions, for instance) stay
-put and tests must scope their assertions to the rows they created.
+The integration tests run against their own database, `ic_test`, next
+to the dev one in the same container. `make test-integration` creates
+it on first use and applies the migrations on every run. Each test runs
+inside a transaction that is rolled back, so `ic_test` stays empty: a
+test sees only the rows it creates, and nothing you do on the dev site
+can change a test's result. To run them elsewhere, set
+`TEST_DATABASE_URL`; the target migrates that database but only creates
+`ic_test`.
 
 `sqlc` and `goose` are pulled in as `go tool` dependencies — no global
 install needed. The CSS is built with the **Tailwind standalone binary**

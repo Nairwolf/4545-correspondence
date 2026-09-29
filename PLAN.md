@@ -688,9 +688,42 @@ Automated verification: `go build`, `go vet` (both tags), gofmt,
 identically on `2eb8da5`, before this step. They assert on the whole
 database — "0 pairings checked", "no unmatched pairing left" — and the
 dev database has held 7 pending demo pairings (rounds 201 and 202)
-since Phase 4's live checks. Nothing in this step touches that code;
-the fix is to scope the two assertions to the tests' own rows, as the
-README asks of integration tests.
+since Phase 4's live checks. Nothing in this step touches that code.
+Fixed instead by the entry below.
+
+### Between steps 1 and 2 — the integration tests' own database (2026-09-29)
+
+The two failures above came from a design flaw, not from the two
+tests: `TEST_DATABASE_URL` defaulted to the dev database, so every
+integration test saw the dev site's rows, and any test could pass or
+fail depending on what the maintainer had done there. Scoping
+assertions one test at a time relied on every future test remembering
+to do so.
+
+- **A separate database, `ic_test`,** in the same Postgres container.
+  `make test-integration` now depends on a new `make test-db`, which
+  creates it on first use and migrates it on every run. Tests still
+  roll back, so it stays empty between runs (checked: no users,
+  rounds, games or settings after a full run). No Go change, no new
+  dependency.
+- **The two sync-games tests pass unchanged.**
+- **One test had the opposite hidden dependency.**
+  `TestDashboard_AuthorisationAndGames` only passed because the dev
+  database held later rounds (201, 202). On an empty database its own
+  round 21 became "this week", which links the twelfth finished game
+  the test says must not appear. Its game in progress now sits in the
+  latest round (22 instead of 1), as it would in a real league; the
+  test passes on both databases.
+- **Left as they are:** the workarounds written for the shared
+  database (round numbers in the 9000s and 80000s,
+  `isolatePairingPool`, the dashboard test's skip when published
+  rounds exist). They are now unnecessary but harmless, and still
+  protect a run pointed at a non-empty database.
+
+Automated verification: `go vet` (both tags), gofmt, `make test` green;
+`ic_test` dropped and recreated by `make test-db`, then every
+integration test green on it with the test cache off (`-count=1`), none
+skipped; `make test-integration` green again on the existing database.
 
 ---
 

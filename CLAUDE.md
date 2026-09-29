@@ -48,7 +48,7 @@ Build/test commands:
 make db-up             # start Postgres
 make migrate           # apply schema migrations
 make test               # unit tests (no DB)
-make test-integration   # integration tests (needs TEST_DATABASE_URL)
+make test-integration   # integration tests, on their own ic_test database
 make run                # run the server (HTTP site + background jobs)
 make psql               # psql shell on the dev database
 ```
