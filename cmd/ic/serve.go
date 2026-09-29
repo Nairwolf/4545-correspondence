@@ -115,6 +115,7 @@ func runServe(ctx context.Context, cfg config.Config) error {
 		StateSecret:    []byte(cfg.Auth.SessionSecret),
 		AdminUsernames: cfg.Auth.AdminLichessUsernames,
 		SecureCookies:  cfg.Auth.SecureCookies(),
+		Scheduler:      jobs.NewScheduler(riverClient),
 	})
 	if err != nil {
 		return fmt.Errorf("serve: build web handler: %w", err)

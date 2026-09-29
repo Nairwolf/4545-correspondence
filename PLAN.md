@@ -817,6 +817,45 @@ user ids. The notice now always lists the white game first. `make css`
 rebuilt `app.css` (the badge, `sr-only`, and an unrelated `.contents`
 class the committed file was missing). Not checked in a browser.
 
+### Step 3 — a job enqueuer everywhere (2026-09-29)
+
+Built as planned: every path that generates a round now enqueues the
+draft's `publish-round` job in the generating transaction, so a draft
+publishes when its window ends, whoever made it.
+
+- **`jobs.NewInsertClient`:** a river client with no queues and no
+  workers, which can only insert jobs. `ic generate-round` enqueues
+  through it; `serve` works the job at the end of the window, like
+  any other. With no workers, river cannot check the kinds it
+  inserts; the only kind it inserts is `publish-round`, which
+  `serve`'s client registers.
+- **`web.Deps.Scheduler`:** `serve` passes a `jobs.Scheduler` on its
+  running client. *Generate now* and *Regenerate* pass it to
+  `rounds.Generate` / `Regenerate`, which already took one. Tests that
+  don't look at it leave it nil, and the sweep publishes, as before.
+- **Unchanged:** the hourly sweep stays, now only for a job lost to a
+  failed enqueue. If `serve` is down when a window ends, river runs the
+  overdue job as soon as it starts.
+- **`ic publish-round` needs no enqueuer yet.** Publication will queue
+  `create-games` in step 5, and that step gives it one.
+- **Found and corrected in the spec:** §7 said cancelling or
+  regenerating a draft cancels its pending publish job. The code never
+  did that, by design (the comment on `rounds.Publish`): a cancelled
+  draft's job finds nothing to publish. Regenerating keeps the window,
+  so the same job is enqueued again, a no-op. §7 now says so, with a
+  §15 entry. The README's publication paragraph is updated to match.
+
+Tests: the insert-only client queues one `publish-round` job per round
+and window, scheduled for the window's end, and a second job when the
+window moves; `runGenerateRound` with it, as `ic generate-round` calls
+it, leaves the draft's job in river's table; *Generate now* hands the
+scheduler the draft's round and window, and *Regenerate* the same
+again.
+
+Automated verification: `go build`, `go vet` (both tags), gofmt,
+`make test` green; every integration test green on `ic_test`, three
+runs in a row, none skipped (414 tests and subtests, from 411).
+
 ---
 
 ## Verification

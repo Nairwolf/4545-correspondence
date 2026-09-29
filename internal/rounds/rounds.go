@@ -43,9 +43,10 @@ var ErrNotDraft = errors.New("round is not a draft")
 
 // Scheduler enqueues the publish-round job that ends a draft's review
 // window. It is an interface because internal/rounds has no business
-// knowing about river, and because the CLI has no job runner at all:
-// `ic generate-round` passes nil and the hourly sweep publishes the
-// draft instead, at most an hour late.
+// knowing about river. Every generation path passes one (spec §8.5),
+// so a draft publishes when its window ends; with nil, as in tests
+// that don't look at it, the hourly sweep publishes the draft instead,
+// at most an hour late.
 type Scheduler interface {
 	SchedulePublish(ctx context.Context, tx pgx.Tx, roundID int32, publishAt time.Time) error
 }

@@ -183,6 +183,48 @@ func TestAdminRounds_Regenerate(t *testing.T) {
 	assert.Len(t, after, 1, "regeneration replaces, not adds")
 }
 
+// recordingScheduler stands in for serve's river client. What matters
+// here is that the handlers ask for the publication; internal/jobs
+// tests the enqueue itself.
+type recordingScheduler struct {
+	calls []scheduledPublish
+}
+
+type scheduledPublish struct {
+	roundID   int32
+	publishAt time.Time
+}
+
+func (s *recordingScheduler) SchedulePublish(_ context.Context, _ pgx.Tx, roundID int32, publishAt time.Time) error {
+	s.calls = append(s.calls, scheduledPublish{roundID: roundID, publishAt: publishAt})
+	return nil
+}
+
+func TestAdminRounds_GenerateNowSchedulesThePublication(t *testing.T) {
+	// Spec §8.5 (Phase 5): a draft made with Generate now publishes when
+	// its window ends, like the weekly job's, instead of waiting up to
+	// an hour for the sweep.
+	srv, q, tx := testServer(t)
+	sched := &recordingScheduler{}
+	srv.sched = sched
+	_, adminSession := addAdmin(t, srv, q, tx)
+	isolatePairingPool(t, tx)
+	addPlayer(t, q, tx, "Alpha", true, 2000, 0, 2000, 2000, "0")
+	addPlayer(t, q, tx, "Bravo", true, 1900, 0, 1900, 1900, "0")
+
+	id, _ := generateDraft(t, srv, q, adminSession)
+	round, err := q.GetRoundByID(context.Background(), id)
+	require.NoError(t, err)
+	require.Len(t, sched.calls, 1)
+	assert.Equal(t, scheduledPublish{roundID: id, publishAt: round.PublishAt.Time}, sched.calls[0])
+
+	// Regenerating keeps the window, and enqueues the same job again: a
+	// no-op for river when it is already queued.
+	postAs(t, srv, adminSession, roundPath(id)+"/regenerate", url.Values{})
+	require.Len(t, sched.calls, 2)
+	assert.Equal(t, sched.calls[0], sched.calls[1])
+}
+
 func TestAdminRounds_FlipPairing(t *testing.T) {
 	srv, q, tx := testServer(t)
 	admin, adminSession := addAdmin(t, srv, q, tx)

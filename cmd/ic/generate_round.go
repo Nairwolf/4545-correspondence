@@ -28,8 +28,8 @@ type txBeginner interface {
 
 // runGenerateRound implements the generate-round job (spec §6.1): it
 // pairs the next round on pairing.cron, and backs `ic generate-round`
-// and the admin's "generate now" as well. sched may be nil (the CLI has
-// no job runner); the hourly sweep then publishes the draft.
+// as well. sched enqueues the draft's publish-round job: serve's own
+// river client for the scheduled job, an insert-only one for the CLI.
 //
 // A second generation while a draft is still waiting is a FAILED run
 // carrying that message, not a silent no-op: it is visible on

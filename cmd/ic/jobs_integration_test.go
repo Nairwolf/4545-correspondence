@@ -4,13 +4,16 @@ package main
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
+	"github.com/nairwolf/4545-correspondence/internal/jobs"
 )
 
 // jobRunByRiverID reads back the job_runs row a job wrote, found by the
@@ -96,4 +99,33 @@ func TestRunRecompute_SettingsLoadFailureIsRecorded(t *testing.T) {
 	require.NotNil(t, got.Error)
 	assert.Contains(t, *got.Error, "load settings")
 	assert.True(t, got.FinishedAt.Valid)
+}
+
+func TestRunGenerateRound_TheCLIQueuesThePublication(t *testing.T) {
+	// `ic generate-round` has no job runner of its own: its draft's
+	// publish-round job goes into river's table with the draft, for
+	// serve to work when the window ends (spec §8.5), instead of the
+	// hourly sweep publishing it up to an hour late.
+	tx := testTx(t)
+	q := gen.New(tx)
+	ctx := context.Background()
+	createUser(t, q, "cliqueuewhite")
+	createUser(t, q, "cliqueueblack")
+
+	pool, err := pgxpool.New(ctx, os.Getenv("TEST_DATABASE_URL"))
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	enqueuer, err := jobs.NewInsertClient(pool)
+	require.NoError(t, err)
+
+	require.NoError(t, runGenerateRound(ctx, tx, gen.RoundSourceManual, jobs.NewScheduler(enqueuer), nil))
+
+	draft, err := q.GetDraftRound(ctx)
+	require.NoError(t, err)
+	var scheduledAt time.Time
+	err = tx.QueryRow(ctx, `
+		SELECT scheduled_at FROM river_job
+		WHERE kind = 'publish-round' AND (args->>'round_id')::int = $1`, draft.ID).Scan(&scheduledAt)
+	require.NoError(t, err, "the draft's publish job is queued with it")
+	assert.True(t, draft.PublishAt.Time.Equal(scheduledAt), "at the end of the window: %s", scheduledAt)
 }

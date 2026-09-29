@@ -26,6 +26,7 @@ import (
 
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
 	"github.com/nairwolf/4545-correspondence/internal/lichess"
+	"github.com/nairwolf/4545-correspondence/internal/rounds"
 	"github.com/nairwolf/4545-correspondence/internal/session"
 	"github.com/nairwolf/4545-correspondence/internal/settings"
 	"github.com/nairwolf/4545-correspondence/internal/tokencrypt"
@@ -50,6 +51,11 @@ type Deps struct {
 	AdminUsernames []string
 	// SecureCookies marks every cookie Secure; true when served over https.
 	SecureCookies bool
+	// Scheduler enqueues a draft's publish-round job from the admin's
+	// Generate now and Regenerate, on serve's running river client.
+	// Tests that don't look at it leave it nil; the hourly sweep then
+	// publishes the draft.
+	Scheduler rounds.Scheduler
 }
 
 // txBeginner is the one thing the sign-in flow needs from the database
@@ -78,6 +84,7 @@ type Server struct {
 	stateSecret   []byte
 	adminIDs      map[string]bool // Lichess ids (lowercase usernames)
 	secureCookies bool
+	sched         rounds.Scheduler
 	sessions      *session.Manager
 	authLimiter   *rateLimiter
 }
@@ -132,6 +139,7 @@ func newServer(deps Deps, db txBeginner, q *gen.Queries, cfg settings.Settings) 
 		stateSecret:   deps.StateSecret,
 		adminIDs:      adminIDs,
 		secureCookies: deps.SecureCookies,
+		sched:         deps.Scheduler,
 		sessions:      session.New(q, deps.SecureCookies),
 		authLimiter:   newRateLimiter(10, 10),
 	}, nil

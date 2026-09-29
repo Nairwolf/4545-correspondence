@@ -10,6 +10,11 @@
 // calendar, and it is the one job driven by a cron expression from the
 // settings (pairing.cron, spec §4.2).
 //
+// It also enqueues the one-off jobs the rest of the code asks for
+// (Scheduler), in the caller's transaction: from serve's running client
+// there, and from an insert-only client (NewInsertClient) in the
+// one-shot `ic` commands, which have no job runner of their own.
+//
 // A job that overruns JobTimeout has its context cancelled; the handler
 // records the run as failed with that reason and river retries it up to
 // MaxAttempts. Shutdown is soft: cancelling the context passed to Start
@@ -103,13 +108,28 @@ func (PublishRoundArgs) Kind() string   { return "publish-round" }
 // Scheduler enqueues a draft's publish-round job in the transaction
 // that created the draft, so a round and its publication are committed
 // together or not at all. It is what internal/rounds calls through its
-// own Scheduler interface.
+// own Scheduler interface. Every path that generates a round has one:
+// the scheduled job and the web layer on serve's running client, `ic
+// generate-round` on an insert-only client (spec §7, §8.5).
 type Scheduler struct {
 	client *river.Client[pgx.Tx]
 }
 
 func NewScheduler(client *river.Client[pgx.Tx]) *Scheduler {
 	return &Scheduler{client: client}
+}
+
+// NewInsertClient builds a river client that can only enqueue jobs, for
+// the one-shot `ic` commands. A job they enqueue is worked by serve,
+// like any other, at its scheduled time. The client has no workers, so
+// river cannot check the kinds it inserts against them; the kinds
+// Scheduler inserts are all registered by NewClient.
+func NewInsertClient(pool *pgxpool.Pool) (*river.Client[pgx.Tx], error) {
+	client, err := river.NewClient(riverpgxv5.New(pool), &river.Config{Logger: slog.Default()})
+	if err != nil {
+		return nil, fmt.Errorf("build job enqueuer: %w", err)
+	}
+	return client, nil
 }
 
 func (s *Scheduler) SchedulePublish(ctx context.Context, tx pgx.Tx, roundID int32, publishAt time.Time) error {
