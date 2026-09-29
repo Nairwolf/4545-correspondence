@@ -41,15 +41,6 @@ func TestExclusionSentence(t *testing.T) {
 	}
 }
 
-func TestByeSentence(t *testing.T) {
-	assert.Equal(t,
-		"Odd number of players this week and nobody was free for a double game, so you sat out. You're first in line to avoid the next one.",
-		byeSentence(settings.OddPoolDoubleThenBye))
-	assert.Equal(t,
-		"Odd number of players this week, so you sat out. You're first in line to avoid the next one.",
-		byeSentence(settings.OddPoolByeOnly))
-}
-
 func TestOddPoolStrategyOf(t *testing.T) {
 	assert.Equal(t, settings.OddPoolByeOnly,
 		oddPoolStrategyOf(gen.Round{SettingsUsed: []byte(`{"odd_pool_strategy":"bye_only"}`)}))

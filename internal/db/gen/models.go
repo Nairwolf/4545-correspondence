@@ -611,6 +611,23 @@ type JobRun struct {
 	Detail         []byte             `json:"detail"`
 }
 
+type Notification struct {
+	ID        int64              `json:"id"`
+	UserID    pgtype.UUID        `json:"user_id"`
+	Category  string             `json:"category"`
+	Title     string             `json:"title"`
+	Body      string             `json:"body"`
+	LinkUrl   *string            `json:"link_url"`
+	DedupeKey *string            `json:"dedupe_key"`
+	ReadAt    pgtype.Timestamptz `json:"read_at"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+type NotificationPreference struct {
+	UserID   pgtype.UUID `json:"user_id"`
+	Category string      `json:"category"`
+}
+
 type OauthToken struct {
 	UserID          pgtype.UUID        `json:"user_id"`
 	AccessToken     []byte             `json:"access_token"`

@@ -15,6 +15,7 @@ package rounds
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -79,6 +80,15 @@ func snapshot(cfg settings.Settings) Snapshot {
 		Rated:             cfg.Rated,
 		DaysPerMove:       cfg.DaysPerMove,
 	}
+}
+
+// SnapshotOf reads back the settings a round was generated under. An
+// imported round has none, and ok is false.
+func SnapshotOf(round gen.Round) (snap Snapshot, ok bool) {
+	if len(round.SettingsUsed) == 0 || json.Unmarshal(round.SettingsUsed, &snap) != nil {
+		return Snapshot{}, false
+	}
+	return snap, true
 }
 
 // engineConfig translates the settings into the engine's own config.

@@ -81,6 +81,12 @@ func Generate(
 	if err := auditRound(ctx, q, "round.generate", actor, round, nil, describe(result)); err != nil {
 		return Outcome{}, err
 	}
+	if round.State == gen.RoundStatePublished {
+		// auto_publish: no draft, so no Publish call to send them.
+		if err := notifyPublished(ctx, q, round); err != nil {
+			return Outcome{}, err
+		}
+	}
 	if err := schedulePublication(ctx, tx, sched, round); err != nil {
 		return Outcome{}, err
 	}

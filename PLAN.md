@@ -725,6 +725,98 @@ Automated verification: `go vet` (both tags), gofmt, `make test` green;
 integration test green on it with the test cache off (`-count=1`), none
 skipped; `make test-integration` green again on the existing database.
 
+### Step 2 — notification centre (2026-09-29)
+
+Built as planned: migration `00012_notifications.sql`,
+`internal/notify`, the bell, `/account/notifications`, the opt-out
+checkboxes on `/account`, and the emitters that need no automation.
+
+- **`notify.Send`** writes one notice in the caller's transaction, so
+  it is committed with the change it announces or not at all. It skips
+  a category the player turned off (never `registration`, `auto_pause`
+  or `token`) and refuses a category it does not know. The category
+  column is text; the list lives in `notify`, so a new category needs
+  no migration.
+- **Emitters:**
+  - registration approved / rejected (`admin.go`), the rejection with
+    the admin's reason;
+  - level-up (`syncOneGame`, from `Recompute`'s `leveledUp`), key
+    `level_up:<level>`, so a level lost to a settings change and
+    regained is not announced twice;
+  - round published: paired, double game (one notice for the
+    volunteer, both games, white first) and bye (the dashboard's own
+    sentence). Sent from `Publish` and from `Generate` under
+    `auto_publish`. A player excluded for another reason gets none:
+    the dashboard already says why.
+- **UI:** a bell with the unread count on every page for a signed-in
+  user; the list shows the latest 50, newest first, with *Mark as
+  read* per notice and *Mark all as read*; on `/account`, one checkbox
+  per opt-out-able category. Changing them writes a
+  `profile.notifications` audit row; marking read does not.
+- **Deviation: the dedupe key is unique per player, `UNIQUE (user_id,
+  dedupe_key)`,** not across the table as decision 11 and spec §4.1
+  said. The spec's own example, `round:201:paired:<pairing id>`, is
+  sent to both players of the pairing: with a table-wide unique key
+  the second player's notice would have been silently dropped. Spec
+  §4.1 and §10 amended, with a §15 entry.
+- **Decisions taken while building:**
+  - The paired and double-game notices name the game to start — "a
+    rated correspondence game at 2 days per move, you with white" —
+    from the settings the round was generated under, because §7.3
+    matching only finds a game with the right days per move and
+    colours.
+  - All five opt-out-able categories have a checkbox now, including
+    `challenge`, `unstarted` and `missed_start`, which nothing sends
+    until steps 6–7. A player's choice is then already stored when
+    they start.
+  - `ic import-pairings` sends no notices: it records the
+    spreadsheet's rounds, whose players were told there.
+  - The bye sentence moved from `internal/web` to `rounds.ByeSentence`
+    (with `rounds.SnapshotOf`), so the dashboard and the notice say
+    the same thing.
+  - The double-game notice is worded from the games it finds rather
+    than failing when there are not two: removing one of the
+    volunteer's games already drops their `double_games` row, but a
+    notice must never be what stops a round from publishing.
+  - A failed unread count leaves the bell at zero rather than failing
+    the page; the page's own queries report a database that is down.
+- **Known limit:** sync-games writes without a transaction around the
+  whole game, as before. A database error between the standing update
+  and the level-up notice loses that one notice.
+- **Found, not changed: hand-started games can only be matched if they
+  are rated.** §7.3 matching (`internal/matching`) always requires a
+  rated game, and sync-games compares days per move with today's
+  setting, not the round's. With `pairing.rated = false`, no
+  hand-started game would ever be found. This predates Phase 5, and
+  bulk and challenge games (steps 5–6) are found by id, so it only
+  affects hand-started ones.
+
+Tests: `notify` — every category is either critical or opt-out-able;
+a notice stored unread with its link; the dedupe key per player (both
+players of a pairing, twice each, one notice each); no key, no
+deduplication; an opt-out respected, ignored for a critical category;
+an unknown category refused; marking read only the owner's. Rounds —
+nobody told while the round is a draft; both players told once at
+publication, with the time control and the key; a second `Publish`
+sends nothing; `auto_publish` tells them at once; the volunteer gets
+one notice for both games; the bye gets the `bye_only` sentence; a
+paused player gets nothing. Level-up — both players of a first game
+rise to level 1 and are told once, with the XP to the next level. Web
+— sign-in required; the bell's count on any page; the list newest
+first; mark one, mark all; another player's notice untouched, a bad
+id refused; preferences saved, audited once, applied to `Send`,
+reset; a rejected applicant has no checkboxes but sees their notice;
+the approve / reject / change-of-mind notices.
+
+Automated verification: `go build`, `go vet` (both tags), gofmt,
+`make test` green; every integration test green on `ic_test` with the
+test cache off, three runs in a row, none skipped (411 tests and
+subtests, from 390). One new test first failed one run in three: the
+volunteer's games came in pairing order, which depends on the random
+user ids. The notice now always lists the white game first. `make css`
+rebuilt `app.css` (the badge, `sr-only`, and an unrelated `.contents`
+class the committed file was missing). Not checked in a browser.
+
 ---
 
 ## Verification

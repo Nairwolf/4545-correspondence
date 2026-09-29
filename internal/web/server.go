@@ -98,7 +98,7 @@ func New(ctx context.Context, deps Deps) (*Server, error) {
 // real database) while still passing the real pool that /health pings.
 func newServer(deps Deps, db txBeginner, q *gen.Queries, cfg settings.Settings) (*Server, error) {
 	pages := []string{
-		"home", "standings", "levels", "player", "jobs", "join", "account", "auth_error",
+		"home", "standings", "levels", "player", "jobs", "join", "account", "notifications", "auth_error",
 		"admin_registrations", "admin_rounds", "admin_round",
 	}
 	templates := make(map[string]*template.Template, len(pages))
@@ -165,18 +165,22 @@ func serverError(w http.ResponseWriter, err error) {
 // the nav and title without each handler restating them.
 type base struct {
 	Title   string
-	Nav     string    // active top-nav item: "home" | "standings" | "levels" | "account" | "admin" | "jobs"
+	Nav     string    // active top-nav item: "home" | "standings" | "levels" | "account" | "notifications" | "admin" | "jobs"
 	User    *gen.User // signed-in user, nil for a visitor
 	IsAdmin bool
+	Unread  int64 // unread notifications, for the bell (spec §8.3)
 }
 
-// page builds the base for a request: title, active nav item, and who
-// is signed in.
+// page builds the base for a request: title, active nav item, who is
+// signed in and how many notifications they have not read. A failed
+// count leaves the bell at zero rather than failing the page: the
+// page's own queries will report a database that is down.
 func (s *Server) page(r *http.Request, title, nav string) base {
 	b := base{Title: title, Nav: nav}
 	if u, ok := currentUser(r); ok {
 		b.User = &u
 		b.IsAdmin = u.Role == gen.UserRoleAdmin
+		b.Unread, _ = s.q.CountUnreadNotifications(r.Context(), u.ID)
 	}
 	return b
 }

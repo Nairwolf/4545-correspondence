@@ -2,7 +2,6 @@ package web
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -52,6 +51,10 @@ type dashboardData struct {
 
 	ThisWeek    thisWeekView
 	DoubleGames string // "You've played N double games so far.", empty when none
+
+	// NotificationPrefs are the opt-out checkboxes (spec §10), shown
+	// with the other settings when CanConfigure.
+	NotificationPrefs []notificationPref
 
 	Token     *gen.OauthToken // nil when none stored
 	TokenOK   bool            // stored, not revoked, not expired
@@ -184,7 +187,7 @@ func thisWeekFor(ctx context.Context, q *gen.Queries, userID pgtype.UUID) (thisW
 		return thisWeekView{}, err
 	case exc.Reason == gen.ExclusionReasonBye:
 		v.Kind = thisWeekBye
-		v.Sentence = byeSentence(oddPoolStrategyOf(round))
+		v.Sentence = rounds.ByeSentence(oddPoolStrategyOf(round))
 	default:
 		v.Kind = thisWeekExcluded
 		v.Sentence = exclusionSentence(exc, round.Number)
@@ -209,21 +212,11 @@ func byeHistoryFor(ctx context.Context, q *gen.Queries, userID pgtype.UUID) (str
 // under. An imported round has no snapshot; it also has no byes, so
 // the default is only a formality there.
 func oddPoolStrategyOf(round gen.Round) settings.OddPoolStrategy {
-	var snap rounds.Snapshot
-	if len(round.SettingsUsed) == 0 || json.Unmarshal(round.SettingsUsed, &snap) != nil {
+	snap, ok := rounds.SnapshotOf(round)
+	if !ok {
 		return settings.OddPoolDoubleThenBye
 	}
 	return snap.OddPoolStrategy
-}
-
-// byeSentence is spec §8.3's bye wording. It must never read as a
-// penalty: a bye goes by rotation alone, so the player who just had one
-// is the last in line for the next.
-func byeSentence(strategy settings.OddPoolStrategy) string {
-	if strategy == settings.OddPoolByeOnly {
-		return "Odd number of players this week, so you sat out. You're first in line to avoid the next one."
-	}
-	return "Odd number of players this week and nobody was free for a double game, so you sat out. You're first in line to avoid the next one."
 }
 
 // exclusionSentence words a round_exclusions row (spec §4.1, §8.3). The
@@ -260,6 +253,8 @@ func savedMessage(code string) string {
 		return "Double-game preference updated."
 	case "resume":
 		return "Welcome back — your quest resumes with the next round."
+	case "notifications":
+		return "Notification preferences updated."
 	}
 	return ""
 }
@@ -339,6 +334,15 @@ func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, status 
 		}
 	}
 
+	if data.CanConfigure {
+		muted, err := s.q.ListMutedNotificationCategories(ctx, user.ID)
+		if err != nil {
+			serverError(w, err)
+			return
+		}
+		data.NotificationPrefs = notificationPrefsFor(muted)
+	}
+
 	tok, err := s.q.GetOAuthToken(ctx, user.ID)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -368,9 +372,10 @@ func canConfigure(u gen.User) bool {
 
 // --- actions -----------------------------------------------------------
 
-// settingsRequest is the common prologue of the four POST handlers: the
-// user, their current profile (the audit "before"), and the parsed form.
-// A false return means a response has already been written.
+// settingsRequest is the common prologue of the settings POST
+// handlers: the user, their current profile (the audit "before"), and
+// the parsed form. A false return means a response has already been
+// written.
 func (s *Server) settingsRequest(w http.ResponseWriter, r *http.Request) (gen.User, gen.PlayerProfile, bool) {
 	user, _ := currentUser(r)
 	if !canConfigure(user) {

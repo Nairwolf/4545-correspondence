@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
 	"github.com/nairwolf/4545-correspondence/internal/lichess"
 	"github.com/nairwolf/4545-correspondence/internal/settings"
+	"github.com/nairwolf/4545-correspondence/internal/standings"
 )
 
 // testQueries opens a transaction against TEST_DATABASE_URL and rolls
@@ -212,6 +214,50 @@ func TestDoSyncGames_MatchesAnUnmatchedPairing(t *testing.T) {
 	blackStanding, err := q.GetPlayerStanding(ctx, black.ID)
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), blackStanding.Wins)
+}
+
+func TestDoSyncGames_NotifiesALevelUpOnce(t *testing.T) {
+	// Spec §7.1 step 6, §10. A level is floor(sqrt(XP)) and a win is
+	// worth 3 XP, a loss 1 (§5.6), so a first finished game lifts both
+	// players from level 0 to level 1.
+	q := testQueries(t)
+	ctx := context.Background()
+
+	white := createUser(t, q, "levelupwhite")
+	black := createUser(t, q, "levelupblack")
+	// A first-ever standing is never a level-up: give both a stored
+	// level 0 to rise from, as approval does.
+	for _, u := range []gen.User{white, black} {
+		_, err := standings.Recompute(ctx, q, u.ID, settings.Defaults())
+		require.NoError(t, err)
+	}
+	gameID := "levelup1"
+	createPendingPairing(t, q, 80009, white, black, &gameID)
+
+	fake := lichess.NewFake()
+	fake.Games[gameID] = fakeGame(gameID, white, black, lichess.StatusResign, "white")
+
+	for range 2 { // the second run finds nothing new to announce
+		_, err := doSyncGames(ctx, q, fake, settings.Defaults())
+		require.NoError(t, err)
+	}
+
+	for _, c := range []struct {
+		user   gen.User
+		toNext int
+	}{
+		{white, 1}, // 3 XP, level 2 at 4
+		{black, 3}, // 1 XP
+	} {
+		list, err := q.ListNotificationsForUser(ctx, gen.ListNotificationsForUserParams{UserID: c.user.ID, Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, list, 1, c.user.LichessUsername)
+		assert.Equal(t, "level_up", list[0].Category)
+		assert.Equal(t, "You reached level 1", list[0].Title)
+		assert.Equal(t, fmt.Sprintf("Your results have earned you level 1. %d more XP to the next one.", c.toNext), list[0].Body)
+		require.NotNil(t, list[0].DedupeKey)
+		assert.Equal(t, "level_up:1", *list[0].DedupeKey)
+	}
 }
 
 func TestDoSyncGames_NeverRechecksADraftRoundsPairing(t *testing.T) {

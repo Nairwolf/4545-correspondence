@@ -45,6 +45,10 @@ func (s *Server) Handler() http.Handler {
 			r.Post("/capacity", s.handleSetCapacity)
 			r.Post("/double-games", s.handleSetDoubleGames)
 			r.Post("/resume", s.handleResume)
+			r.Post("/notification-preferences", s.handleSetNotificationPreferences)
+			r.Get("/notifications", s.handleNotifications)
+			r.Post("/notifications/read", s.handleMarkAllNotificationsRead)
+			r.Post("/notifications/{id}/read", s.handleMarkNotificationRead)
 		})
 
 		// Everything under /admin is behind the role check (spec §11),

@@ -15,6 +15,7 @@ import (
 	"github.com/nairwolf/4545-correspondence/internal/ingest"
 	"github.com/nairwolf/4545-correspondence/internal/lichess"
 	"github.com/nairwolf/4545-correspondence/internal/matching"
+	"github.com/nairwolf/4545-correspondence/internal/notify"
 	"github.com/nairwolf/4545-correspondence/internal/settings"
 	"github.com/nairwolf/4545-correspondence/internal/standings"
 )
@@ -430,13 +431,47 @@ func syncOneGame(
 		return false, nil
 	}
 
-	if _, err := standings.Recompute(ctx, q, whiteID, cfg); err != nil {
+	whiteLeveledUp, err := standings.Recompute(ctx, q, whiteID, cfg)
+	if err != nil {
 		return false, fmt.Errorf("recompute white standing: %w", err)
 	}
-	if _, err := standings.Recompute(ctx, q, blackID, cfg); err != nil {
+	blackLeveledUp, err := standings.Recompute(ctx, q, blackID, cfg)
+	if err != nil {
 		return false, fmt.Errorf("recompute black standing: %w", err)
 	}
+	if whiteLeveledUp {
+		if err := notifyLevelUp(ctx, q, whiteID); err != nil {
+			return false, err
+		}
+	}
+	if blackLeveledUp {
+		if err := notifyLevelUp(ctx, q, blackID); err != nil {
+			return false, err
+		}
+	}
 	return true, nil
+}
+
+// notifyLevelUp tells a player the level their standing now shows
+// (spec §7.1 step 6, §10). The key is per level, so a level lost to a
+// settings change and regained later is not announced twice.
+func notifyLevelUp(ctx context.Context, q *gen.Queries, userID pgtype.UUID) error {
+	standing, err := q.GetPlayerStanding(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("read standing for level-up notice: %w", err)
+	}
+	return notify.Send(ctx, q, notify.Notice{
+		User:     userID,
+		Category: notify.LevelUp,
+		Title:    fmt.Sprintf("You reached level %d", standing.Level),
+		Body: fmt.Sprintf(
+			"Your results have earned you level %d. %d more XP to the next one.",
+			standing.Level,
+			standing.XpToNextLevel,
+		),
+		Link: "/account",
+		Key:  fmt.Sprintf("level_up:%d", standing.Level),
+	})
 }
 
 func earliestPairAt(pairings []gen.ListUnmatchedPairingsRow) time.Time {

@@ -20,10 +20,9 @@ import (
 // meanwhile is the same no-op, which is what lets Cancel leave its
 // scheduled job alone rather than hunting it down in river's tables.
 //
-// Publication is only the state change: the pairings stay
-// manual_external/pending, players challenge each other by hand, and
-// sync-games discovers the games (§7.3). Phase 5 creates them on
-// Lichess between the lock and the update.
+// Publication is the state change and the players' notices (§10): the
+// pairings stay manual_external/pending, players challenge each other
+// by hand, and sync-games discovers the games (§7.3).
 func Publish(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -48,6 +47,9 @@ func Publish(
 
 	after := map[string]any{"number": round.Number, "published_at": now}
 	if err := auditRound(ctx, q, "round.publish", actor, round, nil, after); err != nil {
+		return gen.Round{}, false, err
+	}
+	if err := notifyPublished(ctx, q, round); err != nil {
 		return gen.Round{}, false, err
 	}
 	return round, true, nil

@@ -419,8 +419,10 @@ Notification              # on-site notification centre (§10)
   title                 text
   body                  text
   link_url              text nullable
-  dedupe_key            text nullable unique   # e.g. round:201:paired:<pairing id>, so a
+  dedupe_key            text nullable          # e.g. round:201:paired:<pairing id>, so a
                                               # retried job never notifies twice
+  UNIQUE (user_id, dedupe_key)                # per recipient: both players of a pairing
+                                              # are told about one event under one key
   read_at               timestamptz nullable
   created_at            timestamptz
 
@@ -1200,7 +1202,7 @@ Notes:
 
 - A player whose token has lapsed may no longer be visiting the site. Token-problem notifications must therefore also appear as a dashboard banner, shown regardless of preferences.
 - All player-facing categories must be individually opt-out-able in the dashboard, except the account-critical ones: `registration`, `auto_pause`, `token`.
-- Notifications are **idempotent**: each carries a `dedupe_key` (e.g. `round:201:paired:<pairing id>`), unique when set, so a retried job never notifies twice. *(2026-09-28.)*
+- Notifications are **idempotent**: each carries a `dedupe_key` (e.g. `round:201:paired:<pairing id>`), unique per player when set, so a retried job never notifies twice. *(2026-09-28; per player since 2026-09-29, as the example key needs: both players of a pairing get a notice under it.)*
 - Because there is no email, **admins must not rely on notifications reaching a dormant player.** The inactivity flow in §8.4 should assume a player may never see the check-in, and its automatic deactivation is the mechanism that matters, not the message.
 
 ---
@@ -1331,6 +1333,7 @@ These were open and are now settled. Recorded here so they are not relitigated d
 
 - **2026-09-28** — Phase 5 plan amendments (see `PLAN.md`). `msg:write` is not a player scope and there are no custom Lichess PMs; `LICHESS_MSG_ENABLED` removed (§2.2, §3.1, §8.2, §10). Bulk pairing re-checked against v2.0.174: game ids at creation, no `pairAt`, the `message` sent by the organiser account, the rejection body, the double game in one bulk (§3.2, §6.3). Who gets a bulk game, a challenge or a hand-started one; the grace rule as a live `no_valid_token` exclusion (§3.3, §5.7). A challenge's id is its game's id, so challenges are re-checked by id (§3.4, §7.3). `Notification.dedupe_key`, `NotificationPreference` reduced to an opt-out row, `MissedStart.pairing_id` and uniqueness, `PlayerProfile.resumed_at`, `Round.game_creation` and `games_created_at` (§4.1, §4.1.1). `pairing.game_creation`, the `days_per_move` set, validation of the Phase 5 keys (§4.2). Publication queues `create-games`, which probes, reconciles, bulks, challenges and gives up to hand-started games; a published round is final (§6.3, §8.5). Unstarted pairings and missed starts (§6.4). Jobs table: `validate-tokens` at `pairing.cron` − 1h, `evaluate-activity` before generation, `create-games`, `cancel-challenge`, every draft gets its publish job (§7, §8.5). Dashboard: token status and banner, this-week wording per case, notifications (§8.3); inactivity check-in deferred (§8.4); `/admin/tokens` and computed admin alerts, a draft awaiting review included (§6.1, §8.5). Notifications redesigned around the on-site centre (§10). Deletion checklist extended (§11). Phase 4 and 5 paragraphs (§12), decisions (§13), §14.3 now gates switching game creation on, not building.
 - **2026-09-28** — Discord dropped (maintainer): no `DISCORD_WEBHOOK_URL` (§2.2), no Discord notification channel (§10), no Discord integration in Phase 6 (§12, §13).
+- **2026-09-29** — Phase 5 step 2 (see `PLAN.md`): `Notification.dedupe_key` is unique per recipient, `UNIQUE (user_id, dedupe_key)`, not across the table (§4.1, §10). The example key `round:201:paired:<pairing id>` names an event both players of the pairing are told about, which a table-wide unique key could not hold.
 - **2026-09-28** — Licensed AGPL-3.0-or-later (§13); every page's footer links to the source and the licence (§8.1).
 - **2026-09-22** — Phase 4 close-out. The dashboard's "This week" section recorded as built, with the cases settled while building it (§8.3). The diagnostics show the whole settings snapshot (§8.5). A manually generated draft is published by the hourly sweep, up to an hour after its window (§8.5). The pairing tests requirement no longer asks for the unreachable relaxation ladder, and names both solvers (§11). Phase 4 marked built (§12).
 - **2026-09-22** — Blossom solver, selectable. `pairing.solver` added (`greedy` default | `blossom`), validated at load (§4.2). The blossom solver is a port of NetworkX's `max_weight_matching` (the 2008 `mwmatching.py` it descends from has no licence), run on `M − cost` weights in maximum-cardinality mode; each round records its solver in `settings_used`, shown on the round view (§6.2 step 4). The admin's generate, regenerate and swap actions read settings per click rather than the server's start-up copy (§4.2). Decision on the solver amended (§13), Phase 4 paragraph updated (§12).

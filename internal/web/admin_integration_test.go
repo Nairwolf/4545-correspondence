@@ -134,6 +134,11 @@ func TestAdmin_Approve(t *testing.T) {
 	require.NoError(t, err, "standings row computed on approval")
 	assert.Contains(t, get2(t, srv, "/standings"), `/players/Newbie">Newbie`)
 
+	notices := noticesFor(t, q, u)
+	require.Len(t, notices, 1, "the applicant is told (spec §10)")
+	assert.Equal(t, "registration", notices[0].Category)
+	assert.Equal(t, "Your application was approved", notices[0].Title)
+
 	t.Run("approving again is stale", func(t *testing.T) {
 		rec := postAs(t, srv, admin, "/admin/registrations/approve", url.Values{"ids": {u.ID.String()}})
 		assert.Equal(t, "/admin/registrations?error=stale", rec.Header().Get("Location"))
@@ -213,6 +218,12 @@ func TestAdmin_Reject(t *testing.T) {
 		body := getAs(t, srv, sessionFor(t, srv, u), "/account").Body.String()
 		assert.Contains(t, body, "not accepted")
 		assert.Contains(t, body, "Account too new")
+
+		notices := noticesFor(t, q, u)
+		require.Len(t, notices, 1)
+		assert.Equal(t, "registration", notices[0].Category)
+		assert.Equal(t, "Your application was not accepted", notices[0].Title)
+		assert.Equal(t, "Reason given: Account too new; apply again in a month.", notices[0].Body)
 	})
 
 	t.Run("rejected tab lists them and can approve", func(t *testing.T) {
@@ -226,6 +237,10 @@ func TestAdmin_Reject(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, gen.UserStatusApproved, after.Status)
 		assert.Nil(t, after.RejectionReason, "cleared on approval")
+
+		notices := noticesFor(t, q, u)
+		require.Len(t, notices, 2, "told of the change of mind too")
+		assert.Equal(t, "Your application was approved", notices[0].Title)
 	})
 
 	t.Run("rejecting an approved user is stale", func(t *testing.T) {

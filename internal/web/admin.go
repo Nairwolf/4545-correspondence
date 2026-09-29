@@ -16,6 +16,7 @@ import (
 
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
 	"github.com/nairwolf/4545-correspondence/internal/lichess"
+	"github.com/nairwolf/4545-correspondence/internal/notify"
 	"github.com/nairwolf/4545-correspondence/internal/standings"
 )
 
@@ -222,9 +223,9 @@ func (s *Server) handleApproveRegistrations(w http.ResponseWriter, r *http.Reque
 	}
 }
 
-// approve is one approval: the status change, the audit row, and the
+// approve is one approval: the status change, the audit row, the
 // player's first standings row so they appear on /standings now rather
-// than after the nightly recompute.
+// than after the nightly recompute, and their notice (spec §10).
 func (s *Server) approve(ctx context.Context, q *gen.Queries, admin gen.User, id pgtype.UUID) error {
 	before, err := q.GetUserByID(ctx, id)
 	if err != nil {
@@ -237,10 +238,23 @@ func (s *Server) approve(ctx context.Context, q *gen.Queries, admin gen.User, id
 	if _, err := standings.Recompute(ctx, q, user.ID, s.cfg); err != nil {
 		return err
 	}
-	return audit(ctx, q, admin.ID, "registration.approve", user.ID,
+	err = audit(ctx, q, admin.ID, "registration.approve", user.ID,
 		map[string]string{"status": string(before.Status)},
 		map[string]string{"status": string(user.Status)},
 	)
+	if err != nil {
+		return err
+	}
+	// A user is approved at most once (pending or rejected → approved),
+	// so the key only guards against a bug, not a legitimate repeat.
+	return notify.Send(ctx, q, notify.Notice{
+		User:     user.ID,
+		Category: notify.Registration,
+		Title:    "Your application was approved",
+		Body:     "Welcome! You'll be paired from the next round, and your pairing will appear on your account page once it's published.",
+		Link:     "/account",
+		Key:      "registration:approved",
+	})
 }
 
 // handleRejectRegistration rejects one pending application. The reason
@@ -270,10 +284,23 @@ func (s *Server) handleRejectRegistration(w http.ResponseWriter, r *http.Request
 		if err != nil {
 			return err
 		}
-		return audit(ctx, q, admin.ID, "registration.reject", user.ID,
+		err = audit(ctx, q, admin.ID, "registration.reject", user.ID,
 			map[string]string{"status": string(gen.UserStatusPending)},
 			map[string]string{"status": string(user.Status), "reason": reason},
 		)
+		if err != nil {
+			return err
+		}
+		// Only a pending application can be rejected, and nothing leads
+		// back to pending, so this happens at most once per user too.
+		return notify.Send(ctx, q, notify.Notice{
+			User:     user.ID,
+			Category: notify.Registration,
+			Title:    "Your application was not accepted",
+			Body:     "Reason given: " + reason,
+			Link:     "/account",
+			Key:      "registration:rejected",
+		})
 	})
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
