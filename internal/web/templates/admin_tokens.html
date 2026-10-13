@@ -1,0 +1,60 @@
+{{define "content"}}
+<h1 class="mb-4 text-lg font-semibold text-zinc-100">Lichess tokens</h1>
+
+{{if eq (printf "%s" .GameCreation) "manual"}}
+<p class="mb-6 rounded border border-zinc-800 p-3 text-sm text-zinc-400">Game creation is <span class="font-medium text-zinc-200">manual</span>: players start every game by hand, so tokens don't affect pairing yet. Once <code>pairing.game_creation</code> is <code>lichess</code>, a player with no token is left out at once, and one whose token lapsed after {{plural .GraceDays "day"}} of grace.</p>
+{{end}}
+
+<section class="mb-8">
+  <h2 class="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-500">Organiser token</h2>
+  {{with .Organiser}}
+  <p class="text-zinc-300">
+    {{if eq (printf "%s" .State) "valid"}}<span class="font-medium text-emerald-400">Valid</span>
+    {{- else if eq (printf "%s" .State) "not_set"}}<span class="font-medium text-zinc-400">Not set</span>
+    {{- else if eq (printf "%s" .State) "missing_scope"}}<span class="font-medium text-red-400">Missing challenge:bulk</span>
+    {{- else}}<span class="font-medium text-red-400">Invalid</span>{{end}}
+    {{- if .Account}} · account <a class="text-zinc-100 hover:underline" href="{{userURL .Account}}">{{.Account}}</a>{{end}}
+    {{- if .Expires}} · expires {{.Expires.UTC.Format "2 January 2006"}}{{else if eq (printf "%s" .State) "valid"}} · never expires{{end}}
+  </p>
+  {{else}}
+  <p class="text-zinc-400">Not checked yet.</p>
+  {{end}}
+  {{if not .CheckedAt.IsZero}}<p class="mt-1 text-xs text-zinc-500">Checked by validate-tokens on {{.CheckedAt.UTC.Format "2 January 2006 15:04"}} UTC. It runs an hour before each round is generated; <code>ic validate-tokens</code> runs it now.</p>{{end}}
+  {{if .Problem}}<p class="mt-2 text-sm text-amber-300">{{.Problem}}</p>{{end}}
+</section>
+
+<section>
+  <h2 class="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-500">Players without a valid token ({{len .Rows}})</h2>
+  {{if not .Rows}}
+  <p class="text-zinc-500">Every approved player's token was valid at its last check.</p>
+  {{else}}
+  {{$manual := eq (printf "%s" .GameCreation) "manual"}}
+  <div class="overflow-x-auto">
+  <table class="w-full min-w-[40rem] border-collapse text-left">
+    <thead class="text-xs uppercase tracking-wide text-zinc-500">
+      <tr class="border-b border-zinc-800">
+        <th class="py-2 pr-3">Player</th>
+        <th class="py-2 pr-3">Token</th>
+        <th class="py-2 pr-3">Since</th>
+        <th class="py-2">Pairing</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Rows}}
+      <tr class="border-b border-zinc-900">
+        <td class="py-1.5 pr-3"><a class="text-zinc-100 hover:underline" href="{{playerURL .Username}}">{{.Username}}</a>{{if .Sitting}} <span class="text-xs text-zinc-500">({{.Sitting}})</span>{{end}}</td>
+        <td class="py-1.5 pr-3 text-zinc-400">{{.Problem}}</td>
+        <td class="py-1.5 pr-3 text-zinc-500">{{if .Since.IsZero}}—{{else}}{{.Since.UTC.Format "2 January 2006"}}{{end}}</td>
+        <td class="py-1.5">
+          {{if $manual}}<span class="text-zinc-500">not gated (manual)</span>
+          {{- else if .Excluded}}<span class="text-red-400">left out</span>
+          {{- else}}<span class="text-amber-300">{{.GraceLeft}} of grace left</span>{{end}}
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{end}}
+</section>
+{{end}}

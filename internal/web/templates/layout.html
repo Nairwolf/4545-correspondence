@@ -20,6 +20,7 @@
         <a href="/admin/registrations" class="hover:text-zinc-100 {{if eq $nav "admin"}}text-zinc-100{{end}}">Admin</a>
         <a href="/admin/rounds" class="hover:text-zinc-100 {{if eq $nav "rounds"}}text-zinc-100{{end}}">Rounds</a>
         <a href="/admin/jobs" class="hover:text-zinc-100 {{if eq $nav "jobs"}}text-zinc-100{{end}}">Jobs</a>
+        <a href="/admin/tokens" class="hover:text-zinc-100 {{if eq $nav "tokens"}}text-zinc-100{{end}}">Tokens</a>
         {{- end}}
       </nav>
       <nav class="ml-auto flex items-center gap-4 text-zinc-400">
@@ -39,6 +40,14 @@
     </div>
   </header>
   <main class="mx-auto max-w-5xl px-4 py-6">
+    {{- /* The admin banner (spec §8.5): computed on each admin page, never stored. */}}
+    {{- if .Alerts}}
+    <ul class="mb-6 rounded border border-amber-900/60 bg-amber-950/30 p-3 text-sm text-amber-200">
+      {{- range .Alerts}}
+      <li class="py-0.5">{{.Text}}{{if .Link}} <a class="underline hover:text-amber-100" href="{{.Link}}">See</a>{{end}}</li>
+      {{- end}}
+    </ul>
+    {{- end}}
     {{template "content" .}}
   </main>
   <footer class="mx-auto max-w-5xl px-4 py-8 text-xs text-zinc-600">

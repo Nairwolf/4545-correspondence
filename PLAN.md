@@ -856,6 +856,127 @@ Automated verification: `go build`, `go vet` (both tags), gofmt,
 `make test` green; every integration test green on `ic_test`, three
 runs in a row, none skipped (414 tests and subtests, from 411).
 
+### Step 4 — token health (2026-10-13)
+
+Built as planned: the settings `pairing.game_creation` (`manual` by
+default) and `token.invalid_grace_days` (14), the `validate-tokens` job
+an hour before `pairing.cron` and `ic validate-tokens`, the
+`no_valid_token` gate in the pool, the token status and banner on
+`/account`, `/admin/tokens`, and the organiser token on `/health` and
+in the admin banner, with the draft awaiting review.
+
+- **One rule, in a new package `internal/tokenhealth`.** The pool, the
+  dashboard and `/admin/tokens` must agree on when a token stopped
+  working and when the grace runs out, so the rule lives in one pure
+  package rather than in `rounds`, which only the pool uses:
+  - `Player` reads the `oauth_tokens` columns: no row at all, or
+    invalid since its revocation or its expiry, whichever came first;
+  - `Excluded` is §3.3's rule: no row → at once, lapsed → after more
+    than the grace days; `GraceDaysLeft` rounds up, so "a minute left"
+    reads "1 day";
+  - `Organiser` is the organiser token's state as `validate-tokens`
+    records it in its run's detail.
+- **The pool gate.** `ListPairingPool` gains a base-table `LEFT JOIN
+  oauth_tokens`; the generated fields are `pgtype.Timestamptz`, which
+  keep NULL. `token_issued_at` is NOT NULL in a stored row, so NULL
+  there means no token. `statusOf` checks the token after inactive,
+  paused and auto-paused (§5.7), and only under `lichess`. The engine
+  puts the token before capacity: a player at their cap without a token
+  is told about the token, the one they can fix.
+- **`validate-tokens`:** one `TestTokens` call (per 1 000) for every
+  player token and the organiser's.
+  - Refused (`null`) or without `challenge:write` → `revoked_at`, and a
+    `token` notice in the same transaction, keyed by the token's issue
+    time. Valid → `last_validated_at` and `expires_at` refreshed. Not
+    mentioned in the answer → left alone (step 1's distinction).
+  - Every update is guarded on the encrypted bytes it read, so a player
+    who signs in while the run is under way keeps their new token.
+  - **Decided while building** (spec §7 amended, §15 entry):
+    - only pending and approved players' tokens are tested: nothing
+      uses a rejected or banned user's token, and a "re-authorise"
+      notice would only confuse them;
+    - a token already marked revoked is not tested again: Lichess never
+      brings one back, and signing in stores a new one;
+    - a token that cannot be decrypted is never revoked. It is named
+      in the run's error, and the run fails only if none decrypts,
+      naming `TOKEN_ENCRYPTION_KEY`. With the wrong key, every token
+      would look unusable, and revoking them would unpair the league.
+  - The notice is worded for both modes ("which it needs to create
+    your games"); the dashboard banner carries the mode-specific
+    consequence.
+- **The schedule** wraps the parsed `pairing.cron`:
+  `Next(t) = cron.Next(t + 1h) − 1h`, so it follows `CRON_TZ=` and
+  daylight saving.
+- **`/health`** watches `validate-tokens` and reports `game_creation`
+  and `organiser_token` (state, account, expiry, when checked), read
+  from the latest *successful* run, so Lichess being down does not
+  erase what was known. It is 503 under `lichess` when that token
+  cannot create games (invalid, missing scope, not set, or expired
+  since the check). `create-games` and `evaluate-activity` join
+  `jobNames` in their own steps.
+- **The admin banner** is on every page under `/admin`: the draft
+  awaiting review with its publish time, each watched job whose latest
+  run failed, and, under `lichess` only, the organiser token —
+  not checked yet, unusable, or expiring within 14 days. A query that
+  fails becomes a line of the banner rather than failing the page.
+- **`/admin/tokens`** lists approved players without a valid token:
+  never authorised, revoked or expired, since when, and under
+  `lichess` the grace left or "left out"; a paused player is marked as
+  such. Under `manual` a line says tokens don't gate pairing yet. The
+  organiser section shows its state, account and expiry.
+- **`/account`:** the status comes from the last check ("last checked
+  on …", "was found revoked on …", "expired on …"). The banner follows
+  the mode: under `manual`, the Phase 3 banner; under `lichess`,
+  "Re-authorise within N days, or you'll stop being paired", or
+  "You're not being paired until you re-authorise". "This week" words a
+  `no_valid_token` exclusion.
+- **Settings read on each request** by the dashboard, `/health`, the
+  banner and `/admin/tokens`, so `ic setting pairing.game_creation`
+  shows on the site at once, as it applies to the next generation.
+  `/health` is therefore also 503 when a settings row fails
+  validation, with `"settings": "invalid"` (spec §8.5 amended).
+- **Other changes:**
+  - `rounds.Regenerate` takes `now`, like `Generate`: the grace period
+    is measured at it, and the package still reads no clock.
+  - The two "latest run" queries break ties on the id: runs started in
+    one transaction (in tests) share `started_at`, and the organiser
+    state must come from the last one.
+  - The admin round view lists `no_valid_token` exclusions after the
+    pauses rather than last.
+  - `make css` rebuilt `app.css` for the new classes.
+- **Not done here:** nothing yet *uses* the gate's other half, the
+  challenge fallback inside the grace period (step 6), and nothing
+  creates games under `lichess` yet (step 5). Switching the setting on
+  now only leaves the tokenless out of pairing.
+
+Tests: the settings' values and refusals; the engine's
+`no_valid_token`, and before capacity; `tokenhealth`'s rule at its
+boundaries (exactly 14 days is not "more than", a minute past is;
+expired-then-revoked counts from the earlier date; zero grace; days
+left rounding up) and the organiser's usable / expiring-soon cases; the
+schedule an hour before `pairing.cron`, in UTC and in `Europe/Paris`
+either side of the change of time. Integration:
+- the pool under `manual` pairs the tokenless, and under `lichess`
+  leaves out no-token, long-lapsed and expired players but keeps the
+  recently lapsed, a paused player reading as paused; a 30-day grace on
+  regeneration takes the lapsed back;
+- `validate-tokens`: refused and scope-less tokens revoked and told
+  once, valid ones refreshed with Lichess's expiry, a rejected user's
+  token not tested, revoked tokens not retested, a re-authorised one
+  tested again; a token replaced mid-run left alone; an unmentioned
+  token kept; the organiser's four states; Lichess down → failed run,
+  nothing changed; unreadable tokens named, or the run failed without
+  a call when none decrypts;
+- `/health`'s organiser states and 503 rule, an invalid setting; the
+  banner on every admin page and not on public ones; `/admin/tokens`
+  in both modes and admins only; the dashboard banner in both modes, at
+  each stage of a lapse, and cleared by re-authorising.
+
+Automated verification: `go build`, `go vet` (both tags), gofmt,
+`make test` green; every integration test green on `ic_test`, three
+runs in a row, none skipped (465 tests and subtests, from 414). Not
+checked in a browser.
+
 ---
 
 ## Verification

@@ -29,6 +29,11 @@ const (
 	StatusPaused
 	// StatusAutoPaused is a player paused by the missed-start rule.
 	StatusAutoPaused
+	// StatusNoValidToken is a player the site cannot create games for:
+	// no Lichess authorisation at all, or one that lapsed longer ago
+	// than the grace period (§3.3, §5.7 item 6). The caller decides it,
+	// and only when the site creates games.
+	StatusNoValidToken
 )
 
 // Player is one candidate for the round. Ratings are integers because

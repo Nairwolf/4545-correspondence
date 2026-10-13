@@ -27,6 +27,7 @@ import (
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
 	"github.com/nairwolf/4545-correspondence/internal/pairing"
 	"github.com/nairwolf/4545-correspondence/internal/settings"
+	"github.com/nairwolf/4545-correspondence/internal/tokenhealth"
 )
 
 // ErrDraftExists is returned when a round is generated while a draft is
@@ -129,9 +130,16 @@ type pool struct {
 }
 
 // loadPool reads everything §6.2 step 1 needs. It deliberately computes
-// eligibility live from users and player_profiles rather than reading
-// player_standings.is_eligible, which is only refreshed on ingest.
-func loadPool(ctx context.Context, q *gen.Queries, cfg settings.Settings, number int32) (pool, error) {
+// eligibility live from users, player_profiles and oauth_tokens rather
+// than reading player_standings.is_eligible, which is only refreshed on
+// ingest. now is the moment the token grace period is measured at.
+func loadPool(
+	ctx context.Context,
+	q *gen.Queries,
+	cfg settings.Settings,
+	number int32,
+	now time.Time,
+) (pool, error) {
 	rows, err := q.ListPairingPool(ctx)
 	if err != nil {
 		return pool{}, fmt.Errorf("list pairing pool: %w", err)
@@ -142,7 +150,7 @@ func loadPool(ctx context.Context, q *gen.Queries, cfg settings.Settings, number
 		userIDs: make(map[string]pgtype.UUID, len(rows)),
 	}
 	for _, row := range rows {
-		player, err := toPlayer(ctx, q, row, cfg)
+		player, err := toPlayer(ctx, q, row, cfg, now)
 		if err != nil {
 			return pool{}, err
 		}
@@ -157,7 +165,13 @@ func loadPool(ctx context.Context, q *gen.Queries, cfg settings.Settings, number
 	return p, nil
 }
 
-func toPlayer(ctx context.Context, q *gen.Queries, row gen.ListPairingPoolRow, cfg settings.Settings) (pairing.Player, error) {
+func toPlayer(
+	ctx context.Context,
+	q *gen.Queries,
+	row gen.ListPairingPoolRow,
+	cfg settings.Settings,
+	now time.Time,
+) (pairing.Player, error) {
 	inFlight, err := q.CountInFlightGamesForUser(ctx, row.UserID)
 	if err != nil {
 		return pairing.Player{}, fmt.Errorf("count in-flight games: %w", err)
@@ -173,7 +187,7 @@ func toPlayer(ctx context.Context, q *gen.Queries, row gen.ListPairingPoolRow, c
 
 	return pairing.Player{
 		ID:              row.UserID.String(),
-		Status:          statusOf(row),
+		Status:          statusOf(row, cfg, now),
 		PowerRating:     powerRating(row, cfg),
 		ColorScore:      derefInt32(row.ColorScore),
 		InFlight:        int(inFlight),
@@ -189,7 +203,11 @@ func toPlayer(ctx context.Context, q *gen.Queries, row gen.ListPairingPoolRow, c
 // statusOf resolves the §5.7 flags into the one reason the player will
 // be told, in the order §5.7 lists them: a player who is both inactive
 // and paused reads as inactive, which is the one they chose themselves.
-func statusOf(row gen.ListPairingPoolRow) pairing.Status {
+// The token gate (§5.7 item 6) comes last, so a paused player without a
+// token reads as paused, and applies only when the site creates games:
+// under manual every game is started by hand, and a token gates
+// nothing (§5.7's Phase 4 note).
+func statusOf(row gen.ListPairingPoolRow, cfg settings.Settings, now time.Time) pairing.Status {
 	switch {
 	case !row.IsActive:
 		return pairing.StatusInactive
@@ -197,9 +215,16 @@ func statusOf(row gen.ListPairingPoolRow) pairing.Status {
 		return pairing.StatusPaused
 	case row.AutoPausedAt.Valid:
 		return pairing.StatusAutoPaused
+	case cfg.GameCreation == settings.GameCreationLichess &&
+		tokenOf(row, now).Excluded(cfg.TokenInvalidGraceDays, now):
+		return pairing.StatusNoValidToken
 	default:
 		return pairing.StatusActive
 	}
+}
+
+func tokenOf(row gen.ListPairingPoolRow, now time.Time) tokenhealth.Player {
+	return tokenhealth.PlayerOf(row.TokenIssuedAt, row.TokenRevokedAt, row.TokenExpiresAt, now)
 }
 
 // powerRating falls back to rating.unrated_default for a player with no

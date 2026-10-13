@@ -59,6 +59,21 @@ const (
 	SolverBlossom Solver = "blossom"
 )
 
+// GameCreation selects whether publication creates the round's games on
+// Lichess (spec §4.2, §6.3).
+type GameCreation string
+
+const (
+	// GameCreationManual leaves every game to the players, who start it
+	// by hand as before Phase 5. The default: the site can run without
+	// an organiser token, and an admin falls back to it with one
+	// setting if automation misbehaves.
+	GameCreationManual GameCreation = "manual"
+	// GameCreationLichess creates the games at publication. It needs
+	// LICHESS_ORG_TOKEN and turns on the token gate of spec §3.3, §5.7.
+	GameCreationLichess GameCreation = "lichess"
+)
+
 // Settings is the resolved configuration: defaults overridden by
 // whatever rows exist in the settings table.
 type Settings struct {
@@ -118,6 +133,16 @@ type Settings struct {
 	// are rated on Lichess (spec §4.2; read by Phase 5's publish, and
 	// snapshotted into Round.settings_used at generation).
 	Rated bool
+	// GameCreation is pairing.game_creation (default manual): whether
+	// the site creates the games on Lichess or players start them by
+	// hand (spec §4.2, §6.3).
+	GameCreation GameCreation
+
+	// TokenInvalidGraceDays is token.invalid_grace_days (default 14):
+	// how long a player whose Lichess authorisation lapsed is still
+	// paired, before they are left out with no_valid_token (spec §3.3).
+	// Read only under GameCreationLichess.
+	TokenInvalidGraceDays int
 }
 
 // Defaults are the spec §4.2 values, for a database with no override
@@ -141,6 +166,9 @@ func Defaults() Settings {
 		OddPoolStrategy:   OddPoolDoubleThenBye,
 		Solver:            SolverGreedy,
 		Rated:             true,
+		GameCreation:      GameCreationManual,
+
+		TokenInvalidGraceDays: 14,
 	}
 }
 
@@ -170,6 +198,9 @@ const (
 	keyOddPoolStrategy   = "pairing.odd_pool_strategy"
 	keySolver            = "pairing.solver"
 	keyRated             = "pairing.rated"
+	keyGameCreation      = "pairing.game_creation"
+
+	keyTokenInvalidGraceDays = "token.invalid_grace_days"
 )
 
 // keys is every setting this package reads. Load ignores an
@@ -181,7 +212,8 @@ var keys = []string{
 	keyUnratedDefault, keyDaysPerMove, keyMaxConcurrentCeiling,
 	keyPairingCron, keyPairingMode, keyReviewWindowHours,
 	keyAvoidRecentRounds, keyColorWeight, keyRepeatPenalty,
-	keyOddPoolStrategy, keySolver, keyRated,
+	keyOddPoolStrategy, keySolver, keyRated, keyGameCreation,
+	keyTokenInvalidGraceDays,
 }
 
 // Known reports whether key is a setting this package understands.
@@ -292,6 +324,21 @@ func applyOverride(s *Settings, key string, value []byte) error {
 		}
 	case keyRated:
 		return json.Unmarshal(value, &s.Rated)
+	case keyGameCreation:
+		var mode string
+		if err := json.Unmarshal(value, &mode); err != nil {
+			return err
+		}
+		switch GameCreation(mode) {
+		case GameCreationManual, GameCreationLichess:
+			s.GameCreation = GameCreation(mode)
+			return nil
+		default:
+			return fmt.Errorf("must be %q or %q, got %q", GameCreationManual, GameCreationLichess, mode)
+		}
+
+	case keyTokenInvalidGraceDays:
+		return unmarshalNonNegative(value, &s.TokenInvalidGraceDays)
 
 	default:
 		return nil // unknown key: not this package's concern yet
@@ -299,9 +346,9 @@ func applyOverride(s *Settings, key string, value []byte) error {
 }
 
 // unmarshalNonNegative decodes value into *dst and rejects a negative
-// number — shared by the three pairing settings that must be >= 0
-// (review window hours, the repeat-avoidance window, the colour
-// weight).
+// number — shared by the settings that must be >= 0 (review window
+// hours, the repeat-avoidance window, the colour weight, the token
+// grace period).
 func unmarshalNonNegative(value []byte, dst *int) error {
 	var v int
 	if err := json.Unmarshal(value, &v); err != nil {

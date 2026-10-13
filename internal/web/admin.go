@@ -89,7 +89,7 @@ func (s *Server) handleRegistrations(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.render(w, "admin_registrations", registrationsData{
-		base:          s.page(r, "Registrations", "admin"),
+		base:          s.adminPage(r, "Registrations", "admin"),
 		Tab:           tab,
 		Rows:          rows,
 		PendingCount:  len(pending),

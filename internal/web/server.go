@@ -106,7 +106,7 @@ func New(ctx context.Context, deps Deps) (*Server, error) {
 func newServer(deps Deps, db txBeginner, q *gen.Queries, cfg settings.Settings) (*Server, error) {
 	pages := []string{
 		"home", "standings", "levels", "player", "jobs", "join", "account", "notifications", "auth_error",
-		"admin_registrations", "admin_rounds", "admin_round",
+		"admin_registrations", "admin_rounds", "admin_round", "admin_tokens",
 	}
 	templates := make(map[string]*template.Template, len(pages))
 	for _, name := range pages {
@@ -173,10 +173,13 @@ func serverError(w http.ResponseWriter, err error) {
 // the nav and title without each handler restating them.
 type base struct {
 	Title   string
-	Nav     string    // active top-nav item: "home" | "standings" | "levels" | "account" | "notifications" | "admin" | "jobs"
+	Nav     string    // active top-nav item: "home" | "standings" | "levels" | "account" | "notifications" | "admin" | "rounds" | "jobs" | "tokens"
 	User    *gen.User // signed-in user, nil for a visitor
 	IsAdmin bool
 	Unread  int64 // unread notifications, for the bell (spec §8.3)
+	// Alerts is the admin banner, set by adminPage on the pages under
+	// /admin only (spec §8.5).
+	Alerts []adminAlert
 }
 
 // page builds the base for a request: title, active nav item, who is
@@ -221,6 +224,7 @@ var funcs = template.FuncMap{
 		}
 		return strconv.FormatFloat(float64(part)/float64(whole)*100, 'f', 0, 64)
 	},
+	"plural":    plural,
 	"sortHref":  sortHref,
 	"sortArrow": sortArrow,
 	"oddPoolOrDash": func(v *gen.OddPoolOutcome) string {

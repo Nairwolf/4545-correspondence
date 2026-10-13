@@ -17,6 +17,7 @@ import (
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
 	"github.com/nairwolf/4545-correspondence/internal/jobs"
 	"github.com/nairwolf/4545-correspondence/internal/lichess"
+	"github.com/nairwolf/4545-correspondence/internal/tokencrypt"
 )
 
 func main() {
@@ -28,7 +29,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: ic <serve|migrate|refresh-ratings|seed-players|import-pairings|sync-games|recompute|generate-round|publish-round|setting> ...")
+		return errors.New("usage: ic <serve|migrate|refresh-ratings|seed-players|import-pairings|sync-games|recompute|generate-round|publish-round|validate-tokens|setting> ...")
 	}
 
 	cfg, err := config.Load()
@@ -120,6 +121,26 @@ func run(args []string) error {
 		}
 		defer pool.Close()
 		return publishRoundByNumber(ctx, pool, args[1])
+	case "validate-tokens":
+		// The stored tokens are sealed with TOKEN_ENCRYPTION_KEY, so
+		// this is the one command besides serve that needs it.
+		tokenKey, err := tokencrypt.ParseKey(cfg.Auth.TokenEncryptionKey)
+		if err != nil {
+			return fmt.Errorf("validate-tokens needs TOKEN_ENCRYPTION_KEY: %w", err)
+		}
+		pool, err := db.Open(ctx, cfg.DatabaseURL)
+		if err != nil {
+			return err
+		}
+		defer pool.Close()
+		return runValidateTokens(
+			ctx,
+			pool,
+			lichess.New(cfg.LichessToken),
+			tokenKey,
+			cfg.OrganiserToken,
+			nil,
+		)
 	case "setting":
 		if len(args) < 3 {
 			return errors.New(`usage: ic setting <key> <json-value>   (e.g. ic setting pairing.review_window_hours 24)`)
@@ -132,7 +153,7 @@ func run(args []string) error {
 		return runSetting(ctx, pool, args[1], args[2])
 	default:
 		return fmt.Errorf(
-			"unknown command %q (want: serve, migrate, refresh-ratings, seed-players, import-pairings, sync-games, recompute, generate-round, publish-round, setting)",
+			"unknown command %q (want: serve, migrate, refresh-ratings, seed-players, import-pairings, sync-games, recompute, generate-round, publish-round, validate-tokens, setting)",
 			args[0],
 		)
 	}

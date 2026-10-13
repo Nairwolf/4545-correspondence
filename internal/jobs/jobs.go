@@ -6,9 +6,9 @@
 // matching one-shot `ic <job>` subcommand.
 //
 // The sync workers run on plain intervals from process start, which is
-// enough to keep standings fresh. Only round generation needs the
-// calendar, and it is the one job driven by a cron expression from the
-// settings (pairing.cron, spec §4.2).
+// enough to keep standings fresh. Round generation needs the calendar:
+// it runs on a cron expression from the settings (pairing.cron, spec
+// §4.2), and validate-tokens runs an hour before each generation.
 //
 // It also enqueues the one-off jobs the rest of the code asks for
 // (Scheduler), in the caller's transaction: from serve's running client
@@ -77,6 +77,9 @@ type Handlers struct {
 	// PublishSweep publishes any draft whose window has passed — the
 	// hourly safety net of spec §7.
 	PublishSweep Handler
+	// ValidateTokens tests every stored Lichess token an hour before
+	// each generation (spec §7).
+	ValidateTokens Handler
 }
 
 // Job argument types. Most carry no data — the job operates on the
@@ -87,6 +90,7 @@ type (
 	recomputeArgs      struct{}
 	generateRoundArgs  struct{}
 	publishSweepArgs   struct{}
+	validateTokensArgs struct{}
 )
 
 // PublishRoundArgs names the draft to publish. PublishAt is part of the
@@ -104,6 +108,7 @@ func (recomputeArgs) Kind() string      { return "recompute-aggregates" }
 func (generateRoundArgs) Kind() string  { return "generate-round" }
 func (publishSweepArgs) Kind() string   { return "publish-round-sweep" }
 func (PublishRoundArgs) Kind() string   { return "publish-round" }
+func (validateTokensArgs) Kind() string { return "validate-tokens" }
 
 // Scheduler enqueues a draft's publish-round job in the transaction
 // that created the draft, so a round and its publication are committed
@@ -149,8 +154,9 @@ func (s *Scheduler) SchedulePublish(ctx context.Context, tx pgx.Tx, roundID int3
 // NewClient builds the river client `serve` runs: one queue, one worker
 // at a time (Lichess wants a single request at a time — spec §3.4), and
 // the periodic jobs. pairingCron is the pairing.cron setting; it is
-// read once here, so changing it takes a restart until the Phase 6
-// settings UI can add and remove periodic jobs at runtime. The caller
+// read once here, for both generate-round and validate-tokens, so
+// changing it takes a restart until the Phase 6 settings UI can add and
+// remove periodic jobs at runtime. The caller
 // starts and stops the client. Runs are bounded by JobTimeout and
 // shutdown is soft (see both constants); river derives its own
 // stuck-job rescue window from JobTimeout, so RescueStuckJobsAfter
@@ -177,6 +183,7 @@ func NewClient(
 	river.AddWorker(workers, workerFor(h.Recompute, recomputeArgs{}))
 	river.AddWorker(workers, workerFor(h.GenerateRound, generateRoundArgs{}))
 	river.AddWorker(workers, workerFor(h.PublishSweep, publishSweepArgs{}))
+	river.AddWorker(workers, workerFor(h.ValidateTokens, validateTokensArgs{}))
 	river.AddWorker(workers, river.WorkFunc(func(ctx context.Context, job *river.Job[PublishRoundArgs]) error {
 		return h.PublishRound(ctx, job.Args.RoundID, job.ID)
 	}))
@@ -200,8 +207,28 @@ func NewClient(
 				func() (river.JobArgs, *river.InsertOpts) { return generateRoundArgs{}, nil },
 				&river.PeriodicJobOpts{RunOnStart: false},
 			),
+			river.NewPeriodicJob(
+				before{schedule: schedule, by: time.Hour},
+				func() (river.JobArgs, *river.InsertOpts) { return validateTokensArgs{}, nil },
+				&river.PeriodicJobOpts{RunOnStart: false},
+			),
 		},
 	})
+}
+
+// before fires a fixed time ahead of another schedule. validate-tokens
+// runs an hour before each generation (spec §7), so the pool sees
+// tokens checked as late as possible, and it follows pairing.cron
+// wherever it is set, CRON_TZ= included.
+type before struct {
+	schedule cron.Schedule
+	by       time.Duration
+}
+
+// Next is the first firing of the underlying schedule that is more than
+// `by` after t, moved `by` earlier.
+func (b before) Next(t time.Time) time.Time {
+	return b.schedule.Next(t.Add(b.by)).Add(-b.by)
 }
 
 func workerFor[T river.JobArgs](run Handler, _ T) river.Worker[T] {

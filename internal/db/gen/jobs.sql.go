@@ -88,10 +88,12 @@ func (q *Queries) FinishJobRun(ctx context.Context, arg FinishJobRunParams) erro
 }
 
 const getLatestJobRunByName = `-- name: GetLatestJobRunByName :one
-SELECT id, job_name, river_job_id, started_at, finished_at, status, items_processed, error, detail FROM job_runs WHERE job_name = $1 ORDER BY started_at DESC LIMIT 1
+SELECT id, job_name, river_job_id, started_at, finished_at, status, items_processed, error, detail FROM job_runs WHERE job_name = $1 ORDER BY started_at DESC, id DESC LIMIT 1
 `
 
-// Backs /health: the most recent outcome of a named job.
+// Backs /health: the most recent outcome of a named job. The id breaks
+// a tie between runs started in the same transaction, which share
+// started_at.
 func (q *Queries) GetLatestJobRunByName(ctx context.Context, jobName string) (JobRun, error) {
 	row := q.db.QueryRow(ctx, getLatestJobRunByName, jobName)
 	var i JobRun
@@ -112,12 +114,14 @@ func (q *Queries) GetLatestJobRunByName(ctx context.Context, jobName string) (Jo
 const getLatestSuccessfulJobRunByName = `-- name: GetLatestSuccessfulJobRunByName :one
 SELECT id, job_name, river_job_id, started_at, finished_at, status, items_processed, error, detail FROM job_runs
 WHERE job_name = $1 AND status = 'succeeded'
-ORDER BY started_at DESC
+ORDER BY started_at DESC, id DESC
 LIMIT 1
 `
 
 // Backs /health's "last_success" field: the newest run of a named job
 // that actually succeeded, independent of what the most recent run did.
+// Also where /health and the admin pages read the organiser token's
+// state, from validate-tokens' detail.
 func (q *Queries) GetLatestSuccessfulJobRunByName(ctx context.Context, jobName string) (JobRun, error) {
 	row := q.db.QueryRow(ctx, getLatestSuccessfulJobRunByName, jobName)
 	var i JobRun

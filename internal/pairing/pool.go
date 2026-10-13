@@ -4,19 +4,18 @@ import "github.com/nairwolf/4545-correspondence/internal/scoring"
 
 // Reason is why a player is not in this round's pairings. The values
 // are the exclusion_reason enum's, so the rounds service can store one
-// without a translation table. pending_approval and no_valid_token
-// exist in the database for Phase 5 and are never produced here:
-// applicants are not loaded into the pool at all, and until Lichess
-// game creation exists every game is started by hand, so a token
-// cannot gate the pool (§5.7 item 6).
+// without a translation table. pending_approval exists in the database
+// and is never produced here: applicants are not loaded into the pool
+// at all.
 type Reason string
 
 const (
-	ReasonAtCapacity Reason = "at_capacity"
-	ReasonInactive   Reason = "inactive"
-	ReasonPaused     Reason = "paused"
-	ReasonAutoPaused Reason = "auto_paused"
-	ReasonBye        Reason = "bye"
+	ReasonAtCapacity   Reason = "at_capacity"
+	ReasonInactive     Reason = "inactive"
+	ReasonPaused       Reason = "paused"
+	ReasonAutoPaused   Reason = "auto_paused"
+	ReasonNoValidToken Reason = "no_valid_token"
+	ReasonBye          Reason = "bye"
 )
 
 // buildPool is §6.2 step 1: the §5.7 status filter and then the §5.8
@@ -35,6 +34,9 @@ func buildPool(ordered []Player) (pool []Player, exclusions []Exclusion) {
 			continue
 		case StatusAutoPaused:
 			exclusions = append(exclusions, Exclusion{ID: p.ID, Reason: ReasonAutoPaused})
+			continue
+		case StatusNoValidToken:
+			exclusions = append(exclusions, Exclusion{ID: p.ID, Reason: ReasonNoValidToken})
 			continue
 		}
 		if !scoring.CapacityAllows(p.MaxConcurrent, p.InFlight) {

@@ -278,12 +278,17 @@ func TestDashboard_AuthorisationAndGames(t *testing.T) {
 	assert.NotContains(t, body, "Games can't be created")
 	assert.NotContains(t, body, "lio_secret_plaintext")
 
-	for _, col := range []string{"revoked_at = now()", "expires_at = now() - interval '1 day'"} {
-		_, err := tx.Exec(context.Background(), "UPDATE oauth_tokens SET "+col+" WHERE user_id = $1", u.ID)
+	// In this order: once both are set, the earlier date is the one
+	// quoted, and the expiry is a day before the revocation.
+	for _, lapsed := range []struct{ col, words string }{
+		{"revoked_at = now()", "was found revoked on"},
+		{"expires_at = now() - interval '1 day'", "expired on"},
+	} {
+		_, err := tx.Exec(context.Background(), "UPDATE oauth_tokens SET "+lapsed.col+" WHERE user_id = $1", u.ID)
 		require.NoError(t, err)
 		body = getAs(t, srv, session, "/account").Body.String()
-		assert.Contains(t, body, "Games can't be created for you automatically", col)
-		assert.Contains(t, body, "expired or was revoked", col)
+		assert.Contains(t, body, "Games can't be created for you automatically", lapsed.col)
+		assert.Contains(t, body, "Your Lichess authorisation "+lapsed.words, lapsed.col)
 	}
 
 	// Games: one in progress, twelve finished → ten shown plus a pointer.

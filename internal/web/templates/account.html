@@ -19,11 +19,21 @@
   {{if .Saved}}<p class="mb-4 rounded border border-emerald-900/60 bg-emerald-950/30 p-2 text-sm text-emerald-300">{{.Saved}}</p>{{end}}
   {{if .Error}}<p class="mb-4 rounded border border-red-900/60 bg-red-950/30 p-2 text-sm text-red-300">{{.Error}}</p>{{end}}
 
-  {{/* Banners: things that stop games being created for this player (spec §3.3, §8.3). */}}
+  {{/* Banners: things that stop games being created for this player (spec §3.3, §8.3).
+       The token banner shows whatever the notification preferences: it is the one
+       channel certain to reach a player whose authorisation lapsed (spec §10). */}}
   {{if and .CanConfigure (not .TokenOK)}}
   <div class="mb-4 rounded border border-red-900/60 bg-red-950/30 p-4">
+    {{if not .GameCreation}}
     <p class="font-medium text-red-300">Games can't be created for you automatically.</p>
-    <p class="mt-1 text-sm text-red-200/80">{{if .Token}}Your Lichess authorisation has expired or was revoked.{{else}}You haven't authorised the league on Lichess yet.{{end}} Re-authorising takes one click and nothing else changes.</p>
+    <p class="mt-1 text-sm text-red-200/80">{{if .Token}}Your Lichess authorisation {{.TokenLapse}}.{{else}}You haven't authorised the league on Lichess yet.{{end}} Re-authorising takes one click and nothing else changes.</p>
+    {{else if .TokenExcluded}}
+    <p class="font-medium text-red-300">You're not being paired until you re-authorise.</p>
+    <p class="mt-1 text-sm text-red-200/80">{{if .Token}}Your Lichess authorisation {{.TokenLapse}}, and the league can't create your games without it.{{else}}You haven't authorised the league on Lichess yet, and it can't create your games without that.{{end}} Re-authorising takes one click, and you're paired again from the next round.</p>
+    {{else}}
+    <p class="font-medium text-red-300">Your games can no longer be created automatically.</p>
+    <p class="mt-1 text-sm text-red-200/80">Your Lichess authorisation {{.TokenLapse}}. Re-authorise within {{plural .GraceDaysLeft "day"}}, or you'll stop being paired until you do. It takes one click and nothing else changes.</p>
+    {{end}}
     <a href="/login" hx-boost="false" class="mt-3 inline-block rounded bg-red-800 px-3 py-1 text-sm font-medium text-white hover:bg-red-700">Re-authorise with Lichess</a>
   </div>
   {{end}}
@@ -233,10 +243,10 @@
     <h2 class="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-500">Lichess authorisation</h2>
     {{if .TokenOK}}
     <p class="text-zinc-300"><span class="font-medium text-emerald-400">Active</span> — the league can create your games on Lichess.</p>
-    <p class="mt-1 text-sm text-zinc-500">Authorised on {{.IssuedOn}}{{if .ExpiresOn}}, valid until {{.ExpiresOn}}{{end}}. Permissions: {{range $i, $s := .Token.Scopes}}{{if $i}}, {{end}}{{$s}}{{end}}. If you revoke it in your Lichess settings, re-authorise here.</p>
+    <p class="mt-1 text-sm text-zinc-500">Authorised on {{.IssuedOn}}{{if .ExpiresOn}}, valid until {{.ExpiresOn}}{{end}}, last checked on {{.CheckedOn}}. Permissions: {{range $i, $s := .Token.Scopes}}{{if $i}}, {{end}}{{$s}}{{end}}. If you revoke it in your Lichess settings, re-authorise here.</p>
     {{else}}
     <p class="text-zinc-300"><span class="font-medium text-red-400">Not active</span> — games cannot be created for you automatically.</p>
-    <p class="mt-1 text-sm text-zinc-500">{{if .Token}}The authorisation has expired or was revoked.{{else}}You have not authorised the league yet.{{end}} Re-authorising takes one click.</p>
+    <p class="mt-1 text-sm text-zinc-500">{{if .Token}}The authorisation {{.TokenLapse}}.{{else}}You have not authorised the league yet.{{end}} Re-authorising takes one click.</p>
     {{end}}
     <a href="/login" hx-boost="false" class="mt-3 inline-block rounded border border-zinc-600 px-3 py-1 text-sm text-zinc-200 hover:border-zinc-400">Re-authorise with Lichess</a>
   </section>

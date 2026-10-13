@@ -21,15 +21,19 @@ WHERE id = $1;
 SELECT * FROM job_runs ORDER BY started_at DESC LIMIT $1;
 
 -- name: GetLatestJobRunByName :one
--- Backs /health: the most recent outcome of a named job.
-SELECT * FROM job_runs WHERE job_name = $1 ORDER BY started_at DESC LIMIT 1;
+-- Backs /health: the most recent outcome of a named job. The id breaks
+-- a tie between runs started in the same transaction, which share
+-- started_at.
+SELECT * FROM job_runs WHERE job_name = $1 ORDER BY started_at DESC, id DESC LIMIT 1;
 
 -- name: GetLatestSuccessfulJobRunByName :one
 -- Backs /health's "last_success" field: the newest run of a named job
 -- that actually succeeded, independent of what the most recent run did.
+-- Also where /health and the admin pages read the organiser token's
+-- state, from validate-tokens' detail.
 SELECT * FROM job_runs
 WHERE job_name = $1 AND status = 'succeeded'
-ORDER BY started_at DESC
+ORDER BY started_at DESC, id DESC
 LIMIT 1;
 
 -- name: FailInterruptedJobRuns :execrows

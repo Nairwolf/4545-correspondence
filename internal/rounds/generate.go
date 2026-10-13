@@ -44,7 +44,7 @@ func Generate(
 	if err != nil {
 		return Outcome{}, fmt.Errorf("next round number: %w", err)
 	}
-	p, err := loadPool(ctx, q, cfg, number)
+	p, err := loadPool(ctx, q, cfg, number, now)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -98,12 +98,14 @@ func Generate(
 // number and its review window: an admin rejecting a draft is asking
 // for a different pairing, not a different week. The pool is read
 // afresh, which is how §5.8's "the pool is not recalculated during the
-// review window" is picked up when it matters.
+// review window" is picked up when it matters; now is the moment it is
+// read at, as for Generate.
 func Regenerate(
 	ctx context.Context,
 	tx pgx.Tx,
 	roundID int32,
 	cfg settings.Settings,
+	now time.Time,
 	actor pgtype.UUID,
 	sched Scheduler,
 ) (Outcome, error) {
@@ -132,7 +134,7 @@ func Regenerate(
 		}
 	}
 
-	p, err := loadPool(ctx, q, cfg, round.Number)
+	p, err := loadPool(ctx, q, cfg, round.Number, now)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -265,6 +267,8 @@ func exclusionReason(r pairing.Reason) (gen.ExclusionReason, error) {
 		return gen.ExclusionReasonPaused, nil
 	case pairing.ReasonAutoPaused:
 		return gen.ExclusionReasonAutoPaused, nil
+	case pairing.ReasonNoValidToken:
+		return gen.ExclusionReasonNoValidToken, nil
 	case pairing.ReasonBye:
 		return gen.ExclusionReasonBye, nil
 	default:

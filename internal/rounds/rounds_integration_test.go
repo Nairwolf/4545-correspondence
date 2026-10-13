@@ -272,7 +272,7 @@ func TestGenerate_RunsAndRecordsTheConfiguredSolver(t *testing.T) {
 
 	cfg := settings.Defaults()
 	cfg.Solver = settings.SolverBlossom
-	blossom, err := rounds.Regenerate(context.Background(), tx, greedy.Round.ID, cfg, pgtype.UUID{}, nil)
+	blossom, err := rounds.Regenerate(context.Background(), tx, greedy.Round.ID, cfg, time.Now(), pgtype.UUID{}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, settings.SolverBlossom, solverUsed(blossom.Round))
 	require.NotNil(t, blossom.Round.RepeatPairings)
@@ -363,6 +363,81 @@ func TestGenerate_WritesOneExclusionPerAbsentPlayer(t *testing.T) {
 	assert.Nil(t, byUser[inactive.ID.String()].OngoingGames)
 }
 
+// giveToken stores a Lichess authorisation for user, as signing in
+// does. The bytes are never decrypted here.
+func giveToken(t *testing.T, tx pgx.Tx, user gen.User) {
+	t.Helper()
+	require.NoError(t, gen.New(tx).UpsertOAuthToken(context.Background(), gen.UpsertOAuthTokenParams{
+		UserID:      user.ID,
+		AccessToken: []byte("sealed"),
+		Scopes:      []string{"challenge:write"},
+	}))
+}
+
+func TestGenerate_TokenGateAppliesOnlyWhenTheSiteCreatesGames(t *testing.T) {
+	// Spec §3.3 and §5.7 item 6. Under manual, nobody is ever left out
+	// for a token: the seeded members have none, and a gate there would
+	// empty the pool. Under lichess, a missing token excludes at once,
+	// and a lapsed one only after the grace period.
+	tx := testTx(t)
+	ctx := context.Background()
+	q := gen.New(tx)
+
+	valid := addPlayer(t, tx, "valid", 2000)
+	giveToken(t, tx, valid)
+	addPlayer(t, tx, "seeded", 1950) // never signed in: no token row
+	lapsedRecently := addPlayer(t, tx, "lapsed-recently", 1900)
+	giveToken(t, tx, lapsedRecently)
+	exec(t, tx, `UPDATE oauth_tokens SET revoked_at = now() - interval '3 days' WHERE user_id = $1`, lapsedRecently.ID)
+	lapsedLongAgo := addPlayer(t, tx, "lapsed-long-ago", 1850)
+	giveToken(t, tx, lapsedLongAgo)
+	exec(t, tx, `UPDATE oauth_tokens SET revoked_at = now() - interval '20 days' WHERE user_id = $1`, lapsedLongAgo.ID)
+	expired := addPlayer(t, tx, "expired", 1800)
+	giveToken(t, tx, expired)
+	exec(t, tx, `UPDATE oauth_tokens SET expires_at = now() - interval '15 days' WHERE user_id = $1`, expired.ID)
+	pausedNoToken := addPlayer(t, tx, "paused-no-token", 1750)
+	exec(t, tx, `UPDATE player_profiles SET paused_by_admin = true WHERE user_id = $1`, pausedNoToken.ID)
+
+	reasons := func(outcome rounds.Outcome) map[string]gen.ExclusionReason {
+		stored, err := q.ListExclusionsForRound(ctx, outcome.Round.ID)
+		require.NoError(t, err)
+		byName := map[string]gen.ExclusionReason{}
+		for _, e := range stored {
+			byName[e.LichessUsername] = e.Reason
+		}
+		return byName
+	}
+
+	t.Run("manual: only the pause keeps anyone out", func(t *testing.T) {
+		outcome := generate(t, tx, settings.Defaults(), nil)
+		assert.Equal(t, map[string]gen.ExclusionReason{
+			"paused-no-token": gen.ExclusionReasonPaused,
+		}, reasons(outcome))
+		_, err := rounds.Cancel(ctx, tx, outcome.Round.ID, "test", pgtype.UUID{})
+		require.NoError(t, err)
+	})
+
+	t.Run("lichess: no token and a long-lapsed one are left out", func(t *testing.T) {
+		cfg := settings.Defaults()
+		cfg.GameCreation = settings.GameCreationLichess
+		outcome := generate(t, tx, cfg, nil)
+		assert.Equal(t, map[string]gen.ExclusionReason{
+			"seeded":          gen.ExclusionReasonNoValidToken,
+			"lapsed-long-ago": gen.ExclusionReasonNoValidToken,
+			"expired":         gen.ExclusionReasonNoValidToken,
+			"paused-no-token": gen.ExclusionReasonPaused, // the pause comes first
+		}, reasons(outcome), "lapsed-recently is inside the 14-day grace and still paired")
+
+		cfg.TokenInvalidGraceDays = 30
+		again, err := rounds.Regenerate(ctx, tx, outcome.Round.ID, cfg, time.Now(), pgtype.UUID{}, nil)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]gen.ExclusionReason{
+			"seeded":          gen.ExclusionReasonNoValidToken, // no grace without a token
+			"paused-no-token": gen.ExclusionReasonPaused,
+		}, reasons(again), "a longer grace takes the lapsed tokens back")
+	})
+}
+
 func TestGenerate_SchedulesItsOwnPublication(t *testing.T) {
 	tx := testTx(t)
 	ctx := context.Background()
@@ -380,7 +455,7 @@ func TestGenerate_SchedulesItsOwnPublication(t *testing.T) {
 	// Regenerating must not lose the publication: the window did not
 	// move, so the same job is enqueued again — a no-op for river when
 	// it is already queued, and the safety net when it never was.
-	again, err := rounds.Regenerate(ctx, tx, outcome.Round.ID, settings.Defaults(), pgtype.UUID{}, sched)
+	again, err := rounds.Regenerate(ctx, tx, outcome.Round.ID, settings.Defaults(), time.Now(), pgtype.UUID{}, sched)
 	require.NoError(t, err)
 	require.Len(t, sched.calls, 2)
 	assert.Equal(t, outcome.Round.PublishAt.Time, sched.calls[1].publishAt)
@@ -494,7 +569,7 @@ func TestRegenerate_ReplacesTheRoundInPlace(t *testing.T) {
 	// An admin looks at the draft, then takes a player out of the pool
 	// and asks for a new pairing.
 	setActive(t, tx, dropped, false)
-	second, err := rounds.Regenerate(ctx, tx, first.Round.ID, settings.Defaults(), pgtype.UUID{}, nil)
+	second, err := rounds.Regenerate(ctx, tx, first.Round.ID, settings.Defaults(), time.Now(), pgtype.UUID{}, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, first.Round.ID, second.Round.ID)
@@ -536,7 +611,7 @@ func TestRegenerateAndCancel_RefusePublishedRounds(t *testing.T) {
 	cfg.PairingMode = settings.PairingModeAutoPublish
 	round := generate(t, tx, cfg, nil).Round
 
-	_, err := rounds.Regenerate(ctx, tx, round.ID, settings.Defaults(), pgtype.UUID{}, nil)
+	_, err := rounds.Regenerate(ctx, tx, round.ID, settings.Defaults(), time.Now(), pgtype.UUID{}, nil)
 	assert.ErrorIs(t, err, rounds.ErrNotDraft)
 
 	_, err = rounds.Cancel(ctx, tx, round.ID, "changed my mind", pgtype.UUID{})

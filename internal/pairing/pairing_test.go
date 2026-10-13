@@ -158,6 +158,18 @@ func TestBuildPool(t *testing.T) {
 			wantReason: ReasonAutoPaused,
 		},
 		{
+			name:       "no valid Lichess token",
+			player:     Player{ID: "a", Status: StatusNoValidToken},
+			wantReason: ReasonNoValidToken,
+		},
+		{
+			// The token gate comes before capacity: the player has
+			// something to fix, which a full schedule does not need.
+			name:       "no valid token and at the cap reads as the token",
+			player:     Player{ID: "a", Status: StatusNoValidToken, InFlight: 4, MaxConcurrent: ptr(4)},
+			wantReason: ReasonNoValidToken,
+		},
+		{
 			name:       "a cap of zero excludes, and is not the same as no cap",
 			player:     Player{ID: "a", Status: StatusActive, MaxConcurrent: ptr(0)},
 			wantReason: ReasonAtCapacity,

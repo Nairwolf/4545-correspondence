@@ -25,16 +25,22 @@ cleanly on SIGINT/SIGTERM. The site:
 - sign-in and registration under `/join` and `/login`;
 - the player dashboard at `/account`: this week's pairing, bye or
   reason for sitting out, activity, game limit, double games, my games,
-  authorisation status;
+  notifications, and the Lichess authorisation as its last check found
+  it, with a banner when it has lapsed;
 - the admin area under `/admin`: the registration queue
-  (`/admin/registrations`), job runs (`/admin/jobs`), and rounds
+  (`/admin/registrations`), job runs (`/admin/jobs`), rounds
   (`/admin/rounds`: generate, review, edit, publish, cancel, with the
-  pairing diagnostics on each round's page).
+  pairing diagnostics on each round's page) and tokens
+  (`/admin/tokens`: the players without a valid Lichess token, and the
+  organiser token). A banner on every admin page says when a draft is
+  waiting for review, a job's latest run failed or, when the site
+  creates games, the organiser token cannot or soon will not work.
 
 ### Configuration for `serve`
 
 `serve` needs the sign-in configuration below; the one-shot subcommands
-need only `DATABASE_URL`. Put them in a `.env` file at the repo root
+need only `DATABASE_URL`, except `ic validate-tokens`, which also needs
+`TOKEN_ENCRYPTION_KEY` to read the stored tokens. Put them in a `.env` file at the repo root
 (git-ignored; the Makefile includes it) or export them:
 
 ```
@@ -43,6 +49,7 @@ LICHESS_REDIRECT_URI=http://localhost:8080/auth/lichess/callback
 TOKEN_ENCRYPTION_KEY=<openssl rand -hex 32>    # 64 hex chars; rotating it invalidates every stored token
 SESSION_SECRET=<openssl rand -hex 32>          # at least 32 characters
 ADMIN_LICHESS_USERNAMES=yourname               # optional, comma-separated bootstrap admins
+LICHESS_ORG_TOKEN=lip_...                      # optional while pairing.game_creation is manual: the league account's challenge:bulk token
 ```
 
 Lichess OAuth is a public PKCE flow: there is no client secret and no
@@ -90,6 +97,7 @@ ic refresh-ratings                            # run the daily rating-snapshot jo
 ic recompute                                  # rebuild every player_standings row from scratch
 ic generate-round                             # run the weekly round generation once
 ic publish-round <round-number>               # publish a draft now
+ic validate-tokens                            # test every stored Lichess token, and the organiser's, now
 ic setting <key> <json-value>                 # set a spec §4.2 setting (validated, audited)
 ```
 
@@ -114,10 +122,22 @@ a local roster, not the way a real league is populated.
 
 `serve` runs the jobs on their own schedule automatically (spec §7):
 `sync-games` hourly, `refresh-ratings` and `recompute` daily,
+`validate-tokens` an hour before each `pairing.cron` firing,
 `generate-round` on `pairing.cron`, `publish-round` when a draft's
 review window ends, and `publish-round-sweep` hourly as the safety net
 for any draft past its window. The subcommands above are for a manual
 run or a first-time data load, not something normal operation needs.
+
+`validate-tokens` marks a token Lichess refuses as revoked and tells
+its player on-site; signing in again is the re-authorisation. Tokens
+only gate pairing once `pairing.game_creation` is `lichess`: a player
+with no token is then left out at once, and one whose token lapsed
+after `token.invalid_grace_days` (14). Under the default, `manual`,
+nobody is left out for a token. `/health` reports the organiser token
+from the latest run, and turns 503 when the site creates games and that
+token cannot. After replacing `LICHESS_ORG_TOKEN` and restarting, run
+`ic validate-tokens` so `/health` and the admin banner see the new
+token before the next weekly run.
 
 ### Running the first rounds
 

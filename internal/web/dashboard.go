@@ -15,6 +15,7 @@ import (
 	"github.com/nairwolf/4545-correspondence/internal/rounds"
 	"github.com/nairwolf/4545-correspondence/internal/settings"
 	"github.com/nairwolf/4545-correspondence/internal/standings"
+	"github.com/nairwolf/4545-correspondence/internal/tokenhealth"
 )
 
 // The player dashboard (spec §8.3) at /account: what a player controls
@@ -56,10 +57,23 @@ type dashboardData struct {
 	// with the other settings when CanConfigure.
 	NotificationPrefs []notificationPref
 
+	// The Lichess authorisation as its last check found it (spec §3.3,
+	// §8.3): at sign-in, or by the weekly validate-tokens.
 	Token     *gen.OauthToken // nil when none stored
 	TokenOK   bool            // stored, not revoked, not expired
 	IssuedOn  string
 	ExpiresOn string
+	CheckedOn string
+	// TokenLapse says what happened to a stored token that no longer
+	// works: "was found revoked on 5 October 2026" or "expired on …".
+	TokenLapse string
+	// GameCreation is true when the site creates games
+	// (pairing.game_creation = lichess). Only then does a missing or
+	// lapsed token keep the player out of pairing, and only then does
+	// the banner count the grace days.
+	GameCreation  bool
+	GraceDaysLeft int
+	TokenExcluded bool
 
 	Saved string // one-line confirmation after a successful change
 	Error string // inline validation message
@@ -236,6 +250,8 @@ func exclusionSentence(exc gen.RoundExclusion, round int32) string {
 		return fmt.Sprintf("An admin had paused your quest, so you sat out round %d.", round)
 	case gen.ExclusionReasonAutoPaused:
 		return fmt.Sprintf("Your quest was paused after unanswered challenges, so you sat out round %d.", round)
+	case gen.ExclusionReasonNoValidToken:
+		return fmt.Sprintf("The league couldn't create games for you without your Lichess authorisation, so you sat out round %d.", round)
 	case gen.ExclusionReasonRemovedByAdmin:
 		return fmt.Sprintf("An admin removed your pairing for round %d.", round)
 	}
@@ -343,25 +359,60 @@ func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, status 
 		data.NotificationPrefs = notificationPrefsFor(muted)
 	}
 
-	tok, err := s.q.GetOAuthToken(ctx, user.ID)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		// seeded member who has never signed in before: no token yet
-	case err != nil:
+	if err := s.loadTokenStatus(ctx, &data); err != nil {
 		serverError(w, err)
 		return
-	default:
-		data.Token = &tok
-		data.TokenOK = !tok.RevokedAt.Valid && (!tok.ExpiresAt.Valid || tok.ExpiresAt.Time.After(time.Now()))
-		data.IssuedOn = tok.IssuedAt.Time.UTC().Format("2 January 2006")
-		if tok.ExpiresAt.Valid {
-			data.ExpiresOn = tok.ExpiresAt.Time.UTC().Format("2 January 2006")
-		}
 	}
 
 	w.WriteHeader(status)
 	s.render(w, "account", data)
 }
+
+// loadTokenStatus fills the dashboard's Lichess authorisation fields
+// with the same rule the pairing pool applies (internal/tokenhealth).
+// The settings are read here rather than at start-up, so the banner
+// follows pairing.game_creation as soon as it is changed, as the next
+// generation will.
+func (s *Server) loadTokenStatus(ctx context.Context, data *dashboardData) error {
+	cfg, err := settings.Load(ctx, s.q)
+	if err != nil {
+		return err
+	}
+	data.GameCreation = cfg.GameCreation == settings.GameCreationLichess
+
+	now := time.Now()
+	var tokenHealth tokenhealth.Player
+	tok, err := s.q.GetOAuthToken(ctx, data.User.ID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// seeded member who has never signed in before: no token yet
+	case err != nil:
+		return err
+	default:
+		data.Token = &tok
+		tokenHealth = tokenhealth.PlayerOf(tok.IssuedAt, tok.RevokedAt, tok.ExpiresAt, now)
+		data.IssuedOn = longDate(tok.IssuedAt.Time)
+		data.CheckedOn = longDate(tok.LastValidatedAt.Time)
+		if tok.ExpiresAt.Valid {
+			data.ExpiresOn = longDate(tok.ExpiresAt.Time)
+		}
+		switch {
+		case tokenHealth.Valid():
+		case tokenHealth.Revoked:
+			data.TokenLapse = "was found revoked on " + longDate(tokenHealth.InvalidSince)
+		default:
+			data.TokenLapse = "expired on " + longDate(tokenHealth.InvalidSince)
+		}
+	}
+	data.TokenOK = tokenHealth.Valid()
+	data.TokenExcluded = tokenHealth.Excluded(cfg.TokenInvalidGraceDays, now)
+	if tokenHealth.Stored && !data.TokenOK {
+		data.GraceDaysLeft = tokenHealth.GraceDaysLeft(cfg.TokenInvalidGraceDays, now)
+	}
+	return nil
+}
+
+func longDate(t time.Time) string { return t.UTC().Format("2 January 2006") }
 
 // canConfigure: pending applicants may set their preferences ahead of
 // approval (they take effect once approved); rejected ones have nothing

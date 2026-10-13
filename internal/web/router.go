@@ -60,6 +60,7 @@ func (s *Server) Handler() http.Handler {
 			r.Post("/registrations/approve", s.handleApproveRegistrations)
 			r.Post("/registrations/{id}/reject", s.handleRejectRegistration)
 			r.Get("/jobs", s.handleJobs)
+			r.Get("/tokens", s.handleAdminTokens)
 
 			r.Route("/rounds", func(r chi.Router) {
 				r.Get("/", s.handleAdminRounds)

@@ -43,6 +43,11 @@ SELECT
 -- enough for sqlc to type correctly. The pool is small (tens to a few
 -- hundred rows) and this runs once a week, so the extra round trips
 -- cost nothing worth avoiding at the price of a wrong type.
+--
+-- The three token_ columns are the player's Lichess authorisation, for
+-- the token gate of §3.3 and §5.7 item 6 (Phase 5). A base-table LEFT
+-- JOIN: token_issued_at is NOT NULL in a stored row, so NULL means the
+-- player has no token at all (a seeded member who never signed in).
 SELECT
   u.id AS user_id,
   p.is_active,
@@ -53,10 +58,14 @@ SELECT
   s.power_rating,
   s.color_score,
   COALESCE(byecount.bye_count, 0)::int AS bye_count,
-  COALESCE(doublecount.double_count, 0)::int AS double_count
+  COALESCE(doublecount.double_count, 0)::int AS double_count,
+  t.issued_at AS token_issued_at,
+  t.revoked_at AS token_revoked_at,
+  t.expires_at AS token_expires_at
 FROM users u
 JOIN player_profiles p ON p.user_id = u.id
 LEFT JOIN player_standings s ON s.user_id = u.id
+LEFT JOIN oauth_tokens t ON t.user_id = u.id
 LEFT JOIN (
   SELECT b.user_id, count(*) AS bye_count
   FROM byes b JOIN rounds r ON r.id = b.round_id

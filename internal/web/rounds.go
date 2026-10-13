@@ -71,7 +71,7 @@ func (s *Server) handleAdminRounds(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	s.render(w, "admin_rounds", roundsListData{
-		base:  s.page(r, "Rounds", "rounds"),
+		base:  s.adminPage(r, "Rounds", "rounds"),
 		Rows:  rows,
 		Error: roundsListError(r.URL.Query().Get("error")),
 	})
@@ -229,7 +229,7 @@ func (s *Server) handleRoundView(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.render(w, "admin_round", roundViewData{
-		base:       s.page(r, fmt.Sprintf("Round %d", round.Number), "rounds"),
+		base:       s.adminPage(r, fmt.Sprintf("Round %d", round.Number), "rounds"),
 		Round:      round,
 		Pairings:   pairings,
 		Exclusions: groupExclusions(exclusions),
@@ -245,8 +245,8 @@ func (s *Server) handleRoundView(w http.ResponseWriter, r *http.Request) {
 func groupExclusions(rows []gen.ListExclusionsForRoundRow) []exclusionGroup {
 	order := []gen.ExclusionReason{
 		gen.ExclusionReasonAtCapacity, gen.ExclusionReasonInactive, gen.ExclusionReasonPaused,
-		gen.ExclusionReasonAutoPaused, gen.ExclusionReasonBye, gen.ExclusionReasonRemovedByAdmin,
-		gen.ExclusionReasonPendingApproval, gen.ExclusionReasonNoValidToken,
+		gen.ExclusionReasonAutoPaused, gen.ExclusionReasonNoValidToken, gen.ExclusionReasonBye,
+		gen.ExclusionReasonRemovedByAdmin, gen.ExclusionReasonPendingApproval,
 	}
 	byReason := map[gen.ExclusionReason][]gen.ListExclusionsForRoundRow{}
 	for _, row := range rows {
@@ -384,7 +384,7 @@ func (s *Server) handleRegenerateRound(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		_, err = rounds.Regenerate(ctx, tx, id, cfg, admin.ID, s.sched)
+		_, err = rounds.Regenerate(ctx, tx, id, cfg, time.Now(), admin.ID, s.sched)
 		return err
 	})
 	switch {

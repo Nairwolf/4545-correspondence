@@ -33,6 +33,8 @@ func TestApplyOverride(t *testing.T) {
 	requireNoError(applyOverride(&s, keyOddPoolStrategy, []byte(`"bye_only"`)))
 	requireNoError(applyOverride(&s, keySolver, []byte(`"blossom"`)))
 	requireNoError(applyOverride(&s, keyRated, []byte(`false`)))
+	requireNoError(applyOverride(&s, keyGameCreation, []byte(`"lichess"`)))
+	requireNoError(applyOverride(&s, keyTokenInvalidGraceDays, []byte(`0`)))
 	requireNoError(applyOverride(&s, "some.unknown.key", []byte(`"ignored"`)))
 
 	assert.Equal(t, 10, s.LastK)
@@ -51,6 +53,8 @@ func TestApplyOverride(t *testing.T) {
 	assert.Equal(t, OddPoolByeOnly, s.OddPoolStrategy)
 	assert.Equal(t, SolverBlossom, s.Solver)
 	assert.False(t, s.Rated)
+	assert.Equal(t, GameCreationLichess, s.GameCreation)
+	assert.Equal(t, 0, s.TokenInvalidGraceDays, "no grace at all is allowed")
 }
 
 func TestApplyOverride_RejectsInvalidPairingValues(t *testing.T) {
@@ -77,6 +81,10 @@ func TestApplyOverride_RejectsInvalidPairingValues(t *testing.T) {
 		{"days per move: not a Lichess value", keyDaysPerMove, `4`},
 		{"days per move: zero", keyDaysPerMove, `0`},
 		{"days per move: wrong type", keyDaysPerMove, `"2"`},
+		{"game creation: unknown value", keyGameCreation, `"bulk"`},
+		{"game creation: wrong type", keyGameCreation, `true`},
+		{"token grace: negative", keyTokenInvalidGraceDays, `-1`},
+		{"token grace: wrong type", keyTokenInvalidGraceDays, `"14"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -115,6 +123,8 @@ func TestDefaults_MatchSpecSection4_2(t *testing.T) {
 	assert.Equal(t, OddPoolDoubleThenBye, d.OddPoolStrategy)
 	assert.Equal(t, SolverGreedy, d.Solver)
 	assert.True(t, d.Rated)
+	assert.Equal(t, GameCreationManual, d.GameCreation)
+	assert.Equal(t, 14, d.TokenInvalidGraceDays)
 }
 
 func TestKnown(t *testing.T) {

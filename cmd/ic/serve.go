@@ -99,6 +99,9 @@ func runServe(ctx context.Context, cfg config.Config) error {
 		PublishSweep: func(ctx context.Context, id int64) error {
 			return runPublishSweep(ctx, pool, &id)
 		},
+		ValidateTokens: func(ctx context.Context, id int64) error {
+			return runValidateTokens(ctx, pool, client, tokenKey, cfg.OrganiserToken, &id)
+		},
 	}, league.PairingCron, slog.Default())
 	if err != nil {
 		return fmt.Errorf("serve: build job runner: %w", err)
