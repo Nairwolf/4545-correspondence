@@ -4,11 +4,15 @@
 
 -- name: CountInFlightGamesForUser :one
 -- spec §5.8, amended 2026-09-17 (decision 7): games in progress plus
--- pending pairings of PUBLISHED rounds with no game ingested yet — a
--- pairing the player has been told to start is a game in flight before
--- Lichess knows about it. This replaces the narrower
--- CountOngoingGamesForUser everywhere it was read (the pairing pool,
--- standings, the dashboard), so the three can never disagree.
+-- pending or created pairings of PUBLISHED rounds with no game ingested
+-- yet — a pairing the player has been told to start is a game in
+-- flight before Lichess knows about it, and a game bulk pairing created
+-- is one from its creation, before sync-games has fetched it. "No game
+-- ingested" is no games row for the pairing, not "no game id": a bulk
+-- game has its id from the moment it is created (Phase 5 step 5). This
+-- replaces the narrower CountOngoingGamesForUser everywhere it was read
+-- (the pairing pool, standings, the dashboard), so the three can never
+-- disagree.
 SELECT
   (SELECT count(*) FROM games g
     WHERE g.status = 'in_progress' AND (g.white_user_id = $1 OR g.black_user_id = $1))
@@ -16,9 +20,9 @@ SELECT
   (SELECT count(*) FROM pairings p
     JOIN rounds r ON r.id = p.round_id
     WHERE r.state = 'published'
-      AND p.lichess_game_id IS NULL
       AND p.status IN ('pending', 'created')
       AND (p.white_user_id = $1 OR p.black_user_id = $1)
+      AND NOT EXISTS (SELECT 1 FROM games g WHERE g.pairing_id = p.id)
   ) AS in_flight;
 
 -- name: ListPairingPool :many
@@ -232,8 +236,7 @@ WHERE id = $1 AND state = 'draft'
 RETURNING *;
 
 -- name: CancelRound :one
--- Drafts only (a published round may already have games; cancelling
--- one is Phase 5, spec §6.3).
+-- Drafts only: a published round is final (spec §6.3).
 UPDATE rounds SET state = 'cancelled', notes = $2
 WHERE id = $1 AND state = 'draft'
 RETURNING *;

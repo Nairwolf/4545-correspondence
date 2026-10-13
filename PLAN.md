@@ -977,6 +977,167 @@ Automated verification: `go build`, `go vet` (both tags), gofmt,
 runs in a row, none skipped (465 tests and subtests, from 414). Not
 checked in a browser.
 
+### Step 5 — bulk pairing at publish (2026-10-13)
+
+Built as planned: migration `00013_game_creation.sql`
+(`rounds.game_creation`, `games_created_at`); publication queuing
+`create-games` under `lichess`; the job, which reconciles, probes,
+creates one bulk and records it, and gives the rest up to the players
+on its last attempt; *Retry game creation* on the round page and
+`ic create-games <n>`; the round page's game-creation line and game
+column; "This week" for a created game and one being created;
+`create-games` on `/health`; and the in-flight count fix. Pairings
+with one working token stay hand-started until step 6.
+
+- **Where it lives.** `rounds.GameCreator.CreateGames`
+  (`internal/rounds/create.go`) does the work. It takes the database,
+  not a transaction, and opens a short transaction after each Lichess
+  call, never one across it. `cmd/ic/create_games.go` records the run,
+  runs a retry's search first, and gives up on the last attempt. The
+  river job is unique per round while it waits or runs (by
+  `round_id` only, so a retry and the publication's job can't both be
+  queued), with 10 attempts.
+- **Publication.** `Publish` and `PublishDue` now take the settings and
+  a scheduler, like `Generate`. Under `lichess` the round is marked
+  `creating` and the job queued in the publishing transaction; with no
+  scheduler, publication fails rather than leave a round no job will
+  ever create. `Generate` under `auto_publish` does the same.
+  `ic publish-round` gets the insert-only client from step 3; serve's
+  publish job and sweep pass the running one.
+- **The run** (spec §6.3's steps):
+  1. pending pairings, without one flagged ambiguous;
+  2. every bulk the organiser created since publication, with the
+     round's days and rated, is checked for games of those pairings
+     that no pairing has taken yet; those are recorded, not created
+     again;
+  3. one `TestTokens` over the waiting players' tokens that are stored,
+     not revoked, not expired and readable; a refused one is revoked
+     and its player told; one Lichess doesn't mention is kept, and the
+     bulk decides;
+  4. both tokens working → the bulk; the rest are left by hand;
+  5. one bulk, the round's time control, the league's message. A
+     rejection naming tokens revokes them and resubmits without their
+     pairings, at most 3 submissions; any other refusal fails the run.
+     The record — pairings `bulk` / `created` / game id, the bulk id on
+     the round, both players' notices — is one transaction right after
+     the call, written even if the run's context was cancelled
+     meanwhile. A pairing marked failed meanwhile keeps its status; its
+     game is listed as unrecorded in the run's detail;
+  7. players left by hand are told, the round is `created`, and a
+     `sync-games` run is queued.
+- **Giving up.** On the tenth failed attempt the round is `gave_up` and
+  the players of every pairing still waiting are told to start it by
+  hand. The run is still recorded as failed (the games were not
+  created), with `"gave_up": true` in its detail, so `/health` and the
+  admin banner stay red until an admin retries.
+- **Decided while building** (spec §6.3, §10 amended, §15 entry):
+  - **Switching `pairing.game_creation` back to `manual` gives up a
+    round still waiting for its games**, at once and without calling
+    Lichess. Decision 1 says the switch is how an admin stops
+    automation that misbehaves. Without this, a round's job would keep
+    calling Lichess for up to four hours after it was switched off.
+  - **When players are told.** Under `lichess`, publication tells only
+    the bye and the double-game volunteer ("the league is creating
+    them"). Each paired player is told once create-games knows how
+    their game was made: "your game is ready", with the game's link,
+    or "start it by hand". Both come under the pairing's `paired` key,
+    so each player gets one of them. A game an admin's retry creates
+    is announced under its own `created` key: "has now been created —
+    don't start another".
+  - **Retry.** It needs game creation on. It is refused for a round
+    published under `manual`, and while a job for the round waits. It
+    puts the round back to `creating` and queues the job in one
+    transaction; a refused queue rolls both back. The button shows when
+    creation gave up, or finished with pairings left by hand.
+    `ic create-games` queues the same retry for serve rather than
+    running the job itself, so it can never run alongside serve's job
+    for the round.
+  - **A retry's search fails the run if any of its Lichess calls
+    fails.** sync-games forgives a partial failure. Here a game it
+    could not look for may exist, and creating it would give the
+    players two.
+  - Reconciliation allows five minutes of difference between our clock
+    and Lichess's. `rounds.bulk_pairing_id` keeps the first bulk; a
+    retry's bulk is named in its run.
+- **For you to confirm: the bulk's message** is "Infinite
+  Correspondence, round 201: your game with {opponent} is ready:
+  {game}". Step 0 left the league's name to this step. It comes from
+  the site's own name, already on every page (`layout.html`): a
+  constant next to it in `internal/rounds`, so it adds no 4545 text.
+  The alternatives were a `league.name` setting, or no league name at
+  all, since the message comes from the organiser account.
+- **Dependency:** `github.com/riverqueue/river/rivertype` moves from
+  indirect to direct in `go.mod`, at the same version. No new module,
+  and `go.sum` is unchanged. The uniqueness rule needs river's
+  job-state constants, which live there. river's default would also
+  count a completed job, which blocks a retry for a day.
+- **Other changes:**
+  - `CountInFlightGamesForUser` counts a pending or created pairing
+    until a `games` row exists for it, rather than until it has a game
+    id, as planned at step 0.
+  - The token-lapsed notice moved from validate-tokens to
+    `notify.TokenLapsed`, so the weekly check and the publication probe
+    send the same notice under the same key.
+  - sync-games' matching takes its list of pairings
+    (`matchPairings`), so a retry searches one round's.
+  - The dashboard's "Start the game on Lichess as you do today" now
+    reads "… by hand": it no longer describes every game.
+  - Two stale comments said cancelling a published round was Phase 5;
+    they now say a published round is final (decision 13).
+  - `make css` rebuilt `app.css` for the wider round table.
+- **For the live checks:** to shorten check 5's retries, lower them in
+  psql once the round is published: `UPDATE river_job SET max_attempts
+  = 2 WHERE kind = 'create-games' AND state <> 'completed'`. A game
+  Lichess has created but nobody has moved in is stored as in progress
+  by sync-games, so it shows on the Overview at once.
+- **Known limits:**
+  - A panic on the last attempt skips the give-up and leaves the round
+    `creating` with no job. The round page offers no button then;
+    `ic create-games <n>` recovers it.
+  - The retry's search is sync-games' §7.3 matching, which compares
+    with today's `days_per_move`, not the round's (found at step 2). If
+    the setting changed since publication, a game started by hand is
+    not found, and the retry creates a second one.
+
+Tests: river — one create-games job per round while one waits, ten
+attempts, another once it has finished; a sync-games run queued.
+Rounds, against the `Fake`:
+- publication under `lichess` marks the round and queues the job,
+  telling nobody but the volunteer; under `manual` it queues nothing;
+  without a scheduler it fails; `auto_publish` queues too;
+- one bulk with the round's days and rated, not today's; ids,
+  statuses, bulk id, notices with the game link, a sync queued, and a
+  capped player at capacity before any sync;
+- the double game in the same bulk;
+- no token, revoked, expired and probe-refused tokens left by hand, the
+  refused one revoked and its player told, both players of each
+  pairing left by hand told;
+- a token refused by the bulk revoked and the rest resubmitted;
+  three submissions at most;
+- any other refusal fails the run and tells nobody;
+- run twice, one bulk; a bulk created but never recorded adopted, not
+  re-created; an older bulk, another time control, ignored;
+- an admin's *Mark failed* during the call wins;
+- game creation switched off gives up without a call;
+- no organiser token fails naming it;
+- giving up twice tells the players once;
+- retry: queued and "now created" told; refused when switched off, for
+  a round published by hand, and while a job waits.
+
+`cmd/ic`: the run recorded; the last attempt gives up and still fails
+the run, with no token in the error; a retry attaches a game started by
+hand and creates the other; a retry whose search fails creates nothing;
+`ic create-games` queues the retry for serve and refuses a second.
+Web: *Publish now* under `lichess` queues the job; the round page's
+line, game column and retry button, refused when switched off, already
+queued (rolled back) or for a round published by hand; "This week" for
+a created game and one being created; `/health` watches create-games.
+
+Automated verification: `go build`, `go vet` (both tags), gofmt,
+`make test` green; every integration test green on `ic_test`, three
+runs in a row with the test cache off, none skipped (503 tests and
+subtests, from 465). Not checked in a browser.
+
 ---
 
 ## Verification

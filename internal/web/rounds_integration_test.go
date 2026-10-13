@@ -187,7 +187,16 @@ func TestAdminRounds_Regenerate(t *testing.T) {
 // here is that the handlers ask for the publication; internal/jobs
 // tests the enqueue itself.
 type recordingScheduler struct {
-	calls []scheduledPublish
+	calls     []scheduledPublish
+	creations []scheduledCreation
+	// busy stands for a create-games job already waiting, which river
+	// would refuse to duplicate.
+	busy bool
+}
+
+type scheduledCreation struct {
+	roundID int32
+	retry   bool
 }
 
 type scheduledPublish struct {
@@ -199,6 +208,16 @@ func (s *recordingScheduler) SchedulePublish(_ context.Context, _ pgx.Tx, roundI
 	s.calls = append(s.calls, scheduledPublish{roundID: roundID, publishAt: publishAt})
 	return nil
 }
+
+func (s *recordingScheduler) ScheduleCreateGames(_ context.Context, _ pgx.Tx, roundID int32, retry bool) (bool, error) {
+	if s.busy {
+		return false, nil
+	}
+	s.creations = append(s.creations, scheduledCreation{roundID: roundID, retry: retry})
+	return true, nil
+}
+
+func (s *recordingScheduler) ScheduleSyncGames(_ context.Context, _ pgx.Tx) error { return nil }
 
 func TestAdminRounds_GenerateNowSchedulesThePublication(t *testing.T) {
 	// Spec §8.5 (Phase 5): a draft made with Generate now publishes when

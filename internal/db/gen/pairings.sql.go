@@ -29,7 +29,7 @@ func (q *Queries) AttachGameToPairing(ctx context.Context, arg AttachGameToPairi
 const createRound = `-- name: CreateRound :one
 INSERT INTO rounds (number, state, publish_at, published_at, pair_at, generated_by)
 VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used
+RETURNING id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used, game_creation, games_created_at
 `
 
 type CreateRoundParams struct {
@@ -70,12 +70,14 @@ func (q *Queries) CreateRound(ctx context.Context, arg CreateRoundParams) (Round
 		&i.OddPool,
 		&i.RepeatPairings,
 		&i.SettingsUsed,
+		&i.GameCreation,
+		&i.GamesCreatedAt,
 	)
 	return i, err
 }
 
 const getRoundByNumber = `-- name: GetRoundByNumber :one
-SELECT id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used FROM rounds WHERE number = $1 AND state <> 'cancelled'
+SELECT id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used, game_creation, games_created_at FROM rounds WHERE number = $1 AND state <> 'cancelled'
 `
 
 // A cancelled round's number is no longer unique (rounds_number_live,
@@ -99,6 +101,8 @@ func (q *Queries) GetRoundByNumber(ctx context.Context, number int32) (Round, er
 		&i.OddPool,
 		&i.RepeatPairings,
 		&i.SettingsUsed,
+		&i.GameCreation,
+		&i.GamesCreatedAt,
 	)
 	return i, err
 }

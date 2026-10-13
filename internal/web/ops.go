@@ -20,6 +20,7 @@ import (
 var jobNames = []string{
 	"sync-games", "refresh-ratings", "recompute-aggregates",
 	"validate-tokens", "generate-round", "publish-round", "publish-round-sweep",
+	"create-games",
 }
 
 type healthJob struct {

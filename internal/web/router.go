@@ -67,6 +67,7 @@ func (s *Server) Handler() http.Handler {
 				r.Post("/generate", s.handleGenerateRound)
 				r.Get("/{id}", s.handleRoundView)
 				r.Post("/{id}/publish", s.handlePublishRound)
+				r.Post("/{id}/create-games", s.handleRetryGameCreation)
 				r.Post("/{id}/cancel", s.handleCancelRound)
 				r.Post("/{id}/regenerate", s.handleRegenerateRound)
 				r.Post("/{id}/pairings/swap", s.handleSwapPairings)

@@ -30,7 +30,15 @@ func noticesOf(t *testing.T, tx pgx.Tx, user gen.User) []gen.Notification {
 
 func publish(t *testing.T, tx pgx.Tx, round gen.Round) bool {
 	t.Helper()
-	_, published, err := rounds.Publish(context.Background(), tx, round.ID, time.Now(), pgtype.UUID{})
+	_, published, err := rounds.Publish(
+		context.Background(),
+		tx,
+		round.ID,
+		settings.Defaults(),
+		time.Now(),
+		pgtype.UUID{},
+		nil,
+	)
 	require.NoError(t, err)
 	return published
 }

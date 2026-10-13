@@ -373,7 +373,7 @@ func TestDashboard_ThisWeek(t *testing.T) {
 		assert.Contains(t, body, "This week · round 9000")
 		assert.Contains(t, body, ">Brenda</a> with white.")
 		assert.Contains(t, body, `href="https://lichess.org/@/Brenda">challenge them on Lichess`)
-		assert.Contains(t, body, "Start the game on Lichess as you do today")
+		assert.Contains(t, body, "Start the game on Lichess by hand")
 
 		oppBody := getAs(t, srv, sessionFor(t, srv, opp), "/account").Body.String()
 		assert.Contains(t, oppBody, ">Walter</a> with black.")
@@ -385,7 +385,7 @@ func TestDashboard_ThisWeek(t *testing.T) {
 		body = getAs(t, srv, session, "/account").Body.String()
 		assert.Contains(t, body, `href="https://lichess.org/thisweek1">open on Lichess`)
 		assert.NotContains(t, body, "challenge them on Lichess")
-		assert.NotContains(t, body, "Start the game on Lichess as you do today")
+		assert.NotContains(t, body, "Start the game on Lichess by hand")
 	})
 
 	t.Run("double game: both opponents, one white one black", func(t *testing.T) {

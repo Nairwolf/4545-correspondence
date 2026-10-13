@@ -19,6 +19,7 @@ import (
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
 	"github.com/nairwolf/4545-correspondence/internal/jobs"
 	"github.com/nairwolf/4545-correspondence/internal/lichess"
+	"github.com/nairwolf/4545-correspondence/internal/rounds"
 	"github.com/nairwolf/4545-correspondence/internal/settings"
 	"github.com/nairwolf/4545-correspondence/internal/tokencrypt"
 	"github.com/nairwolf/4545-correspondence/internal/web"
@@ -76,9 +77,10 @@ func runServe(ctx context.Context, cfg config.Config) error {
 		return fmt.Errorf("serve: load settings: %w", err)
 	}
 
-	// The generate-round handler needs the client it is being
-	// registered on, so it reads the variable rather than a copy: by
-	// the time a job runs, NewClient has long since assigned it.
+	// The round handlers need the client they are being registered on,
+	// to queue the jobs that follow, so they read the variable rather
+	// than a copy: by the time a job runs, NewClient has long since
+	// assigned it.
 	var riverClient *river.Client[pgx.Tx]
 	riverClient, err = jobs.NewClient(pool, jobs.Handlers{
 		SyncGames: func(ctx context.Context, id int64) error {
@@ -94,13 +96,22 @@ func runServe(ctx context.Context, cfg config.Config) error {
 			return runGenerateRound(ctx, pool, gen.RoundSourceSchedule, jobs.NewScheduler(riverClient), &id)
 		},
 		PublishRound: func(ctx context.Context, roundID int32, id int64) error {
-			return runPublishRound(ctx, pool, roundID, &id)
+			return runPublishRound(ctx, pool, roundID, jobs.NewScheduler(riverClient), &id)
 		},
 		PublishSweep: func(ctx context.Context, id int64) error {
-			return runPublishSweep(ctx, pool, &id)
+			return runPublishSweep(ctx, pool, jobs.NewScheduler(riverClient), &id)
 		},
 		ValidateTokens: func(ctx context.Context, id int64) error {
 			return runValidateTokens(ctx, pool, client, tokenKey, cfg.OrganiserToken, &id)
+		},
+		CreateGames: func(ctx context.Context, args jobs.CreateGamesArgs, lastAttempt bool, id int64) error {
+			creator := rounds.GameCreator{
+				Lichess:   client,
+				Key:       tokenKey,
+				Organiser: cfg.OrganiserToken,
+				Scheduler: jobs.NewScheduler(riverClient),
+			}
+			return runCreateGames(ctx, pool, creator, args, lastAttempt, &id)
 		},
 	}, league.PairingCron, slog.Default())
 	if err != nil {

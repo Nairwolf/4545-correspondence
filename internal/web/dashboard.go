@@ -127,17 +127,23 @@ type thisWeekView struct {
 	// Games has two entries for the odd-pool volunteer (§6.2 step 6a).
 	Games []thisWeekGame
 	// NeedsChallenge: at least one game still has to be started by
-	// hand on Lichess (until Phase 5 creates games itself).
+	// hand on Lichess.
 	NeedsChallenge bool
 	Sentence       string // bye, excluded and not-in-pool wording
 	ByeHistory     string // "N byes so far, most recently in round M.", empty when none
 }
 
 type thisWeekGame struct {
-	Opponent  string
-	Color     string // "white" or "black"
-	GameID    string // empty until sync-games has found the game
-	NotPlayed bool   // the pairing was marked failed (or cancelled)
+	Opponent string
+	Color    string // "white" or "black"
+	// GameID is the Lichess game: known from its creation for a game the
+	// league created, from sync-games finding it for one started by hand.
+	GameID string
+	// Created: the league created the game on Lichess (spec §8.3).
+	Created bool
+	// Creating: the round's create-games job has not got to it yet.
+	Creating  bool
+	NotPlayed bool // the pairing was marked failed (or cancelled)
 }
 
 // thisWeekFor loads the "This week" section for the latest published
@@ -178,8 +184,12 @@ func thisWeekFor(ctx context.Context, q *gen.Queries, userID pgtype.UUID) (thisW
 			if p.LichessGameID != nil {
 				g.GameID = *p.LichessGameID
 			}
+			g.Created = p.CreationMethod == gen.PairingMethodBulk
 			if g.GameID == "" && !g.NotPlayed {
-				v.NeedsChallenge = true
+				// Still waiting for a game: being created by the league,
+				// or for the players to start it.
+				g.Creating = round.GameCreation == gen.GameCreationStateCreating
+				v.NeedsChallenge = v.NeedsChallenge || !g.Creating
 			}
 			v.Games = append(v.Games, g)
 		}

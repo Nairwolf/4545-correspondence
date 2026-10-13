@@ -23,7 +23,7 @@ func (q *Queries) CancelPairingsForRound(ctx context.Context, roundID int32) err
 const cancelRound = `-- name: CancelRound :one
 UPDATE rounds SET state = 'cancelled', notes = $2
 WHERE id = $1 AND state = 'draft'
-RETURNING id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used
+RETURNING id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used, game_creation, games_created_at
 `
 
 type CancelRoundParams struct {
@@ -31,8 +31,7 @@ type CancelRoundParams struct {
 	Notes *string `json:"notes"`
 }
 
-// Drafts only (a published round may already have games; cancelling
-// one is Phase 5, spec §6.3).
+// Drafts only: a published round is final (spec §6.3).
 func (q *Queries) CancelRound(ctx context.Context, arg CancelRoundParams) (Round, error) {
 	row := q.db.QueryRow(ctx, cancelRound, arg.ID, arg.Notes)
 	var i Round
@@ -51,6 +50,8 @@ func (q *Queries) CancelRound(ctx context.Context, arg CancelRoundParams) (Round
 		&i.OddPool,
 		&i.RepeatPairings,
 		&i.SettingsUsed,
+		&i.GameCreation,
+		&i.GamesCreatedAt,
 	)
 	return i, err
 }
@@ -90,9 +91,9 @@ SELECT
   (SELECT count(*) FROM pairings p
     JOIN rounds r ON r.id = p.round_id
     WHERE r.state = 'published'
-      AND p.lichess_game_id IS NULL
       AND p.status IN ('pending', 'created')
       AND (p.white_user_id = $1 OR p.black_user_id = $1)
+      AND NOT EXISTS (SELECT 1 FROM games g WHERE g.pairing_id = p.id)
   ) AS in_flight
 `
 
@@ -100,11 +101,15 @@ SELECT
 // machine (§6.1), admin round management (§8.5) and the dashboard's
 // "this week" block (§8.3). Phase 4, 2026-09-17 — see PLAN.md.
 // spec §5.8, amended 2026-09-17 (decision 7): games in progress plus
-// pending pairings of PUBLISHED rounds with no game ingested yet — a
-// pairing the player has been told to start is a game in flight before
-// Lichess knows about it. This replaces the narrower
-// CountOngoingGamesForUser everywhere it was read (the pairing pool,
-// standings, the dashboard), so the three can never disagree.
+// pending or created pairings of PUBLISHED rounds with no game ingested
+// yet — a pairing the player has been told to start is a game in
+// flight before Lichess knows about it, and a game bulk pairing created
+// is one from its creation, before sync-games has fetched it. "No game
+// ingested" is no games row for the pairing, not "no game id": a bulk
+// game has its id from the moment it is created (Phase 5 step 5). This
+// replaces the narrower CountOngoingGamesForUser everywhere it was read
+// (the pairing pool, standings, the dashboard), so the three can never
+// disagree.
 func (q *Queries) CountInFlightGamesForUser(ctx context.Context, whiteUserID pgtype.UUID) (int32, error) {
 	row := q.db.QueryRow(ctx, countInFlightGamesForUser, whiteUserID)
 	var in_flight int32
@@ -119,7 +124,7 @@ INSERT INTO rounds (
 ) VALUES (
   $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
 )
-RETURNING id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used
+RETURNING id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used, game_creation, games_created_at
 `
 
 type CreateGeneratedRoundParams struct {
@@ -164,6 +169,8 @@ func (q *Queries) CreateGeneratedRound(ctx context.Context, arg CreateGeneratedR
 		&i.OddPool,
 		&i.RepeatPairings,
 		&i.SettingsUsed,
+		&i.GameCreation,
+		&i.GamesCreatedAt,
 	)
 	return i, err
 }
@@ -298,7 +305,7 @@ func (q *Queries) FlipPairingColours(ctx context.Context, arg FlipPairingColours
 }
 
 const getDraftRound = `-- name: GetDraftRound :one
-SELECT id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used FROM rounds WHERE state = 'draft'
+SELECT id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used, game_creation, games_created_at FROM rounds WHERE state = 'draft'
 `
 
 // At most one row can ever match (rounds_one_draft).
@@ -320,6 +327,8 @@ func (q *Queries) GetDraftRound(ctx context.Context) (Round, error) {
 		&i.OddPool,
 		&i.RepeatPairings,
 		&i.SettingsUsed,
+		&i.GameCreation,
+		&i.GamesCreatedAt,
 	)
 	return i, err
 }
@@ -413,7 +422,7 @@ func (q *Queries) GetLastDoubleGameForUser(ctx context.Context, userID pgtype.UU
 }
 
 const getLatestPublishedRound = `-- name: GetLatestPublishedRound :one
-SELECT id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used FROM rounds WHERE state = 'published' ORDER BY number DESC LIMIT 1
+SELECT id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used, game_creation, games_created_at FROM rounds WHERE state = 'published' ORDER BY number DESC LIMIT 1
 `
 
 func (q *Queries) GetLatestPublishedRound(ctx context.Context) (Round, error) {
@@ -434,6 +443,8 @@ func (q *Queries) GetLatestPublishedRound(ctx context.Context) (Round, error) {
 		&i.OddPool,
 		&i.RepeatPairings,
 		&i.SettingsUsed,
+		&i.GameCreation,
+		&i.GamesCreatedAt,
 	)
 	return i, err
 }
@@ -472,7 +483,7 @@ func (q *Queries) GetPairingByID(ctx context.Context, arg GetPairingByIDParams) 
 }
 
 const getRoundByID = `-- name: GetRoundByID :one
-SELECT id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used FROM rounds WHERE id = $1
+SELECT id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used, game_creation, games_created_at FROM rounds WHERE id = $1
 `
 
 func (q *Queries) GetRoundByID(ctx context.Context, id int32) (Round, error) {
@@ -493,12 +504,14 @@ func (q *Queries) GetRoundByID(ctx context.Context, id int32) (Round, error) {
 		&i.OddPool,
 		&i.RepeatPairings,
 		&i.SettingsUsed,
+		&i.GameCreation,
+		&i.GamesCreatedAt,
 	)
 	return i, err
 }
 
 const getRoundForUpdate = `-- name: GetRoundForUpdate :one
-SELECT id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used FROM rounds WHERE id = $1 FOR UPDATE
+SELECT id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used, game_creation, games_created_at FROM rounds WHERE id = $1 FOR UPDATE
 `
 
 // Locks the round row. Every publish/cancel/regenerate/edit path takes
@@ -522,6 +535,8 @@ func (q *Queries) GetRoundForUpdate(ctx context.Context, id int32) (Round, error
 		&i.OddPool,
 		&i.RepeatPairings,
 		&i.SettingsUsed,
+		&i.GameCreation,
+		&i.GamesCreatedAt,
 	)
 	return i, err
 }
@@ -789,7 +804,7 @@ func (q *Queries) ListDoubleGamesForRound(ctx context.Context, roundID int32) ([
 }
 
 const listDraftsDue = `-- name: ListDraftsDue :many
-SELECT id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used FROM rounds WHERE state = 'draft' AND publish_at <= $1
+SELECT id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used, game_creation, games_created_at FROM rounds WHERE state = 'draft' AND publish_at <= $1
 `
 
 // The hourly publish-round-sweep's input (spec §7): a draft whose
@@ -824,6 +839,8 @@ func (q *Queries) ListDraftsDue(ctx context.Context, publishAt pgtype.Timestampt
 			&i.OddPool,
 			&i.RepeatPairings,
 			&i.SettingsUsed,
+			&i.GameCreation,
+			&i.GamesCreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1211,7 +1228,7 @@ func (q *Queries) ListRecentOpponents(ctx context.Context, arg ListRecentOpponen
 
 const listRounds = `-- name: ListRounds :many
 SELECT
-  r.id, r.number, r.state, r.generated_at, r.publish_at, r.published_at, r.pair_at, r.generated_by, r.bulk_pairing_id, r.notes, r.pool_size, r.odd_pool, r.repeat_pairings, r.settings_used,
+  r.id, r.number, r.state, r.generated_at, r.publish_at, r.published_at, r.pair_at, r.generated_by, r.bulk_pairing_id, r.notes, r.pool_size, r.odd_pool, r.repeat_pairings, r.settings_used, r.game_creation, r.games_created_at,
   (SELECT count(*) FROM pairings p WHERE p.round_id = r.id)::int AS pairing_count,
   (SELECT count(*) FROM byes b WHERE b.round_id = r.id)::int AS bye_count
 FROM rounds r
@@ -1233,6 +1250,8 @@ type ListRoundsRow struct {
 	OddPool        *OddPoolOutcome    `json:"odd_pool"`
 	RepeatPairings *int32             `json:"repeat_pairings"`
 	SettingsUsed   []byte             `json:"settings_used"`
+	GameCreation   GameCreationState  `json:"game_creation"`
+	GamesCreatedAt pgtype.Timestamptz `json:"games_created_at"`
 	PairingCount   int32              `json:"pairing_count"`
 	ByeCount       int32              `json:"bye_count"`
 }
@@ -1262,6 +1281,8 @@ func (q *Queries) ListRounds(ctx context.Context) ([]ListRoundsRow, error) {
 			&i.OddPool,
 			&i.RepeatPairings,
 			&i.SettingsUsed,
+			&i.GameCreation,
+			&i.GamesCreatedAt,
 			&i.PairingCount,
 			&i.ByeCount,
 		); err != nil {
@@ -1293,7 +1314,7 @@ func (q *Queries) NextRoundNumber(ctx context.Context) (int32, error) {
 const publishRound = `-- name: PublishRound :one
 UPDATE rounds SET state = 'published', published_at = $2, pair_at = $2
 WHERE id = $1 AND state = 'draft'
-RETURNING id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used
+RETURNING id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used, game_creation, games_created_at
 `
 
 type PublishRoundParams struct {
@@ -1325,6 +1346,8 @@ func (q *Queries) PublishRound(ctx context.Context, arg PublishRoundParams) (Rou
 		&i.OddPool,
 		&i.RepeatPairings,
 		&i.SettingsUsed,
+		&i.GameCreation,
+		&i.GamesCreatedAt,
 	)
 	return i, err
 }
@@ -1334,7 +1357,7 @@ UPDATE rounds SET
   generated_at = now(), generated_by = $2, pool_size = $3, odd_pool = $4,
   repeat_pairings = $5, settings_used = $6
 WHERE id = $1 AND state = 'draft'
-RETURNING id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used
+RETURNING id, number, state, generated_at, publish_at, published_at, pair_at, generated_by, bulk_pairing_id, notes, pool_size, odd_pool, repeat_pairings, settings_used, game_creation, games_created_at
 `
 
 type RefreshGeneratedRoundParams struct {
@@ -1375,6 +1398,8 @@ func (q *Queries) RefreshGeneratedRound(ctx context.Context, arg RefreshGenerate
 		&i.OddPool,
 		&i.RepeatPairings,
 		&i.SettingsUsed,
+		&i.GameCreation,
+		&i.GamesCreatedAt,
 	)
 	return i, err
 }

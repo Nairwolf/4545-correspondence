@@ -11,7 +11,18 @@
   {{if eq (printf "%s" .Round.State) "draft"}}
     Draft — auto-publishes at {{datetime .Round.PublishAt}} unless published, cancelled or regenerated first.
   {{else if eq (printf "%s" .Round.State) "published"}}
-    Published {{datetime .Round.PublishedAt}}. Pairings are manual_external/pending; players challenge each other by hand.
+    Published {{datetime .Round.PublishedAt}}.
+    {{$creation := printf "%s" .Round.GameCreation}}
+    {{if eq $creation "manual"}}
+    Game creation was off: players start every game by hand.
+    {{else if eq $creation "creating"}}
+    The games are being created on Lichess — see create-games on the <a class="underline" href="/admin/jobs">jobs page</a>.
+    {{else if eq $creation "created"}}
+    Games created on Lichess {{datetime .Round.GamesCreatedAt}}{{with .Round.BulkPairingID}}, bulk {{.}}{{end}}.
+    {{if .ByHand}}{{plural .ByHand "pairing"}} left for the players to start by hand.{{end}}
+    {{else if eq $creation "gave_up"}}
+    Game creation gave up — Lichess kept refusing, or game creation was switched off; see the <a class="underline" href="/admin/jobs">jobs page</a>. The players were told to start their games by hand.
+    {{end}}
   {{else}}
     Cancelled{{if .Round.Notes}}: {{.Round.Notes}}{{end}}.
   {{end}}
@@ -65,7 +76,7 @@
 
 {{/* Pairings table */}}
 <div class="overflow-x-auto">
-<table class="w-full min-w-[64rem] border-collapse text-left">
+<table class="w-full min-w-[72rem] border-collapse text-left">
   <thead class="text-xs uppercase tracking-wide text-zinc-500">
     <tr class="border-b border-zinc-800">
       <th class="py-2 pr-3">#</th>
@@ -74,6 +85,7 @@
       <th class="py-2 pr-3 text-right">Gap</th>
       <th class="py-2 pr-3 text-right">Colour pen.</th>
       <th class="py-2 pr-3">Repeat of</th>
+      <th class="py-2 pr-3">Game</th>
       <th class="py-2 pr-3">Status</th>
       <th class="py-2">Actions</th>
     </tr>
@@ -88,6 +100,10 @@
       <td class="py-1.5 pr-3 text-right tabular-nums text-zinc-400">{{int32OrDash .RatingGap}}</td>
       <td class="py-1.5 pr-3 text-right tabular-nums text-zinc-400">{{int32OrDash .ColorPenalty}}</td>
       <td class="py-1.5 pr-3 text-zinc-500">{{if .RepeatOfRound}}#{{int32OrDash .RepeatOfRound}}{{else}}—{{end}}</td>
+      <td class="py-1.5 pr-3 text-zinc-400">
+        {{if eq (printf "%s" .CreationMethod) "manual_external"}}by hand{{else}}{{.CreationMethod}}{{end}}
+        {{with .LichessGameID}}· <a class="underline hover:text-zinc-200" href="{{gameURL .}}">{{.}}</a>{{end}}
+      </td>
       <td class="py-1.5 pr-3">
         {{.Status}}
         {{if .EditedBy.Valid}}<span class="ml-1 rounded bg-zinc-800 px-1 text-xs text-zinc-400">edited</span>{{end}}
@@ -110,7 +126,7 @@
       </td>
     </tr>
     {{else}}
-    <tr><td colspan="8" class="py-4 text-zinc-500">No pairings.</td></tr>
+    <tr><td colspan="9" class="py-4 text-zinc-500">No pairings.</td></tr>
     {{end}}
   </tbody>
 </table>
@@ -158,6 +174,16 @@
       <button type="submit" class="mt-1 rounded bg-red-800 px-2 py-1 text-xs font-medium text-white hover:bg-red-700">Cancel round</button>
     </form>
   </details>
+  {{end}}
+  {{if .CanRetry}}
+  {{if .GameCreationOn}}
+  <form method="post" action="/admin/rounds/{{.Round.ID}}/create-games">
+    <button type="submit" class="rounded bg-emerald-700 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-600">Retry game creation</button>
+  </form>
+  <p class="text-xs text-zinc-500">Looks for games the players already started by hand first, then creates the rest; their players are told not to start another.</p>
+  {{else}}
+  <p class="text-xs text-zinc-500">Game creation is switched off (pairing.game_creation = manual), so it can't be retried.</p>
+  {{end}}
   {{end}}
 </div>
 {{end}}

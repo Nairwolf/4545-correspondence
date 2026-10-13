@@ -11,6 +11,7 @@ package notify
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 
@@ -135,4 +136,25 @@ func optional(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// TokenLapsed is the token notice of spec §10, for a stored token
+// Lichess no longer accepts. Both checks that can find one —
+// validate-tokens and the probe before a round's games are created —
+// send this same notice under the same key, keyed by the token's issue
+// time, so a player is told once per token whichever finds it first.
+// It is account-critical, so it reaches them whatever their
+// preferences. The wording fits both values of pairing.game_creation:
+// the dashboard banner, which follows the setting, gives the
+// consequence in days.
+func TokenLapsed(user pgtype.UUID, issuedAt time.Time) Notice {
+	return Notice{
+		User:     user,
+		Category: Token,
+		Title:    "Your Lichess authorisation has lapsed",
+		Body: "Lichess no longer accepts the authorisation you gave the league, which it needs to create your games. " +
+			"Re-authorise from your account page: it takes one click.",
+		Link: "/account",
+		Key:  "token:revoked:" + issuedAt.UTC().Format(time.RFC3339Nano),
+	}
 }

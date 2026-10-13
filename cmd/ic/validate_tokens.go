@@ -234,31 +234,13 @@ func revokeToken(ctx context.Context, db txBeginner, row gen.ListTokensToValidat
 	if marked == 0 {
 		return false, nil
 	}
-	if err := notify.Send(ctx, q, tokenLapsedNotice(row)); err != nil {
+	if err := notify.Send(ctx, q, notify.TokenLapsed(row.UserID, row.IssuedAt.Time)); err != nil {
 		return false, fmt.Errorf("revoke %s's token: %w", row.LichessUsername, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("revoke %s's token: commit: %w", row.LichessUsername, err)
 	}
 	return true, nil
-}
-
-// tokenLapsedNotice is the token notification of spec §10. It is
-// account-critical, so it reaches the player whatever their
-// preferences, and keyed by the token's issue time, so a retried run
-// never tells them twice about the same token. It is worded for both
-// values of pairing.game_creation: the consequence in numbers (the
-// grace period) is on the dashboard banner, which follows the setting.
-func tokenLapsedNotice(row gen.ListTokensToValidateRow) notify.Notice {
-	return notify.Notice{
-		User:     row.UserID,
-		Category: notify.Token,
-		Title:    "Your Lichess authorisation has lapsed",
-		Body: "Lichess no longer accepts the authorisation you gave the league, which it needs to create your games. " +
-			"Re-authorise from your account page: it takes one click.",
-		Link: "/account",
-		Key:  "token:revoked:" + row.IssuedAt.Time.UTC().Format(time.RFC3339Nano),
-	}
 }
 
 // organiserState words Lichess's answer about the organiser token.

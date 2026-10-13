@@ -271,13 +271,27 @@ func recheckInProgressGames(ctx context.Context, q *gen.Queries, client lichess.
 }
 
 // matchPendingPairings is spec §7.3 step 2: find the Lichess game for
-// every pairing that doesn't have one yet, grouped by white player so a
-// player with several pending pairings costs one Lichess call.
+// every pairing that doesn't have one yet.
 func matchPendingPairings(ctx context.Context, q *gen.Queries, client lichess.API, cfg settings.Settings, stats *syncGamesStats) error {
 	unmatched, err := q.ListUnmatchedPairings(ctx)
 	if err != nil {
 		return fmt.Errorf("list unmatched pairings: %w", err)
 	}
+	return matchPairings(ctx, q, client, cfg, unmatched, stats)
+}
+
+// matchPairings searches for the games of the given pairings (§7.3),
+// grouped by white player so a player with several pending pairings
+// costs one Lichess call. It also backs create-games' retry, for one
+// round's pairings.
+func matchPairings(
+	ctx context.Context,
+	q *gen.Queries,
+	client lichess.API,
+	cfg settings.Settings,
+	unmatched []gen.ListUnmatchedPairingsRow,
+	stats *syncGamesStats,
+) error {
 	stats.PairingsChecked += len(unmatched)
 	if len(unmatched) == 0 {
 		return nil

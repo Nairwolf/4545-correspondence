@@ -83,3 +83,59 @@ func TestInsertClient_QueuesOnePublishJobPerWindow(t *testing.T) {
 	require.NoError(t, sched.SchedulePublish(ctx, tx, roundID, later))
 	assert.Len(t, queuedPublishes(t, tx, roundID), 2, "a moved window is a new job")
 }
+
+func TestScheduler_OneCreateGamesJobPerRoundAtATime(t *testing.T) {
+	// Spec §6.3: create-games is unique per round while it waits or
+	// runs, whoever queued it, and has the longer retry budget. Once it
+	// has finished, an admin's retry can queue another.
+	pool, tx := testPoolAndTx(t)
+	ctx := context.Background()
+
+	client, err := NewInsertClient(pool)
+	require.NoError(t, err)
+	sched := NewScheduler(client)
+
+	const roundID = 900043
+	queued, err := sched.ScheduleCreateGames(ctx, tx, roundID, false)
+	require.NoError(t, err)
+	assert.True(t, queued)
+
+	queued, err = sched.ScheduleCreateGames(ctx, tx, roundID, true)
+	require.NoError(t, err)
+	assert.False(t, queued, "a retry while the publication's job waits adds nothing")
+
+	var count, maxAttempts int
+	require.NoError(t, tx.QueryRow(ctx, `
+		SELECT count(*), max(max_attempts) FROM river_job
+		WHERE kind = 'create-games' AND (args->>'round_id')::int = $1`, roundID).Scan(&count, &maxAttempts))
+	assert.Equal(t, 1, count)
+	assert.Equal(t, 10, maxAttempts)
+
+	_, err = tx.Exec(ctx, `
+		UPDATE river_job SET state = 'completed', finalized_at = now()
+		WHERE kind = 'create-games' AND (args->>'round_id')::int = $1`, roundID)
+	require.NoError(t, err)
+	queued, err = sched.ScheduleCreateGames(ctx, tx, roundID, true)
+	require.NoError(t, err)
+	assert.True(t, queued, "once it has finished, a retry is queued")
+
+	var retry bool
+	require.NoError(t, tx.QueryRow(ctx, `
+		SELECT (args->>'retry')::bool FROM river_job
+		WHERE kind = 'create-games' AND (args->>'round_id')::int = $1 AND state = 'available'`, roundID).Scan(&retry))
+	assert.True(t, retry)
+}
+
+func TestScheduler_QueuesASyncGamesRun(t *testing.T) {
+	pool, tx := testPoolAndTx(t)
+	ctx := context.Background()
+
+	client, err := NewInsertClient(pool)
+	require.NoError(t, err)
+
+	var before, after int
+	require.NoError(t, tx.QueryRow(ctx, `SELECT count(*) FROM river_job WHERE kind = 'sync-games'`).Scan(&before))
+	require.NoError(t, NewScheduler(client).ScheduleSyncGames(ctx, tx))
+	require.NoError(t, tx.QueryRow(ctx, `SELECT count(*) FROM river_job WHERE kind = 'sync-games'`).Scan(&after))
+	assert.Equal(t, before+1, after)
+}

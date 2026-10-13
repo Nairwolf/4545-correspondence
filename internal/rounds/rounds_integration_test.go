@@ -138,10 +138,15 @@ func addRound(t *testing.T, tx pgx.Tx, state gen.RoundState, pairs [][2]gen.User
 
 // fakeScheduler records what the service asked river to enqueue.
 // Testing the enqueue itself would be testing river; what matters here
-// is that a draft schedules its own publication exactly once and that
-// regeneration does not lose it.
+// is that a draft schedules its own publication exactly once, that
+// regeneration does not lose it, and that a round whose games the site
+// creates gets its create-games job. busy stands for a create-games job
+// already waiting for a round, which river would refuse to duplicate.
 type fakeScheduler struct {
-	calls []scheduled
+	calls  []scheduled
+	create []scheduledCreation
+	syncs  int
+	busy   map[int32]bool
 }
 
 type scheduled struct {
@@ -149,8 +154,26 @@ type scheduled struct {
 	publishAt time.Time
 }
 
+type scheduledCreation struct {
+	roundID int32
+	retry   bool
+}
+
 func (f *fakeScheduler) SchedulePublish(_ context.Context, _ pgx.Tx, roundID int32, publishAt time.Time) error {
 	f.calls = append(f.calls, scheduled{roundID: roundID, publishAt: publishAt})
+	return nil
+}
+
+func (f *fakeScheduler) ScheduleCreateGames(_ context.Context, _ pgx.Tx, roundID int32, retry bool) (bool, error) {
+	if f.busy[roundID] {
+		return false, nil
+	}
+	f.create = append(f.create, scheduledCreation{roundID: roundID, retry: retry})
+	return true, nil
+}
+
+func (f *fakeScheduler) ScheduleSyncGames(_ context.Context, _ pgx.Tx) error {
+	f.syncs++
 	return nil
 }
 
@@ -512,7 +535,7 @@ func TestPublish_IsIdempotentAcrossItsThreeCallers(t *testing.T) {
 
 	// The scheduled job, or an admin's "publish now", first.
 	now := time.Now()
-	round, published, err := rounds.Publish(ctx, tx, draft.ID, now, pgtype.UUID{})
+	round, published, err := rounds.Publish(ctx, tx, draft.ID, settings.Defaults(), now, pgtype.UUID{}, nil)
 	require.NoError(t, err)
 	assert.True(t, published)
 	assert.Equal(t, gen.RoundStatePublished, round.State)
@@ -520,12 +543,12 @@ func TestPublish_IsIdempotentAcrossItsThreeCallers(t *testing.T) {
 	assert.WithinDuration(t, now, round.PublishedAt.Time, time.Second)
 
 	// Whoever gets there second changes nothing.
-	_, published, err = rounds.Publish(ctx, tx, draft.ID, time.Now(), pgtype.UUID{})
+	_, published, err = rounds.Publish(ctx, tx, draft.ID, settings.Defaults(), time.Now(), pgtype.UUID{}, nil)
 	require.NoError(t, err)
 	assert.False(t, published)
 
 	// And the hourly sweep no longer sees it.
-	swept, err := rounds.PublishDue(ctx, tx, time.Now())
+	swept, err := rounds.PublishDue(ctx, tx, settings.Defaults(), time.Now(), nil)
 	require.NoError(t, err)
 	assert.Empty(t, swept)
 }
@@ -542,7 +565,7 @@ func TestPublishDue_PublishesAnOverdueDraft(t *testing.T) {
 	draft := generate(t, tx, cfg, nil).Round
 	require.Equal(t, gen.RoundStateDraft, draft.State)
 
-	published, err := rounds.PublishDue(ctx, tx, time.Now())
+	published, err := rounds.PublishDue(ctx, tx, cfg, time.Now(), nil)
 	require.NoError(t, err)
 	require.Len(t, published, 1)
 	assert.Equal(t, draft.Number, published[0].Number)

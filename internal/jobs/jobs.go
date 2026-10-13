@@ -32,6 +32,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
+	"github.com/riverqueue/river/rivertype"
 	"github.com/robfig/cron/v3"
 )
 
@@ -60,9 +61,14 @@ const softStopTimeout = 20 * time.Second
 // in river's queue tables.
 type Handler func(ctx context.Context, riverJobID int64) error
 
-// RoundHandler is a Handler for the one job that acts on a single round
+// RoundHandler is a Handler for a job that acts on a single round
 // rather than the whole league.
 type RoundHandler func(ctx context.Context, roundID int32, riverJobID int64) error
+
+// CreateGamesHandler runs create-games for one round. lastAttempt is
+// true on the attempt after which river gives up: a run that fails
+// then must give the round's games up to its players (spec §6.3).
+type CreateGamesHandler func(ctx context.Context, args CreateGamesArgs, lastAttempt bool, riverJobID int64) error
 
 // Handlers is the set of background jobs `serve` runs.
 type Handlers struct {
@@ -80,6 +86,9 @@ type Handlers struct {
 	// ValidateTokens tests every stored Lichess token an hour before
 	// each generation (spec §7).
 	ValidateTokens Handler
+	// CreateGames creates a published round's games on Lichess (spec
+	// §6.3), queued by its publication or an admin's retry.
+	CreateGames CreateGamesHandler
 }
 
 // Job argument types. Most carry no data — the job operates on the
@@ -102,6 +111,36 @@ type PublishRoundArgs struct {
 	PublishAt time.Time `json:"publish_at"`
 }
 
+// CreateGamesArgs names the round whose games to create. Only the
+// round counts for uniqueness: one create-games job per round may wait
+// or run at a time, whether queued by publication or by a retry.
+type CreateGamesArgs struct {
+	RoundID int32 `json:"round_id" river:"unique"`
+	// Retry is an admin's retry, which first looks for games the
+	// players have started by hand (spec §6.3 step 2).
+	Retry bool `json:"retry"`
+}
+
+// createGamesAttempts is create-games' retry budget (spec §6.3): river's
+// back-off spreads ten attempts over about four hours, so a short
+// Lichess outage is ridden out before the players are asked to start
+// their games by hand.
+const createGamesAttempts = 10
+
+// createGamesUnique keeps a second create-games job for a round out
+// while one waits or runs, and lets one in once the last has finished,
+// for a retry. river's default would also count a completed job.
+var createGamesUnique = river.UniqueOpts{
+	ByArgs: true,
+	ByState: []rivertype.JobState{
+		rivertype.JobStateAvailable,
+		rivertype.JobStatePending,
+		rivertype.JobStateRetryable,
+		rivertype.JobStateRunning,
+		rivertype.JobStateScheduled,
+	},
+}
+
 func (syncGamesArgs) Kind() string      { return "sync-games" }
 func (refreshRatingsArgs) Kind() string { return "refresh-ratings" }
 func (recomputeArgs) Kind() string      { return "recompute-aggregates" }
@@ -109,13 +148,16 @@ func (generateRoundArgs) Kind() string  { return "generate-round" }
 func (publishSweepArgs) Kind() string   { return "publish-round-sweep" }
 func (PublishRoundArgs) Kind() string   { return "publish-round" }
 func (validateTokensArgs) Kind() string { return "validate-tokens" }
+func (CreateGamesArgs) Kind() string    { return "create-games" }
 
-// Scheduler enqueues a draft's publish-round job in the transaction
-// that created the draft, so a round and its publication are committed
-// together or not at all. It is what internal/rounds calls through its
-// own Scheduler interface. Every path that generates a round has one:
-// the scheduled job and the web layer on serve's running client, `ic
-// generate-round` on an insert-only client (spec §7, §8.5).
+// Scheduler enqueues the jobs internal/rounds asks for, through its
+// own Scheduler interface, in the caller's transaction: a draft's
+// publish-round job with the draft, a round's create-games job with its
+// publication or an admin's retry, and the sync-games run that follows
+// a creation. Each is committed with the change it follows from, or
+// not at all. Every path that generates or publishes a round has one:
+// the jobs and the web layer on serve's running client, the `ic`
+// commands on an insert-only client (spec §7, §8.5).
 type Scheduler struct {
 	client *river.Client[pgx.Tx]
 }
@@ -147,6 +189,32 @@ func (s *Scheduler) SchedulePublish(ctx context.Context, tx pgx.Tx, roundID int3
 	)
 	if err != nil {
 		return fmt.Errorf("enqueue publish-round for round %d: %w", roundID, err)
+	}
+	return nil
+}
+
+// ScheduleCreateGames queues create-games for a round, to run at once,
+// with its longer retry budget. queued is false when one for the round
+// is already waiting or running.
+func (s *Scheduler) ScheduleCreateGames(ctx context.Context, tx pgx.Tx, roundID int32, retry bool) (bool, error) {
+	res, err := s.client.InsertTx(ctx, tx,
+		CreateGamesArgs{RoundID: roundID, Retry: retry},
+		&river.InsertOpts{
+			MaxAttempts: createGamesAttempts,
+			UniqueOpts:  createGamesUnique,
+		},
+	)
+	if err != nil {
+		return false, fmt.Errorf("enqueue create-games for round %d: %w", roundID, err)
+	}
+	return !res.UniqueSkippedAsDuplicate, nil
+}
+
+// ScheduleSyncGames queues one sync-games run now, besides the hourly
+// ones (spec §7: once right after create-games).
+func (s *Scheduler) ScheduleSyncGames(ctx context.Context, tx pgx.Tx) error {
+	if _, err := s.client.InsertTx(ctx, tx, syncGamesArgs{}, nil); err != nil {
+		return fmt.Errorf("enqueue sync-games: %w", err)
 	}
 	return nil
 }
@@ -186,6 +254,10 @@ func NewClient(
 	river.AddWorker(workers, workerFor(h.ValidateTokens, validateTokensArgs{}))
 	river.AddWorker(workers, river.WorkFunc(func(ctx context.Context, job *river.Job[PublishRoundArgs]) error {
 		return h.PublishRound(ctx, job.Args.RoundID, job.ID)
+	}))
+	river.AddWorker(workers, river.WorkFunc(func(ctx context.Context, job *river.Job[CreateGamesArgs]) error {
+		// Attempt counts from 1 while the job runs.
+		return h.CreateGames(ctx, job.Args, job.Attempt >= job.MaxAttempts, job.ID)
 	}))
 
 	return river.NewClient(riverpgxv5.New(pool), &river.Config{

@@ -77,13 +77,16 @@
     <ul>
       {{range .Games}}
       <li class="flex flex-wrap items-center justify-between gap-2 py-1">
-        <span class="text-zinc-300">You play <a class="font-medium text-zinc-100 hover:underline" href="{{playerURL .Opponent}}">{{.Opponent}}</a> with {{.Color}}.{{if .NotPlayed}} <span class="text-zinc-500">Marked as not played.</span>{{end}}</span>
-        {{if .NotPlayed}}{{else if .GameID}}<a class="text-sm text-zinc-400 underline hover:text-zinc-100" href="{{gameURL .GameID}}">open on Lichess</a>
+        <span class="text-zinc-300">You play <a class="font-medium text-zinc-100 hover:underline" href="{{playerURL .Opponent}}">{{.Opponent}}</a> with {{.Color}}.
+          {{- if .NotPlayed}} <span class="text-zinc-500">Marked as not played.</span>
+          {{- else if .Creating}} <span class="text-zinc-500">Your game is being created on Lichess.</span>
+          {{- else if .Created}} <span class="text-zinc-500">The league created the game on Lichess: nothing to start.</span>{{end}}</span>
+        {{if or .NotPlayed .Creating}}{{else if .GameID}}<a class="text-sm text-zinc-400 underline hover:text-zinc-100" href="{{gameURL .GameID}}">open on Lichess</a>
         {{- else}}<a class="text-sm text-zinc-400 underline hover:text-zinc-100" href="{{userURL .Opponent}}">challenge them on Lichess</a>{{end}}
       </li>
       {{end}}
     </ul>
-    {{if .NeedsChallenge}}<p class="mt-2 text-sm text-zinc-500">Start the game on Lichess as you do today; the site finds it by itself once it begins.</p>{{end}}
+    {{if .NeedsChallenge}}<p class="mt-2 text-sm text-zinc-500">Start the game on Lichess by hand; the site finds it by itself once it begins.</p>{{end}}
     {{else}}
     <p class="text-zinc-300">{{.Sentence}}</p>
     {{end}}

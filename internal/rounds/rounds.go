@@ -6,11 +6,12 @@
 // window that carries a draft from one to the other.
 //
 // Every entry point takes a transaction and, where a round already
-// exists, locks its row first (GetRoundForUpdate), so that Phase 5 can
-// put a Lichess call between the lock and the state change without
-// changing any of these shapes. Nothing here talks to Lichess: a Phase
-// 4 round is published as a set of manual_external pairings that
-// players start by hand, and sync-games discovers the games (§6.3).
+// exists, locks its row first (GetRoundForUpdate). None of them talks
+// to Lichess. Publication under pairing.game_creation = lichess queues
+// a create-games job in its transaction instead, and that job
+// (GameCreator, create.go) is the one place here that calls Lichess:
+// it takes the database rather than a transaction, because it must
+// never hold one open across a call (spec §6.3).
 package rounds
 
 import (
@@ -42,14 +43,28 @@ var ErrDraftExists = errors.New("a draft round already exists: publish, cancel o
 // already have games behind it.
 var ErrNotDraft = errors.New("round is not a draft")
 
-// Scheduler enqueues the publish-round job that ends a draft's review
-// window. It is an interface because internal/rounds has no business
-// knowing about river. Every generation path passes one (spec §8.5),
-// so a draft publishes when its window ends; with nil, as in tests
-// that don't look at it, the hourly sweep publishes the draft instead,
-// at most an hour late.
+// Scheduler enqueues the jobs that follow from a change made here, in
+// the transaction making it, so the change and its job are committed
+// together or not at all (spec §6.3, "database first, Lichess after").
+// It is an interface because internal/rounds has no business knowing
+// about river.
+//
+// Every generation path passes one (spec §8.5), so a draft publishes
+// when its window ends; with nil, as in tests that don't look at it,
+// the hourly sweep publishes the draft instead, at most an hour late.
+// Publication under pairing.game_creation = lichess cannot do without
+// one: nothing else would ever create the round's games.
 type Scheduler interface {
+	// SchedulePublish ends a draft's review window at publishAt.
 	SchedulePublish(ctx context.Context, tx pgx.Tx, roundID int32, publishAt time.Time) error
+	// ScheduleCreateGames queues create-games for a published round.
+	// retry marks an admin's retry, which searches for games started by
+	// hand first. queued is false when a create-games job for the round
+	// is already waiting or running, and nothing was added.
+	ScheduleCreateGames(ctx context.Context, tx pgx.Tx, roundID int32, retry bool) (queued bool, err error)
+	// ScheduleSyncGames queues a sync-games run, so games just created
+	// reach the site within minutes rather than at the top of the hour.
+	ScheduleSyncGames(ctx context.Context, tx pgx.Tx) error
 }
 
 // Snapshot is the §4.2 pairing settings as they stood when a round was

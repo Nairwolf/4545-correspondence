@@ -11,18 +11,27 @@ import (
 
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
 	"github.com/nairwolf/4545-correspondence/internal/rounds"
+	"github.com/nairwolf/4545-correspondence/internal/settings"
 )
 
 // runPublishRound implements the publish-round job: one draft, at the
 // end of its review window (spec §6.1). It is scheduled for that
 // draft's publish_at when the round is generated, and it is also what
-// `ic publish-round <number>` runs to publish early.
+// `ic publish-round <number>` runs to publish early. sched queues the
+// round's create-games job when the site creates the games: serve's own
+// river client for the job, an insert-only one for the CLI.
 //
 // Finding the round already published or cancelled is a SUCCESSFUL run
 // recording published=false, not a failure: the scheduled job, the
 // hourly sweep and an admin's "publish now" all race by design and the
 // first one wins.
-func runPublishRound(ctx context.Context, db txBeginner, roundID int32, riverJobID *int64) error {
+func runPublishRound(
+	ctx context.Context,
+	db txBeginner,
+	roundID int32,
+	sched rounds.Scheduler,
+	riverJobID *int64,
+) error {
 	q := gen.New(db)
 
 	jobRun, err := q.CreateJobRun(ctx, gen.CreateJobRunParams{JobName: "publish-round", RiverJobID: riverJobID})
@@ -30,12 +39,13 @@ func runPublishRound(ctx context.Context, db txBeginner, roundID int32, riverJob
 		return fmt.Errorf("publish-round: create job run: %w", err)
 	}
 
-	round, published, jobErr := publishInTx(ctx, db, roundID)
+	round, published, jobErr := publishInTx(ctx, db, roundID, sched)
 
 	detail, _ := json.Marshal(map[string]any{
-		"round_id":  roundID,
-		"number":    round.Number,
-		"published": published,
+		"round_id":      roundID,
+		"number":        round.Number,
+		"published":     published,
+		"game_creation": round.GameCreation,
 	})
 	status := gen.JobRunStatusSucceeded
 	var errMsg *string
@@ -65,14 +75,18 @@ func runPublishRound(ctx context.Context, db txBeginner, roundID int32, riverJob
 	return nil
 }
 
-func publishInTx(ctx context.Context, db txBeginner, roundID int32) (gen.Round, bool, error) {
+func publishInTx(ctx context.Context, db txBeginner, roundID int32, sched rounds.Scheduler) (gen.Round, bool, error) {
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		return gen.Round{}, false, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	round, published, err := rounds.Publish(ctx, tx, roundID, time.Now(), pgtype.UUID{})
+	cfg, err := settings.Load(ctx, gen.New(tx))
+	if err != nil {
+		return gen.Round{}, false, fmt.Errorf("load settings: %w", err)
+	}
+	round, published, err := rounds.Publish(ctx, tx, roundID, cfg, time.Now(), pgtype.UUID{}, sched)
 	if err != nil {
 		return gen.Round{}, false, err
 	}
@@ -82,10 +96,8 @@ func publishInTx(ctx context.Context, db txBeginner, roundID int32) (gen.Round, 
 // runPublishSweep implements the hourly publish-round-sweep (spec §7):
 // it publishes any draft whose review window has passed. Its job is to
 // make a lost or never-enqueued publish-round job cost an hour rather
-// than a week — a round generated from the CLI has no scheduled job at
-// all, and river does not re-create one for a firing missed while the
-// binary was down.
-func runPublishSweep(ctx context.Context, db txBeginner, riverJobID *int64) error {
+// than a week. sched is serve's river client, as for runPublishRound.
+func runPublishSweep(ctx context.Context, db txBeginner, sched rounds.Scheduler, riverJobID *int64) error {
 	q := gen.New(db)
 
 	jobRun, err := q.CreateJobRun(ctx, gen.CreateJobRunParams{JobName: "publish-round-sweep", RiverJobID: riverJobID})
@@ -93,7 +105,7 @@ func runPublishSweep(ctx context.Context, db txBeginner, riverJobID *int64) erro
 		return fmt.Errorf("publish-round-sweep: create job run: %w", err)
 	}
 
-	published, jobErr := sweepInTx(ctx, db)
+	published, jobErr := sweepInTx(ctx, db, sched)
 
 	numbers := make([]int32, 0, len(published))
 	for _, round := range published {
@@ -126,14 +138,18 @@ func runPublishSweep(ctx context.Context, db txBeginner, riverJobID *int64) erro
 	return nil
 }
 
-func sweepInTx(ctx context.Context, db txBeginner) ([]gen.Round, error) {
+func sweepInTx(ctx context.Context, db txBeginner, sched rounds.Scheduler) ([]gen.Round, error) {
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	published, err := rounds.PublishDue(ctx, tx, time.Now())
+	cfg, err := settings.Load(ctx, gen.New(tx))
+	if err != nil {
+		return nil, fmt.Errorf("load settings: %w", err)
+	}
+	published, err := rounds.PublishDue(ctx, tx, cfg, time.Now(), sched)
 	if err != nil {
 		return nil, err
 	}

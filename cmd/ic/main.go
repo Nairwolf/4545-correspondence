@@ -17,6 +17,7 @@ import (
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
 	"github.com/nairwolf/4545-correspondence/internal/jobs"
 	"github.com/nairwolf/4545-correspondence/internal/lichess"
+	"github.com/nairwolf/4545-correspondence/internal/rounds"
 	"github.com/nairwolf/4545-correspondence/internal/tokencrypt"
 )
 
@@ -29,7 +30,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: ic <serve|migrate|refresh-ratings|seed-players|import-pairings|sync-games|recompute|generate-round|publish-round|validate-tokens|setting> ...")
+		return errors.New("usage: ic <serve|migrate|refresh-ratings|seed-players|import-pairings|sync-games|recompute|generate-round|publish-round|create-games|validate-tokens|setting> ...")
 	}
 
 	cfg, err := config.Load()
@@ -120,7 +121,27 @@ func run(args []string) error {
 			return err
 		}
 		defer pool.Close()
-		return publishRoundByNumber(ctx, pool, args[1])
+		enqueuer, err := jobs.NewInsertClient(pool)
+		if err != nil {
+			return err
+		}
+		// Under pairing.game_creation = lichess the round's create-games
+		// job is queued with its publication; serve works it.
+		return publishRoundByNumber(ctx, pool, jobs.NewScheduler(enqueuer), args[1])
+	case "create-games":
+		if len(args) < 2 {
+			return errors.New("usage: ic create-games <round-number>")
+		}
+		pool, err := db.Open(ctx, cfg.DatabaseURL)
+		if err != nil {
+			return err
+		}
+		defer pool.Close()
+		enqueuer, err := jobs.NewInsertClient(pool)
+		if err != nil {
+			return err
+		}
+		return queueCreateGames(ctx, pool, jobs.NewScheduler(enqueuer), args[1])
 	case "validate-tokens":
 		// The stored tokens are sealed with TOKEN_ENCRYPTION_KEY, so
 		// this is the one command besides serve that needs it.
@@ -153,7 +174,7 @@ func run(args []string) error {
 		return runSetting(ctx, pool, args[1], args[2])
 	default:
 		return fmt.Errorf(
-			"unknown command %q (want: serve, migrate, refresh-ratings, seed-players, import-pairings, sync-games, recompute, generate-round, publish-round, validate-tokens, setting)",
+			"unknown command %q (want: serve, migrate, refresh-ratings, seed-players, import-pairings, sync-games, recompute, generate-round, publish-round, create-games, validate-tokens, setting)",
 			args[0],
 		)
 	}
@@ -163,7 +184,7 @@ func run(args []string) error {
 // — the one on /standings and in the round list — to the id the job
 // works in. A cancelled round no longer holds its number, so this can
 // only ever find a live one.
-func publishRoundByNumber(ctx context.Context, db txBeginner, arg string) error {
+func publishRoundByNumber(ctx context.Context, db txBeginner, sched rounds.Scheduler, arg string) error {
 	number, err := strconv.Atoi(arg)
 	if err != nil {
 		return fmt.Errorf("publish-round: %q is not a round number", arg)
@@ -175,7 +196,7 @@ func publishRoundByNumber(ctx context.Context, db txBeginner, arg string) error 
 	if err != nil {
 		return fmt.Errorf("publish-round: look up round %d: %w", number, err)
 	}
-	return runPublishRound(ctx, db, round.ID, nil)
+	return runPublishRound(ctx, db, round.ID, sched, nil)
 }
 
 func runMigrate(ctx context.Context, cfg config.Config) error {

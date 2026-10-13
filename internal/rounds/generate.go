@@ -28,7 +28,9 @@ type Outcome struct {
 // at publish_at; in auto_publish mode it is published in this same
 // transaction. actor is the admin who asked for it, or the zero uuid
 // for the scheduled job. sched may be nil, in which case the draft's
-// publication is left to the hourly sweep.
+// publication is left to the hourly sweep — except under auto_publish
+// with pairing.game_creation = lichess, where the published round's
+// create-games job needs it.
 func Generate(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -78,11 +80,17 @@ func Generate(
 	if err := writeResult(ctx, q, round.ID, result, p.userIDs); err != nil {
 		return Outcome{}, err
 	}
+	if round.State == gen.RoundStatePublished {
+		// auto_publish: no draft, so no Publish call to start the
+		// game creation and tell the players.
+		if round, err = startGameCreation(ctx, tx, round, cfg, sched); err != nil {
+			return Outcome{}, err
+		}
+	}
 	if err := auditRound(ctx, q, "round.generate", actor, round, nil, describe(result)); err != nil {
 		return Outcome{}, err
 	}
 	if round.State == gen.RoundStatePublished {
-		// auto_publish: no draft, so no Publish call to send them.
 		if err := notifyPublished(ctx, q, round); err != nil {
 			return Outcome{}, err
 		}

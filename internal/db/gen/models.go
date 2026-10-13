@@ -59,6 +59,50 @@ func (ns NullExclusionReason) Value() (driver.Value, error) {
 	return string(ns.ExclusionReason), nil
 }
 
+type GameCreationState string
+
+const (
+	GameCreationStateManual   GameCreationState = "manual"
+	GameCreationStateCreating GameCreationState = "creating"
+	GameCreationStateCreated  GameCreationState = "created"
+	GameCreationStateGaveUp   GameCreationState = "gave_up"
+)
+
+func (e *GameCreationState) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = GameCreationState(s)
+	case string:
+		*e = GameCreationState(s)
+	default:
+		return fmt.Errorf("unsupported scan type for GameCreationState: %T", src)
+	}
+	return nil
+}
+
+type NullGameCreationState struct {
+	GameCreationState GameCreationState `json:"game_creation_state"`
+	Valid             bool              `json:"valid"` // Valid is true if GameCreationState is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullGameCreationState) Scan(value interface{}) error {
+	if value == nil {
+		ns.GameCreationState, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.GameCreationState.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullGameCreationState) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.GameCreationState), nil
+}
+
 type GameResult string
 
 const (
@@ -717,6 +761,8 @@ type Round struct {
 	OddPool        *OddPoolOutcome    `json:"odd_pool"`
 	RepeatPairings *int32             `json:"repeat_pairings"`
 	SettingsUsed   []byte             `json:"settings_used"`
+	GameCreation   GameCreationState  `json:"game_creation"`
+	GamesCreatedAt pgtype.Timestamptz `json:"games_created_at"`
 }
 
 type RoundExclusion struct {

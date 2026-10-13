@@ -20,7 +20,8 @@ import (
 )
 
 // Admin round management (spec §8.5): generating, reviewing, publishing
-// and hand-editing the week's pairings. Generation runs in-request —
+// and hand-editing the week's pairings, and retrying a published
+// round's game creation. Generation runs in-request —
 // the engine on a pool of a few hundred is milliseconds and makes no
 // Lichess call — and enqueues the draft's publish-round job through
 // the server's scheduler in the same transaction, so a draft made here
@@ -174,7 +175,40 @@ type roundViewData struct {
 	// Settings are the pairing settings as they stood at generation
 	// (spec §8.5), not today's; nil for an imported round.
 	Settings *rounds.Snapshot
-	Error    string
+	// ByHand counts the pairings still waiting for their players to
+	// start the game: those Retry game creation would try again.
+	ByHand int
+	// GameCreationOn is pairing.game_creation = lichess now, which a
+	// retry needs.
+	GameCreationOn bool
+	Error          string
+}
+
+// CanRetry is when the round page offers Retry game creation (spec
+// §8.5): a round published for the league to create its games, whose
+// creation is over — given up, or done with pairings left by hand.
+// While a create-games job is queued there is nothing to retry yet.
+func (d roundViewData) CanRetry() bool {
+	switch d.Round.GameCreation {
+	case gen.GameCreationStateCreated, gen.GameCreationStateGaveUp:
+		return d.ByHand > 0
+	}
+	return false
+}
+
+// waitingByHand counts the pairings create-games would still try: the
+// ones ListPairingsToCreate returns.
+func waitingByHand(pairings []gen.ListPairingsForRoundRow) int {
+	n := 0
+	for _, p := range pairings {
+		if p.CreationMethod == gen.PairingMethodManualExternal &&
+			p.Status == gen.PairingStatusPending &&
+			p.LichessGameID == nil &&
+			!p.MatchAmbiguous {
+			n++
+		}
+	}
+	return n
 }
 
 // settingsUsed decodes a round's settings snapshot. Every round
@@ -227,16 +261,23 @@ func (s *Server) handleRoundView(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
+	cfg, err := settings.Load(ctx, s.q)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
 
 	s.render(w, "admin_round", roundViewData{
-		base:       s.adminPage(r, fmt.Sprintf("Round %d", round.Number), "rounds"),
-		Round:      round,
-		Pairings:   pairings,
-		Exclusions: groupExclusions(exclusions),
-		Byes:       byes,
-		Doubles:    doubles,
-		Settings:   settingsUsed(round),
-		Error:      roundViewError(r.URL.Query().Get("error")),
+		base:           s.adminPage(r, fmt.Sprintf("Round %d", round.Number), "rounds"),
+		Round:          round,
+		Pairings:       pairings,
+		Exclusions:     groupExclusions(exclusions),
+		Byes:           byes,
+		Doubles:        doubles,
+		Settings:       settingsUsed(round),
+		ByHand:         waitingByHand(pairings),
+		GameCreationOn: cfg.GameCreation == settings.GameCreationLichess,
+		Error:          roundViewError(r.URL.Query().Get("error")),
 	})
 }
 
@@ -262,8 +303,15 @@ func groupExclusions(rows []gen.ListExclusionsForRoundRow) []exclusionGroup {
 }
 
 func roundViewError(code string) string {
-	if code == "reason" {
+	switch code {
+	case "reason":
 		return "A reason is required to cancel a round."
+	case "creation-off":
+		return "Game creation is switched off (pairing.game_creation = manual): switch it on to retry."
+	case "already-queued":
+		return "A game-creation job for this round is already waiting or running."
+	case "not-creating":
+		return "This round was published with game creation off: its players start every game by hand."
 	}
 	return ""
 }
@@ -330,7 +378,11 @@ func (s *Server) handlePublishRound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err := s.roundsTx(ctx, func(tx pgx.Tx) error {
-		_, _, err := rounds.Publish(ctx, tx, id, time.Now(), admin.ID)
+		cfg, err := settings.Load(ctx, gen.New(tx))
+		if err != nil {
+			return err
+		}
+		_, _, err = rounds.Publish(ctx, tx, id, cfg, time.Now(), admin.ID, s.sched)
 		return err
 	})
 	if err != nil {
@@ -338,6 +390,40 @@ func (s *Server) handlePublishRound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	redirectToRound(w, r, id, "")
+}
+
+// handleRetryGameCreation is Retry game creation (spec §8.5): it queues
+// a create-games job for the round, which first looks for games its
+// players started by hand. The job runs in the background; the round
+// page shows "being created" until it ends.
+func (s *Server) handleRetryGameCreation(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	admin, _ := currentUser(r)
+	id, ok := parseRoundID(w, r)
+	if !ok {
+		return
+	}
+
+	err := s.roundsTx(ctx, func(tx pgx.Tx) error {
+		cfg, err := settings.Load(ctx, gen.New(tx))
+		if err != nil {
+			return err
+		}
+		_, err = rounds.RetryGameCreation(ctx, tx, id, cfg, admin.ID, s.sched)
+		return err
+	})
+	switch {
+	case errors.Is(err, rounds.ErrGameCreationOff):
+		redirectToRound(w, r, id, "creation-off")
+	case errors.Is(err, rounds.ErrAlreadyQueued):
+		redirectToRound(w, r, id, "already-queued")
+	case errors.Is(err, rounds.ErrNotCreatingGames):
+		redirectToRound(w, r, id, "not-creating")
+	case err != nil:
+		serverError(w, err)
+	default:
+		redirectToRound(w, r, id, "")
+	}
 }
 
 func (s *Server) handleCancelRound(w http.ResponseWriter, r *http.Request) {
