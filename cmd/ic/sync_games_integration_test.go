@@ -161,6 +161,51 @@ func TestDoSyncGames_RechecksKnownGameIDAndFinishesIt(t *testing.T) {
 	assert.Equal(t, int32(1), whiteStanding.Wins)
 }
 
+func TestDoSyncGames_FindsAnAcceptedChallengeByItsID(t *testing.T) {
+	// Spec §3.4: a challenge's id is its game's once accepted, so a
+	// challenge pairing is re-checked by id and never searched. Until
+	// the opponent accepts, Lichess has no game of that id and the
+	// pairing waits.
+	q := testQueries(t)
+	ctx := context.Background()
+
+	white := createUser(t, q, "challengesyncwhite")
+	black := createUser(t, q, "challengesyncblack")
+	challengeID := "challengesync1"
+	p := createPendingPairing(t, q, 80030, white, black, nil)
+	n, err := q.RecordChallenge(ctx, gen.RecordChallengeParams{
+		ID:               p.ID,
+		ChallengerUserID: black.ID,
+		LichessGameID:    &challengeID,
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, n)
+
+	fake := lichess.NewFake()
+	var searched []string
+	fake.UserGamesFn = func(username string, _ lichess.UserGamesOptions) []lichess.Game {
+		searched = append(searched, username)
+		return nil
+	}
+
+	stats, err := doSyncGames(ctx, q, fake, settings.Defaults())
+	require.NoError(t, err)
+	assert.Zero(t, stats.InProgressChecked, "not accepted yet: no game of that id")
+	assert.NotContains(t, searched, white.LichessUserID)
+	waiting, err := q.GetPairingByID(ctx, gen.GetPairingByIDParams{ID: p.ID, RoundID: p.RoundID})
+	require.NoError(t, err)
+	assert.Equal(t, gen.PairingStatusPending, waiting.Status)
+
+	fake.Games[challengeID] = fakeGame(challengeID, white, black, lichess.StatusStarted, "")
+	stats, err = doSyncGames(ctx, q, fake, settings.Defaults())
+	require.NoError(t, err)
+	assert.Equal(t, 1, stats.InProgressChecked)
+	accepted, err := q.GetPairingByID(ctx, gen.GetPairingByIDParams{ID: p.ID, RoundID: p.RoundID})
+	require.NoError(t, err)
+	assert.Equal(t, gen.PairingStatusInProgress, accepted.Status)
+	assert.Equal(t, gen.PairingMethodChallenge, accepted.CreationMethod)
+}
+
 func TestDoSyncGames_StoresLichessBytesAsRawPayload(t *testing.T) {
 	// Spec §7.1: raw_payload is what Lichess sent, not what we decoded.
 	// The fake emits RawGames bytes verbatim, exactly as the real stream

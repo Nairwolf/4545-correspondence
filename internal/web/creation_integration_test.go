@@ -172,6 +172,77 @@ func TestDashboard_ThisWeekForGamesTheLeagueCreates(t *testing.T) {
 	})
 }
 
+// challengedRound is a round whose games the league created, with one
+// pairing — white plays black — made a challenge from challenger.
+func challengedRound(t *testing.T, q *gen.Queries, white, black, challenger gen.User) (gen.Round, gen.Pairing) {
+	t.Helper()
+	ctx := context.Background()
+	r := thisWeekRound(t, q, 9103, gen.RoundStatePublished, `{"days_per_move": 2, "rated": true}`)
+	p := pairIn(t, q, r, white, black)
+	_, err := q.StartGameCreation(ctx, gen.StartGameCreationParams{ID: r.ID, GameCreation: gen.GameCreationStateCreating})
+	require.NoError(t, err)
+	challenge := "chal1"
+	n, err := q.RecordChallenge(ctx, gen.RecordChallengeParams{
+		ID:               p.ID,
+		ChallengerUserID: challenger.ID,
+		LichessGameID:    &challenge,
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, n)
+	r, err = q.FinishGameCreation(ctx, gen.FinishGameCreationParams{
+		ID:             r.ID,
+		Outcome:        gen.GameCreationStateCreated,
+		GamesCreatedAt: r.PublishedAt,
+	})
+	require.NoError(t, err)
+	return r, p
+}
+
+func TestDashboard_ThisWeekForAChallenge(t *testing.T) {
+	// Spec §8.3: the challenger waits for the opponent, who must accept.
+	srv, q, tx := testServer(t)
+	a := addPlayer(t, q, tx, "Alpha", true, 2000, 0, 2000, 2000, "0")
+	b := addPlayer(t, q, tx, "Bravo", true, 1900, 0, 1900, 1900, "0")
+	_, p := challengedRound(t, q, a, b, b)
+
+	body := getAs(t, srv, sessionFor(t, srv, b), "/account").Body.String()
+	assert.Contains(t, body, "We challenged them for you on Lichess; the game starts once they accept.")
+	assert.Contains(t, body, `href="https://lichess.org/chal1">see the challenge`)
+	assert.NotContains(t, body, "challenge them on Lichess")
+	assert.NotContains(t, body, "Start the game on Lichess by hand")
+
+	body = getAs(t, srv, sessionFor(t, srv, a), "/account").Body.String()
+	assert.Contains(t, body, "They've challenged you on Lichess: accept it to start the game.")
+	assert.Contains(t, body, `href="https://lichess.org/chal1">accept on Lichess`)
+	assert.NotContains(t, body, "Start the game on Lichess by hand")
+
+	// Accepted: the challenge is the game, and reads like any other.
+	chal := "chal1"
+	require.NoError(t, q.AttachGameToPairing(context.Background(), gen.AttachGameToPairingParams{
+		ID:            p.ID,
+		LichessGameID: &chal,
+		Status:        gen.PairingStatusInProgress,
+	}))
+	body = getAs(t, srv, sessionFor(t, srv, a), "/account").Body.String()
+	assert.Contains(t, body, `href="https://lichess.org/chal1">open on Lichess`)
+	assert.NotContains(t, body, "challenged you")
+}
+
+func TestAdminRounds_AChallengeNamesWhoSentIt(t *testing.T) {
+	srv, q, tx := testServer(t)
+	_, adminSession := addAdmin(t, srv, q, tx)
+	a := addPlayer(t, q, tx, "Alpha", true, 2000, 0, 2000, 2000, "0")
+	b := addPlayer(t, q, tx, "Bravo", true, 1900, 0, 1900, 1900, "0")
+	round, _ := challengedRound(t, q, a, b, b)
+
+	body := getAs(t, srv, adminSession, roundPath(round.ID)).Body.String()
+	assert.Contains(t, body, "1 challenge waiting to be accepted.")
+	assert.Contains(t, body, "challenge from Bravo")
+	assert.Contains(t, body, `href="https://lichess.org/chal1">chal1</a>`)
+	assert.NotContains(t, body, "left for the players to start by hand")
+	assert.NotContains(t, body, "Retry game creation</button>", "a challenge is not the players' to start")
+}
+
 func TestHealth_WatchesCreateGames(t *testing.T) {
 	srv, _, _ := testServer(t)
 	_, resp := healthOf(t, srv)

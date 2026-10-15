@@ -142,8 +142,14 @@ type thisWeekGame struct {
 	// Created: the league created the game on Lichess (spec §8.3).
 	Created bool
 	// Creating: the round's create-games job has not got to it yet.
-	Creating  bool
-	NotPlayed bool // the pairing was marked failed (or cancelled)
+	Creating bool
+	// Challenger: the league challenged the opponent from this player's
+	// account, and the game waits for them to accept (spec §3.3).
+	// Challenged: this player must accept the opponent's challenge.
+	// GameID is the challenge's id, which becomes the game's.
+	Challenger bool
+	Challenged bool
+	NotPlayed  bool // the pairing was marked failed (or cancelled)
 }
 
 // thisWeekFor loads the "This week" section for the latest published
@@ -185,6 +191,10 @@ func thisWeekFor(ctx context.Context, q *gen.Queries, userID pgtype.UUID) (thisW
 				g.GameID = *p.LichessGameID
 			}
 			g.Created = p.CreationMethod == gen.PairingMethodBulk
+			if p.CreationMethod == gen.PairingMethodChallenge && p.Status == gen.PairingStatusPending {
+				g.Challenger = p.ChallengerUserID == userID
+				g.Challenged = !g.Challenger
+			}
 			if g.GameID == "" && !g.NotPlayed {
 				// Still waiting for a game: being created by the league,
 				// or for the players to start it.

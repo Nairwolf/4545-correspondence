@@ -178,6 +178,8 @@ type roundViewData struct {
 	// ByHand counts the pairings still waiting for their players to
 	// start the game: those Retry game creation would try again.
 	ByHand int
+	// Challenges counts the challenges still waiting to be accepted.
+	Challenges int
 	// GameCreationOn is pairing.game_creation = lichess now, which a
 	// retry needs.
 	GameCreationOn bool
@@ -205,6 +207,18 @@ func waitingByHand(pairings []gen.ListPairingsForRoundRow) int {
 			p.Status == gen.PairingStatusPending &&
 			p.LichessGameID == nil &&
 			!p.MatchAmbiguous {
+			n++
+		}
+	}
+	return n
+}
+
+// waitingForAcceptance counts the challenges create-games sent that
+// are not yet games.
+func waitingForAcceptance(pairings []gen.ListPairingsForRoundRow) int {
+	n := 0
+	for _, p := range pairings {
+		if p.CreationMethod == gen.PairingMethodChallenge && p.Status == gen.PairingStatusPending {
 			n++
 		}
 	}
@@ -276,6 +290,7 @@ func (s *Server) handleRoundView(w http.ResponseWriter, r *http.Request) {
 		Doubles:        doubles,
 		Settings:       settingsUsed(round),
 		ByHand:         waitingByHand(pairings),
+		Challenges:     waitingForAcceptance(pairings),
 		GameCreationOn: cfg.GameCreation == settings.GameCreationLichess,
 		Error:          roundViewError(r.URL.Query().Get("error")),
 	})

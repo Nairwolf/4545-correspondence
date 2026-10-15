@@ -350,11 +350,11 @@ func TestCreateGames_TheDoubleGameGoesInTheSameBulk(t *testing.T) {
 	}
 }
 
-func TestCreateGames_LeavesByHandWhatTwoWorkingTokensCannotCreate(t *testing.T) {
-	// Spec §3.3: a pairing goes into the bulk only when both players'
-	// tokens work. A token that is not stored, already revoked, expired,
-	// or refused by the probe keeps its pairing out; the players of
-	// those pairings are told to start the game by hand.
+func TestCreateGames_PartitionsThePairingsByToken(t *testing.T) {
+	// Spec §3.3: both tokens working → the bulk; one → a challenge from
+	// that player; neither → started by hand. A token works when it is
+	// stored, not revoked, not expired and not refused by the probe. A
+	// player who never authorised the league is never challenged.
 	c := newCreation(t)
 	ctx := context.Background()
 	ok1 := c.player(t, "ok1", 2000)
@@ -369,27 +369,52 @@ func TestCreateGames_LeavesByHandWhatTwoWorkingTokensCannotCreate(t *testing.T) 
 	ok5 := c.player(t, "ok5", 1930)
 	refused := c.player(t, "refused", 1920)
 	delete(c.fake.TokenInfo, secretOf("refused")) // Lichess no longer knows it
+	gone1 := c.player(t, "gone1", 1910)
+	exec(t, c.tx, `UPDATE oauth_tokens SET revoked_at = now() WHERE user_id = $1`, gone1.ID)
+	gone2 := c.player(t, "gone2", 1900)
+	delete(c.fake.TokenInfo, secretOf("gone2"))
 
 	round, pairings := c.creatingRound(t, twoDaysRated,
-		[2]gen.User{ok1, ok2},
-		[2]gen.User{noToken, ok3},
-		[2]gen.User{ok4, revoked},
-		[2]gen.User{expired, ok5},
-		[2]gen.User{refused, ok1},
+		[2]gen.User{ok1, ok2},     // bulk
+		[2]gen.User{noToken, ok3}, // by hand: notoken never authorised
+		[2]gen.User{ok4, revoked}, // ok4 challenges, with white
+		[2]gen.User{expired, ok5}, // ok5 challenges, with black
+		[2]gen.User{refused, ok1}, // ok1 challenges, with black
+		[2]gen.User{gone1, gone2}, // by hand: neither works
 	)
 	report := c.run(t, round, false)
 
 	require.Len(t, c.fake.BulkRequests, 1)
 	assert.Equal(t, []lichess.BulkPair{{White: secretOf("ok1"), Black: secretOf("ok2")}}, c.fake.BulkRequests[0].Pairs)
 	assert.Equal(t, gen.PairingStatusCreated, c.pairing(t, pairings[0]).Status)
-	for _, p := range pairings[1:] {
+
+	challengers := map[int]gen.User{2: ok4, 3: ok5, 4: ok1}
+	require.Len(t, c.fake.Challenges, 3)
+	for i, ch := range c.fake.Challenges {
+		p := c.pairing(t, pairings[i+2])
+		challenger := challengers[i+2]
+		assert.Equal(t, gen.PairingMethodChallenge, p.CreationMethod)
+		assert.Equal(t, gen.PairingStatusPending, p.Status, "until the opponent accepts")
+		require.NotNil(t, p.LichessGameID)
+		assert.Equal(t, ch.ID, *p.LichessGameID)
+		assert.Equal(t, challenger.ID, p.ChallengerUserID)
+	}
+	var sent []string
+	for _, ch := range c.fake.Challenges {
+		sent = append(sent, ch.Challenger.ID+" to "+ch.DestUser.ID+" with "+ch.Color)
+	}
+	assert.Equal(t, []string{"ok4 to revoked with white", "ok5 to expired with black", "ok1 to refused with black"}, sent)
+	for _, p := range []gen.Pairing{pairings[1], pairings[5]} {
 		got := c.pairing(t, p)
 		assert.Equal(t, gen.PairingMethodManualExternal, got.CreationMethod)
 		assert.Equal(t, gen.PairingStatusPending, got.Status)
 		assert.Nil(t, got.LichessGameID)
+		assert.False(t, got.ChallengerUserID.Valid)
 	}
-	assert.Equal(t, 4, report.ByHand)
-	assert.Equal(t, []string{"refused"}, report.Lapsed)
+	assert.Equal(t, 1, report.Created)
+	assert.Equal(t, 3, report.Challenges)
+	assert.Equal(t, 2, report.ByHand)
+	assert.ElementsMatch(t, []string{"refused", "gone2"}, report.Lapsed)
 	assert.Equal(t, gen.GameCreationStateCreated, c.round(t, round).GameCreation)
 
 	// The token the probe found refused is marked revoked, and its
@@ -401,8 +426,12 @@ func TestCreateGames_LeavesByHandWhatTwoWorkingTokensCannotCreate(t *testing.T) 
 	assert.Equal(t, 1, n)
 
 	// Both players of a pairing left by hand are told to start it.
-	for _, user := range []gen.User{noToken, ok3} {
-		notice, n := noticeKeyed(t, c.tx, user, pairedKey(round, pairings[1]))
+	for _, user := range []gen.User{noToken, ok3, gone1, gone2} {
+		p := pairings[1]
+		if user.ID == gone1.ID || user.ID == gone2.ID {
+			p = pairings[5]
+		}
+		notice, n := noticeKeyed(t, c.tx, user, pairedKey(round, p))
 		require.Equal(t, 1, n, user.LichessUsername)
 		assert.Contains(t, notice.Body, "The league couldn't create this game on Lichess, so please start it by hand")
 		assert.Equal(t, notify.Round, notify.Category(notice.Category))
@@ -412,6 +441,8 @@ func TestCreateGames_LeavesByHandWhatTwoWorkingTokensCannotCreate(t *testing.T) 
 func TestCreateGames_ARefusedTokenIsRevokedAndTheRestResubmitted(t *testing.T) {
 	// Spec §6.3 step 5: a token that passed the probe and is refused by
 	// the bulk moments later costs one more submission, not the round.
+	// Its pairing moves to the challenge partition: the other player's
+	// token still works.
 	c := newCreation(t)
 	alpha := c.player(t, "alpha", 2000)
 	bravo := c.player(t, "bravo", 1900)
@@ -427,11 +458,157 @@ func TestCreateGames_ARefusedTokenIsRevokedAndTheRestResubmitted(t *testing.T) {
 	require.Len(t, c.fake.BulkRequests, 1, "only the second submission was accepted")
 	assert.Equal(t, []lichess.BulkPair{{White: secretOf("alpha"), Black: secretOf("bravo")}}, c.fake.BulkRequests[0].Pairs)
 	assert.Equal(t, gen.PairingStatusCreated, c.pairing(t, pairings[0]).Status)
-	assert.Equal(t, gen.PairingStatusPending, c.pairing(t, pairings[1]).Status)
+	challenged := c.pairing(t, pairings[1])
+	assert.Equal(t, gen.PairingMethodChallenge, challenged.CreationMethod)
+	assert.Equal(t, charlie.ID, challenged.ChallengerUserID)
+	assert.Equal(t, gen.PairingStatusPending, challenged.Status)
+	assert.Equal(t, 1, report.Challenges)
 
 	tok, err := c.q.GetOAuthToken(context.Background(), delta.ID)
 	require.NoError(t, err)
 	assert.True(t, tok.RevokedAt.Valid)
+}
+
+func TestCreateGames_AChallengeHasTheRoundsTimeControlAndTellsBothPlayers(t *testing.T) {
+	// Spec §6.3 step 6: one call with the challenger's token, in their
+	// colour, with the round's days and rated — the settings it was
+	// paired under, not today's. The pairing keeps the challenge's id as
+	// its game id and stays pending until the opponent accepts. Both
+	// players are told, the opponent in the challenge category.
+	c := newCreation(t)
+	alpha := c.player(t, "alpha", 2000)
+	bravo := c.player(t, "bravo", 1900)
+	exec(t, c.tx, `UPDATE oauth_tokens SET revoked_at = now() WHERE user_id = $1`, alpha.ID)
+	round, pairings := c.creatingRound(t, rounds.Snapshot{DaysPerMove: 3, Rated: false}, [2]gen.User{alpha, bravo})
+
+	report := c.run(t, round, false)
+
+	assert.Equal(t, []string{"ListBulkPairings", "TestTokens", "CreateChallenge"}, c.calls())
+	assert.Equal(t, secretOf("bravo"), c.fake.Calls[2].Token, "sent from bravo's account")
+	require.Len(t, c.fake.Challenges, 1)
+	ch := c.fake.Challenges[0]
+	assert.Equal(t, "alpha", ch.DestUser.Name)
+	assert.Equal(t, "black", ch.Color)
+	assert.Equal(t, 3, ch.TimeControl.DaysPerTurn)
+	assert.False(t, ch.Rated)
+
+	p := c.pairing(t, pairings[0])
+	assert.Equal(t, gen.PairingMethodChallenge, p.CreationMethod)
+	assert.Equal(t, gen.PairingStatusPending, p.Status)
+	require.NotNil(t, p.LichessGameID)
+	assert.Equal(t, ch.ID, *p.LichessGameID)
+	assert.Equal(t, bravo.ID, p.ChallengerUserID)
+
+	assert.Equal(t, 1, report.Challenges)
+	assert.Zero(t, report.Created)
+	assert.Zero(t, report.ByHand)
+	assert.Equal(t, gen.GameCreationStateCreated, c.round(t, round).GameCreation)
+	assert.Zero(t, c.sched.syncs, "nothing to ingest until the challenge is accepted")
+
+	notice, n := noticeKeyed(t, c.tx, bravo, pairedKey(round, pairings[0]))
+	require.Equal(t, 1, n)
+	assert.Equal(t, notify.Round, notify.Category(notice.Category))
+	assert.Equal(t, "Round "+itoa(round.Number)+": you play alpha with black", notice.Title)
+	assert.Contains(t, notice.Body,
+		"it has challenged alpha from your Lichess account instead: a casual correspondence game at 3 days per move, you with black")
+	require.NotNil(t, notice.LinkUrl)
+	assert.Equal(t, "https://lichess.org/"+ch.ID, *notice.LinkUrl)
+
+	notice, n = noticeKeyed(t, c.tx, alpha, pairedKey(round, pairings[0]))
+	require.Equal(t, 1, n)
+	assert.Equal(t, notify.Challenge, notify.Category(notice.Category))
+	assert.Equal(t, "Round "+itoa(round.Number)+": accept bravo's challenge", notice.Title)
+	assert.Contains(t, notice.Body,
+		"a challenge from their account instead: a casual correspondence game at 3 days per move, you with white. Accept it on Lichess")
+	require.NotNil(t, notice.LinkUrl)
+	assert.Equal(t, "https://lichess.org/"+ch.ID, *notice.LinkUrl)
+}
+
+func TestCreateGames_ARefusedChallengeIsLeftByHandAndTheOthersAreSent(t *testing.T) {
+	// Spec §6.3 step 6: a challenge Lichess refuses — the opponent takes
+	// no challenges, say — leaves that pairing to its players, and the
+	// run goes on.
+	c := newCreation(t)
+	alpha := c.player(t, "alpha", 2000)
+	bravo := c.player(t, "bravo", 1900)
+	charlie := c.player(t, "charlie", 1800)
+	delta := c.player(t, "delta", 1700)
+	exec(t, c.tx, `UPDATE oauth_tokens SET revoked_at = now() WHERE user_id IN ($1, $2)`, bravo.ID, delta.ID)
+	c.fake.ChallengeErrFor["bravo"] = &lichess.APIError{StatusCode: 400, Message: "bravo does not accept challenges"}
+	round, pairings := c.creatingRound(t, twoDaysRated, [2]gen.User{alpha, bravo}, [2]gen.User{charlie, delta})
+
+	report := c.run(t, round, false)
+
+	byHand := c.pairing(t, pairings[0])
+	assert.Equal(t, gen.PairingMethodManualExternal, byHand.CreationMethod)
+	assert.Nil(t, byHand.LichessGameID)
+	assert.Equal(t, gen.PairingMethodChallenge, c.pairing(t, pairings[1]).CreationMethod)
+	assert.Equal(t, 1, report.Challenges)
+	assert.Equal(t, 1, report.ByHand)
+	assert.Equal(t, []string{"alpha to bravo: lichess: 400: bravo does not accept challenges"}, report.Unchallenged)
+	assert.Equal(t, gen.GameCreationStateCreated, c.round(t, round).GameCreation)
+
+	for _, user := range []gen.User{alpha, bravo} {
+		notice, n := noticeKeyed(t, c.tx, user, pairedKey(round, pairings[0]))
+		require.Equal(t, 1, n, user.LichessUsername)
+		assert.Contains(t, notice.Body, "please start it by hand")
+	}
+}
+
+func TestCreateGames_RunningAgainSendsNoSecondChallenge(t *testing.T) {
+	c := newCreation(t)
+	alpha := c.player(t, "alpha", 2000)
+	bravo := c.player(t, "bravo", 1900)
+	exec(t, c.tx, `UPDATE oauth_tokens SET revoked_at = now() WHERE user_id = $1`, bravo.ID)
+	round, _ := c.creatingRound(t, twoDaysRated, [2]gen.User{alpha, bravo})
+
+	c.run(t, round, false)
+	exec(t, c.tx, `UPDATE rounds SET game_creation = 'creating' WHERE id = $1`, round.ID)
+	report := c.run(t, round, false)
+
+	assert.Len(t, c.fake.Challenges, 1)
+	assert.Zero(t, report.Pending, "a challenged pairing is not waiting for a game any more")
+	assert.Zero(t, report.Challenges)
+}
+
+// cancellingAtChallenge stands for the run's context being cancelled —
+// river's timeout, or a shutdown — while a challenge call is under way.
+type cancellingAtChallenge struct {
+	*lichess.Fake
+	cancel context.CancelFunc
+}
+
+func (c cancellingAtChallenge) CreateChallenge(
+	ctx context.Context,
+	challenger tokencrypt.Secret,
+	opponent string,
+	req lichess.ChallengeRequest,
+) (lichess.Challenge, error) {
+	c.cancel()
+	return lichess.Challenge{}, ctx.Err()
+}
+
+func TestCreateGames_ACancelledRunStopsAtTheChallenges(t *testing.T) {
+	// A challenge that failed because the run was cancelled was not
+	// refused: the run fails, river retries it, and nobody is told to
+	// start the game by hand meanwhile.
+	c := newCreation(t)
+	alpha := c.player(t, "alpha", 2000)
+	bravo := c.player(t, "bravo", 1900)
+	exec(t, c.tx, `UPDATE oauth_tokens SET revoked_at = now() WHERE user_id = $1`, bravo.ID)
+	round, pairings := c.creatingRound(t, twoDaysRated, [2]gen.User{alpha, bravo})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	api := cancellingAtChallenge{Fake: c.fake, cancel: cancel}
+
+	report, err := c.creator(api).CreateGames(ctx, c.tx, round.ID, c.cfg, false, time.Now())
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, report.Unchallenged)
+	assert.Equal(t, gen.GameCreationStateCreating, c.round(t, round).GameCreation)
+	p := c.pairing(t, pairings[0])
+	assert.Equal(t, gen.PairingMethodManualExternal, p.CreationMethod)
+	assert.Nil(t, p.LichessGameID)
+	assert.Empty(t, noticesOf(t, c.tx, alpha))
 }
 
 // refusingOneTokenAtATime refuses, at each bulk, the first token of it
@@ -597,7 +774,7 @@ func TestCreateGames_NeverAdoptsAnotherRoundsGames(t *testing.T) {
 }
 
 // markingFailedMidCall stands for an admin marking a pairing failed
-// while the bulk call is under way.
+// while the bulk call, or a challenge call, is under way.
 type markingFailedMidCall struct {
 	*lichess.Fake
 	t       *testing.T
@@ -613,6 +790,17 @@ func (m markingFailedMidCall) CreateBulkPairing(
 	_, err := rounds.MarkFailed(ctx, m.tx, m.pairing.RoundID, m.pairing.ID, pgtype.UUID{})
 	require.NoError(m.t, err)
 	return m.Fake.CreateBulkPairing(ctx, organiser, req)
+}
+
+func (m markingFailedMidCall) CreateChallenge(
+	ctx context.Context,
+	challenger tokencrypt.Secret,
+	opponent string,
+	req lichess.ChallengeRequest,
+) (lichess.Challenge, error) {
+	_, err := rounds.MarkFailed(ctx, m.tx, m.pairing.RoundID, m.pairing.ID, pgtype.UUID{})
+	require.NoError(m.t, err)
+	return m.Fake.CreateChallenge(ctx, challenger, opponent, req)
 }
 
 func TestCreateGames_AnAdminsMarkFailedMeanwhileWins(t *testing.T) {
@@ -634,6 +822,27 @@ func TestCreateGames_AnAdminsMarkFailedMeanwhileWins(t *testing.T) {
 	assert.Equal(t, []string{c.fake.Bulks[0].Games[1].ID}, report.Unrecorded)
 	assert.Equal(t, 1, report.Created)
 	assert.Empty(t, noticesOf(t, c.tx, delta))
+}
+
+func TestCreateGames_AnAdminsMarkFailedDuringAChallengeWins(t *testing.T) {
+	c := newCreation(t)
+	alpha := c.player(t, "alpha", 2000)
+	bravo := c.player(t, "bravo", 1900)
+	exec(t, c.tx, `UPDATE oauth_tokens SET revoked_at = now() WHERE user_id = $1`, bravo.ID)
+	round, pairings := c.creatingRound(t, twoDaysRated, [2]gen.User{alpha, bravo})
+	api := markingFailedMidCall{Fake: c.fake, t: t, tx: c.tx, pairing: pairings[0]}
+
+	report, err := c.creator(api).CreateGames(context.Background(), c.tx, round.ID, c.cfg, false, time.Now())
+	require.NoError(t, err)
+
+	failed := c.pairing(t, pairings[0])
+	assert.Equal(t, gen.PairingStatusFailed, failed.Status)
+	assert.Equal(t, gen.PairingMethodManualExternal, failed.CreationMethod)
+	assert.Nil(t, failed.LichessGameID)
+	assert.Equal(t, []string{c.fake.Challenges[0].ID}, report.Unrecorded)
+	assert.Zero(t, report.Challenges)
+	assert.Empty(t, noticesOf(t, c.tx, alpha))
+	assert.Empty(t, noticesOf(t, c.tx, bravo))
 }
 
 func TestCreateGames_SwitchedOffGivesTheGamesUpToThePlayers(t *testing.T) {
@@ -715,6 +924,38 @@ func TestRetryGameCreation(t *testing.T) {
 		assert.Contains(t, notice.Body, "Don't start another one")
 		_, n = noticeKeyed(t, c.tx, alpha, pairedKey(round, pairings[0]))
 		assert.Equal(t, 1, n, "the by-hand notice is not repeated")
+	})
+
+	t.Run("a retry's challenge tells both players under its own key", func(t *testing.T) {
+		c := newCreation(t)
+		alpha := c.player(t, "alpha", 2000)
+		bravo := c.player(t, "bravo", 1900)
+		exec(t, c.tx, `UPDATE oauth_tokens SET revoked_at = now() WHERE user_id = $1`, alpha.ID)
+		round, pairings := c.creatingRound(t, twoDaysRated, [2]gen.User{alpha, bravo})
+		_, err := rounds.GiveUp(ctx, c.tx, round.ID)
+		require.NoError(t, err)
+		_, err = rounds.RetryGameCreation(ctx, c.tx, round.ID, c.cfg, pgtype.UUID{}, c.sched)
+		require.NoError(t, err)
+
+		c.run(t, round, true)
+		assert.Equal(t, gen.PairingMethodChallenge, c.pairing(t, pairings[0]).CreationMethod)
+		created := "round:" + itoa(round.Number) + ":created:" + pairings[0].ID.String()
+
+		notice, n := noticeKeyed(t, c.tx, bravo, created)
+		require.Equal(t, 1, n)
+		assert.Equal(t, "Round "+itoa(round.Number)+": the league has now challenged alpha for you", notice.Title)
+		assert.Contains(t, notice.Body, "Don't start another one by hand")
+
+		notice, n = noticeKeyed(t, c.tx, alpha, created)
+		require.Equal(t, 1, n)
+		assert.Equal(t, notify.Challenge, notify.Category(notice.Category))
+		assert.Contains(t, notice.Body, "The league has now sent you a challenge from bravo's account")
+		assert.Contains(t, notice.Body, "don't start another one by hand")
+
+		for _, user := range []gen.User{alpha, bravo} {
+			_, n = noticeKeyed(t, c.tx, user, pairedKey(round, pairings[0]))
+			assert.Equal(t, 1, n, "the by-hand notice is not repeated")
+		}
 	})
 
 	t.Run("refused while game creation is off", func(t *testing.T) {

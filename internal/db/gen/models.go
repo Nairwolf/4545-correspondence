@@ -683,20 +683,21 @@ type OauthToken struct {
 }
 
 type Pairing struct {
-	ID             pgtype.UUID        `json:"id"`
-	RoundID        int32              `json:"round_id"`
-	WhiteUserID    pgtype.UUID        `json:"white_user_id"`
-	BlackUserID    pgtype.UUID        `json:"black_user_id"`
-	CreationMethod PairingMethod      `json:"creation_method"`
-	LichessGameID  *string            `json:"lichess_game_id"`
-	Status         PairingStatus      `json:"status"`
-	MatchAmbiguous bool               `json:"match_ambiguous"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	EditedBy       pgtype.UUID        `json:"edited_by"`
-	Position       *int32             `json:"position"`
-	RatingGap      *int32             `json:"rating_gap"`
-	ColorPenalty   *int32             `json:"color_penalty"`
-	RepeatOfRound  *int32             `json:"repeat_of_round"`
+	ID               pgtype.UUID        `json:"id"`
+	RoundID          int32              `json:"round_id"`
+	WhiteUserID      pgtype.UUID        `json:"white_user_id"`
+	BlackUserID      pgtype.UUID        `json:"black_user_id"`
+	CreationMethod   PairingMethod      `json:"creation_method"`
+	LichessGameID    *string            `json:"lichess_game_id"`
+	Status           PairingStatus      `json:"status"`
+	MatchAmbiguous   bool               `json:"match_ambiguous"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	EditedBy         pgtype.UUID        `json:"edited_by"`
+	Position         *int32             `json:"position"`
+	RatingGap        *int32             `json:"rating_gap"`
+	ColorPenalty     *int32             `json:"color_penalty"`
+	RepeatOfRound    *int32             `json:"repeat_of_round"`
+	ChallengerUserID pgtype.UUID        `json:"challenger_user_id"`
 }
 
 type PlayerProfile struct {

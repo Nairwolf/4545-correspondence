@@ -188,6 +188,30 @@ func (q *Queries) ListRoundPlayerTokens(ctx context.Context, roundID int32) ([]O
 	return items, nil
 }
 
+const recordChallenge = `-- name: RecordChallenge :execrows
+UPDATE pairings
+SET creation_method = 'challenge', challenger_user_id = $2, lichess_game_id = $3
+WHERE id = $1 AND status = 'pending' AND lichess_game_id IS NULL
+`
+
+type RecordChallengeParams struct {
+	ID               pgtype.UUID `json:"id"`
+	ChallengerUserID pgtype.UUID `json:"challenger_user_id"`
+	LichessGameID    *string     `json:"lichess_game_id"`
+}
+
+// A challenge sent for a pairing (spec §6.3 step 6). Its id is the
+// game's once the opponent accepts (§3.4), so it is stored as the game
+// id, and the pairing stays pending until sync-games finds the game by
+// that id. Guarded like RecordCreatedGame.
+func (q *Queries) RecordChallenge(ctx context.Context, arg RecordChallengeParams) (int64, error) {
+	result, err := q.db.Exec(ctx, recordChallenge, arg.ID, arg.ChallengerUserID, arg.LichessGameID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const recordCreatedGame = `-- name: RecordCreatedGame :execrows
 UPDATE pairings
 SET creation_method = $2, status = $3, lichess_game_id = $4

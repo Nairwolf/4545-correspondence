@@ -93,7 +93,7 @@ func runCreateGames(
 	if finishErr := q.FinishJobRun(context.WithoutCancel(ctx), gen.FinishJobRunParams{
 		ID:             jobRun.ID,
 		Status:         status,
-		ItemsProcessed: int32(result.Created + result.Adopted),
+		ItemsProcessed: int32(result.Created + result.Adopted + result.Challenges),
 		Error:          errMsg,
 		Detail:         detail,
 	}); finishErr != nil {
@@ -108,6 +108,7 @@ func runCreateGames(
 		"state", result.State,
 		"created", result.Created,
 		"adopted", result.Adopted,
+		"challenges", result.Challenges,
 		"by_hand", result.ByHand,
 	)
 	return nil

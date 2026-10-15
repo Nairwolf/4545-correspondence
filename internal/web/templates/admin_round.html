@@ -19,6 +19,7 @@
     The games are being created on Lichess — see create-games on the <a class="underline" href="/admin/jobs">jobs page</a>.
     {{else if eq $creation "created"}}
     Games created on Lichess {{datetime .Round.GamesCreatedAt}}{{with .Round.BulkPairingID}}, bulk {{.}}{{end}}.
+    {{if .Challenges}}{{plural .Challenges "challenge"}} waiting to be accepted.{{end}}
     {{if .ByHand}}{{plural .ByHand "pairing"}} left for the players to start by hand.{{end}}
     {{else if eq $creation "gave_up"}}
     Game creation gave up — Lichess kept refusing, or game creation was switched off; see the <a class="underline" href="/admin/jobs">jobs page</a>. The players were told to start their games by hand.
@@ -101,7 +102,10 @@
       <td class="py-1.5 pr-3 text-right tabular-nums text-zinc-400">{{int32OrDash .ColorPenalty}}</td>
       <td class="py-1.5 pr-3 text-zinc-500">{{if .RepeatOfRound}}#{{int32OrDash .RepeatOfRound}}{{else}}—{{end}}</td>
       <td class="py-1.5 pr-3 text-zinc-400">
-        {{if eq (printf "%s" .CreationMethod) "manual_external"}}by hand{{else}}{{.CreationMethod}}{{end}}
+        {{$method := printf "%s" .CreationMethod}}
+        {{if eq $method "manual_external"}}by hand
+        {{- else if eq $method "challenge"}}challenge from {{if eq .ChallengerUserID .WhiteUserID}}{{.WhiteUsername}}{{else}}{{.BlackUsername}}{{end}}
+        {{- else}}{{.CreationMethod}}{{end}}
         {{with .LichessGameID}}· <a class="underline hover:text-zinc-200" href="{{gameURL .}}">{{.}}</a>{{end}}
       </td>
       <td class="py-1.5 pr-3">

@@ -284,7 +284,7 @@ const markPublishedPairingFailed = `-- name: MarkPublishedPairingFailed :one
 UPDATE pairings SET status = 'failed'
 WHERE pairings.id = $1 AND pairings.status = 'pending' AND pairings.round_id = $2
   AND EXISTS (SELECT 1 FROM rounds r WHERE r.id = $2 AND r.state = 'published')
-RETURNING id, round_id, white_user_id, black_user_id, creation_method, lichess_game_id, status, match_ambiguous, created_at, edited_by, position, rating_gap, color_penalty, repeat_of_round
+RETURNING id, round_id, white_user_id, black_user_id, creation_method, lichess_game_id, status, match_ambiguous, created_at, edited_by, position, rating_gap, color_penalty, repeat_of_round, challenger_user_id
 `
 
 type MarkPublishedPairingFailedParams struct {
@@ -314,6 +314,7 @@ func (q *Queries) MarkPublishedPairingFailed(ctx context.Context, arg MarkPublis
 		&i.RatingGap,
 		&i.ColorPenalty,
 		&i.RepeatOfRound,
+		&i.ChallengerUserID,
 	)
 	return i, err
 }
@@ -323,7 +324,7 @@ INSERT INTO pairings (round_id, white_user_id, black_user_id, creation_method, l
 VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (round_id, white_user_id, black_user_id) DO UPDATE SET
   lichess_game_id = COALESCE(pairings.lichess_game_id, EXCLUDED.lichess_game_id)
-RETURNING id, round_id, white_user_id, black_user_id, creation_method, lichess_game_id, status, match_ambiguous, created_at, edited_by, position, rating_gap, color_penalty, repeat_of_round
+RETURNING id, round_id, white_user_id, black_user_id, creation_method, lichess_game_id, status, match_ambiguous, created_at, edited_by, position, rating_gap, color_penalty, repeat_of_round, challenger_user_id
 `
 
 type UpsertManualPairingParams struct {
@@ -364,6 +365,7 @@ func (q *Queries) UpsertManualPairing(ctx context.Context, arg UpsertManualPairi
 		&i.RatingGap,
 		&i.ColorPenalty,
 		&i.RepeatOfRound,
+		&i.ChallengerUserID,
 	)
 	return i, err
 }

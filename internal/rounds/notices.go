@@ -152,7 +152,8 @@ const (
 	// pairing.game_creation = manual, as every round before Phase 5.
 	startedByHand byHandReason = iota
 	// notCreated: the league tried and could not create it — no working
-	// token on either side, or Lichess kept refusing.
+	// token on either side, a challenge Lichess refused, or Lichess kept
+	// refusing the bulk.
 	notCreated
 )
 
@@ -212,9 +213,74 @@ func createdNotice(
 			timeControl(snap),
 			s.colour,
 		)
-		n.Key = fmt.Sprintf("round:%d:created:%s", round.Number, pairingID.String())
+		n.Key = createdKey(round, pairingID)
 	}
 	return n
+}
+
+// challengeNotices tells both players of a pairing created by a
+// challenge (spec §3.3, §10): the challenger that the league challenged
+// their opponent from their account, and the opponent that they must
+// accept it, the one notice of the challenge category. Both link to the
+// challenge on Lichess, which becomes the game once accepted. They are
+// keyed like createdNotice: under the pairing's paired event, or under
+// its own key after an admin's retry, whose players were told to start
+// the game by hand. from and to are the challenger's and the opponent's
+// sides; a side names its opponent.
+func challengeNotices(
+	round gen.Round,
+	snap Snapshot,
+	pairingID pgtype.UUID,
+	challengeID string,
+	from, to side,
+	retry bool,
+) [2]notify.Notice {
+	challenger := notify.Notice{
+		User:     from.user,
+		Category: notify.Round,
+		Title:    fmt.Sprintf("Round %d: you play %s with %s", round.Number, from.opponent, from.colour),
+		Body: fmt.Sprintf(
+			"The league couldn't create this game directly, so it has challenged %s from your Lichess account instead: %s, you with %s. "+
+				"The game starts once they accept. There's nothing for you to do, but please don't cancel the challenge.",
+			from.opponent,
+			timeControl(snap),
+			from.colour,
+		),
+		Link: lichessGameURL + challengeID,
+		Key:  pairedKey(round, pairingID),
+	}
+	opponent := notify.Notice{
+		User:     to.user,
+		Category: notify.Challenge,
+		Title:    fmt.Sprintf("Round %d: accept %s's challenge", round.Number, to.opponent),
+		Body: fmt.Sprintf(
+			"The league couldn't create your game against %s directly, so it has sent you a challenge from their account instead: %s, you with %s. "+
+				"Accept it on Lichess to start the game. Re-authorise from your account page and the league can create your next games directly.",
+			to.opponent,
+			timeControl(snap),
+			to.colour,
+		),
+		Link: lichessGameURL + challengeID,
+		Key:  pairedKey(round, pairingID),
+	}
+	if retry {
+		challenger.Title = fmt.Sprintf("Round %d: the league has now challenged %s for you", round.Number, from.opponent)
+		challenger.Body = fmt.Sprintf(
+			"It has challenged %s from your Lichess account: %s, you with %s. The game starts once they accept. Don't start another one by hand.",
+			from.opponent,
+			timeControl(snap),
+			from.colour,
+		)
+		challenger.Key = createdKey(round, pairingID)
+		opponent.Body = fmt.Sprintf(
+			"The league has now sent you a challenge from %s's account: %s, you with %s. Accept it on Lichess to start the game, and don't start another one by hand.",
+			to.opponent,
+			timeControl(snap),
+			to.colour,
+		)
+		opponent.Key = createdKey(round, pairingID)
+	}
+	return [2]notify.Notice{challenger, opponent}
 }
 
 // lichessGameURL prefixes a game id to link to the game.
@@ -222,6 +288,10 @@ const lichessGameURL = "https://lichess.org/"
 
 func pairedKey(round gen.Round, pairingID pgtype.UUID) string {
 	return fmt.Sprintf("round:%d:paired:%s", round.Number, pairingID.String())
+}
+
+func createdKey(round gen.Round, pairingID pgtype.UUID) string {
+	return fmt.Sprintf("round:%d:created:%s", round.Number, pairingID.String())
 }
 
 // timeControl names the game to start, from the settings the round was

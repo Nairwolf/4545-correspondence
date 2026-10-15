@@ -283,14 +283,19 @@ own, so each commit stands alone.
   (enum `manual` | `creating` | `created` | `gave_up`, NOT NULL DEFAULT
   `manual`; existing rounds are `manual`), set at publication and by
   `create-games`; `rounds.games_created_at timestamptz`.
-- **Step 7** `00014_missed_starts.sql`: `missed_starts` (§4.1, plus
-  `pairing_id` and `UNIQUE (round_id, user_id)`),
-  `player_profiles.resumed_at timestamptz` (resets the streak).
+- **Step 6** `00014_challenger.sql` *(added at step 6)*:
+  `pairings.challenger_user_id`, who sent a challenge (see "What was
+  built").
+- **Step 7** `00015_missed_starts.sql` *(was 00014 before step 6)*:
+  `missed_starts` (§4.1, plus `pairing_id` and `UNIQUE (round_id,
+  user_id)`), `player_profiles.resumed_at timestamptz` (resets the
+  streak).
 
 No column for challenge ids (the challenge id *is* the game id, stored
 in `pairings.lichess_game_id`). `rounds.bulk_pairing_id` already
 exists. The §11 deletion checklist gains `notifications`,
-`notification_preferences`, `missed_starts`.
+`notification_preferences`, `missed_starts` and
+`pairings.challenger_user_id`.
 
 ## Settings (added to `internal/settings`, validated at load)
 
@@ -1059,7 +1064,7 @@ with one working token stay hand-started until step 6.
   - Reconciliation allows five minutes of difference between our clock
     and Lichess's. `rounds.bulk_pairing_id` keeps the first bulk; a
     retry's bulk is named in its run.
-- **For you to confirm: the bulk's message** is "Infinite
+- **The bulk's message** (accepted at review) is "Infinite
   Correspondence, round 201: your game with {opponent} is ready:
   {game}". Step 0 left the league's name to this step. It comes from
   the site's own name, already on every page (`layout.html`): a
@@ -1137,6 +1142,121 @@ Automated verification: `go build`, `go vet` (both tags), gofmt,
 `make test` green; every integration test green on `ic_test`, three
 runs in a row with the test cache off, none skipped (503 tests and
 subtests, from 465). Not checked in a browser.
+
+### Step 6 — challenge fallback (2026-10-15)
+
+Built as planned: a pairing with exactly one working token becomes a
+Lichess challenge from that player, in their assigned colour, with the
+round's days and rated; the pairing stores the challenge id as its game
+id and stays `pending` until the opponent accepts and sync-games finds
+the game by that id. "This week" for both sides, and the round page
+names who sent each challenge.
+
+- **Where it lives.** `GameCreator.challenge` in
+  `internal/rounds/create.go`, after the bulk and before `finish`. The
+  probe now also says which players have a stored token at all
+  (`playerTokens`). Each challenge is recorded in its own transaction
+  right after its call (`RecordChallenge`, guarded like the bulk's
+  record), with both players' notices, even if the run's context was
+  cancelled meanwhile.
+- **Deviation: a new column, `pairings.challenger_user_id`** (migration
+  `00014_challenger.sql`; step 7's becomes `00015`). The plan's schema
+  had nothing for challenges, since the challenge id is the game id.
+  But nothing records *who* sent the challenge, and step 7 needs it
+  twice:
+  the missed start goes to the player who had to accept, and
+  `cancel-challenge` withdraws it with the sender's token. Re-deriving
+  it from today's tokens would be wrong once either player
+  re-authorises. Two checks keep it honest: set exactly when
+  `creation_method = 'challenge'`, and always one of the pairing's two
+  players. Spec §4.1 and §11's checklist amended.
+- **Decided while building** (spec §3.3, §6.3 amended, §15 entry):
+  - **A challenge goes only to an opponent who has authorised the
+    league at least once** (a stored token, however lapsed). One who
+    never has is left to start the game by hand. Under `lichess` the
+    pool already leaves such a member out (decision 6), but a draft
+    generated under `manual` and published after the switch is turned
+    on can still hold one. Spec §3.3 promises the site never sends a
+    seeded member a surprise challenge, and this keeps the promise in
+    that gap.
+  - **The challenges follow the bulk.** A pairing whose token the bulk
+    refused becomes a challenge in the same run. A bulk that fails the
+    run stops it before any challenge; the retry sends them.
+  - **A cancelled run is not a refused challenge.** If the call failed
+    because the run's context was cancelled (river's timeout, a
+    shutdown), the run fails and river retries it; nobody is told to
+    start that game by hand. Any other failure leaves the pairing by
+    hand, as §6.3 says, with the reason in the run's detail
+    (`unchallenged`: "alice to bob: lichess: 400: …").
+  - **The notices.** Both are under the pairing's `paired` key (or its
+    `created` key on an admin's retry, saying not to start another),
+    and both link to the challenge on Lichess:
+    - the challenger (`round`): "The league couldn't create this game
+      directly, so it has challenged bob from your Lichess account
+      instead: … The game starts once they accept. There's nothing for
+      you to do, but please don't cancel the challenge."
+    - the opponent (`challenge`): "Round 201: accept alice's challenge"
+      — "… so it has sent you a challenge from their account instead:
+      … Accept it on Lichess to start the game. Re-authorise from your
+      account page and the league can create your next games
+      directly."
+    The challenger is not told that the opponent's authorisation
+    lapsed.
+  - **No sync-games run is queued for challenges alone.** There is
+    nothing to ingest until the opponent accepts; the hourly run finds
+    the game then.
+- **UI.**
+  - "This week": the challenger reads "We challenged them for you on
+    Lichess; the game starts once they accept." with a *see the
+    challenge* link; the opponent "They've challenged you on Lichess:
+    accept it to start the game." with an *accept on Lichess* link, in
+    amber. Once accepted, both read like any other game.
+  - Round page: the game column says "challenge from alice", and the
+    game-creation line counts the challenges waiting to be accepted.
+    *Retry game creation* ignores them: they are not the players' to
+    start.
+- **For step 7:**
+  - An admin's *Mark failed* on a challenge pairing leaves the
+    challenge open on Lichess, as it is today; a late acceptance then
+    creates a game no pairing counts. `cancel-challenge` could be
+    queued from *Mark failed* too.
+  - A challenge sent while an admin marked its pairing failed is in the
+    run's `unrecorded_games`, and is left open on Lichess for the same
+    reason.
+- **Known limit:** a retry's §7.3 search finds games, not challenges.
+  A player who, after the by-hand notice, sent their own challenge
+  that is still unaccepted can end up with two: theirs and the
+  league's. The retry's notice says not to start another.
+
+Tests: the partition rule as a pure table test (`challengeSides`: either
+colour, both working, neither, a never-authorised opponent).
+Integration, against the `Fake`:
+- one round with all of it: one bulk; challenges from the player whose
+  token works, in their colour, to a revoked, an expired and a
+  probe-refused opponent; by hand for a never-authorised opponent and
+  for two lapsed tokens; the challenger recorded on each pairing;
+- the round's time control (3 days, casual) rather than today's; the
+  call made with the challenger's token; no sync queued; both notices,
+  their categories, wording and link;
+- a token the bulk refuses turns its pairing into a challenge;
+- a refused challenge left by hand, its players told, the reason in the
+  report without a token, the others still sent;
+- running again sends no second challenge;
+- a cancelled run fails, tells nobody and leaves the pairing waiting;
+- an admin's *Mark failed* during the call wins;
+- a retry's challenge announced under its own key, the by-hand notice
+  not repeated.
+
+sync-games: a challenge pairing is never searched, waits while Lichess
+has no game of its id, and is in progress once the game appears. Web:
+"This week" for the challenger, the opponent, and after acceptance; the
+round page's "challenge from" and its count, with no retry button.
+
+Automated verification: `go build`, `go vet` (both tags), gofmt,
+`make test` green; every integration test green on `ic_test`, three
+runs in a row with the test cache off, none skipped (518 tests and
+subtests, from 503). `make css` rebuilt `app.css` for the amber link.
+Not checked in a browser.
 
 ---
 

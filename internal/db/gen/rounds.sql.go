@@ -195,7 +195,7 @@ func (q *Queries) DeleteDoubleGame(ctx context.Context, arg DeleteDoubleGamePara
 }
 
 const deletePairing = `-- name: DeletePairing :one
-DELETE FROM pairings WHERE id = $1 RETURNING id, round_id, white_user_id, black_user_id, creation_method, lichess_game_id, status, match_ambiguous, created_at, edited_by, position, rating_gap, color_penalty, repeat_of_round
+DELETE FROM pairings WHERE id = $1 RETURNING id, round_id, white_user_id, black_user_id, creation_method, lichess_game_id, status, match_ambiguous, created_at, edited_by, position, rating_gap, color_penalty, repeat_of_round, challenger_user_id
 `
 
 // Returns the deleted row so the caller can write the round_exclusion
@@ -219,6 +219,7 @@ func (q *Queries) DeletePairing(ctx context.Context, id pgtype.UUID) (Pairing, e
 		&i.RatingGap,
 		&i.ColorPenalty,
 		&i.RepeatOfRound,
+		&i.ChallengerUserID,
 	)
 	return i, err
 }
@@ -264,7 +265,7 @@ UPDATE pairings SET
   white_user_id = $2, black_user_id = $3, edited_by = $4,
   rating_gap = NULL, color_penalty = NULL, repeat_of_round = NULL
 WHERE id = $1
-RETURNING id, round_id, white_user_id, black_user_id, creation_method, lichess_game_id, status, match_ambiguous, created_at, edited_by, position, rating_gap, color_penalty, repeat_of_round
+RETURNING id, round_id, white_user_id, black_user_id, creation_method, lichess_game_id, status, match_ambiguous, created_at, edited_by, position, rating_gap, color_penalty, repeat_of_round, challenger_user_id
 `
 
 type FlipPairingColoursParams struct {
@@ -300,6 +301,7 @@ func (q *Queries) FlipPairingColours(ctx context.Context, arg FlipPairingColours
 		&i.RatingGap,
 		&i.ColorPenalty,
 		&i.RepeatOfRound,
+		&i.ChallengerUserID,
 	)
 	return i, err
 }
@@ -450,7 +452,7 @@ func (q *Queries) GetLatestPublishedRound(ctx context.Context) (Round, error) {
 }
 
 const getPairingByID = `-- name: GetPairingByID :one
-SELECT id, round_id, white_user_id, black_user_id, creation_method, lichess_game_id, status, match_ambiguous, created_at, edited_by, position, rating_gap, color_penalty, repeat_of_round FROM pairings WHERE id = $1 AND round_id = $2
+SELECT id, round_id, white_user_id, black_user_id, creation_method, lichess_game_id, status, match_ambiguous, created_at, edited_by, position, rating_gap, color_penalty, repeat_of_round, challenger_user_id FROM pairings WHERE id = $1 AND round_id = $2
 `
 
 type GetPairingByIDParams struct {
@@ -478,6 +480,7 @@ func (q *Queries) GetPairingByID(ctx context.Context, arg GetPairingByIDParams) 
 		&i.RatingGap,
 		&i.ColorPenalty,
 		&i.RepeatOfRound,
+		&i.ChallengerUserID,
 	)
 	return i, err
 }
@@ -586,7 +589,7 @@ func (q *Queries) InsertDoubleGame(ctx context.Context, arg InsertDoubleGamePara
 const insertEditedPairing = `-- name: InsertEditedPairing :one
 INSERT INTO pairings (round_id, white_user_id, black_user_id, creation_method, status, edited_by)
 VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, round_id, white_user_id, black_user_id, creation_method, lichess_game_id, status, match_ambiguous, created_at, edited_by, position, rating_gap, color_penalty, repeat_of_round
+RETURNING id, round_id, white_user_id, black_user_id, creation_method, lichess_game_id, status, match_ambiguous, created_at, edited_by, position, rating_gap, color_penalty, repeat_of_round, challenger_user_id
 `
 
 type InsertEditedPairingParams struct {
@@ -629,6 +632,7 @@ func (q *Queries) InsertEditedPairing(ctx context.Context, arg InsertEditedPairi
 		&i.RatingGap,
 		&i.ColorPenalty,
 		&i.RepeatOfRound,
+		&i.ChallengerUserID,
 	)
 	return i, err
 }
@@ -640,7 +644,7 @@ INSERT INTO pairings (
 ) VALUES (
   $1, $2, $3, 'manual_external', 'pending', $4, $5, $6, $7
 )
-RETURNING id, round_id, white_user_id, black_user_id, creation_method, lichess_game_id, status, match_ambiguous, created_at, edited_by, position, rating_gap, color_penalty, repeat_of_round
+RETURNING id, round_id, white_user_id, black_user_id, creation_method, lichess_game_id, status, match_ambiguous, created_at, edited_by, position, rating_gap, color_penalty, repeat_of_round, challenger_user_id
 `
 
 type InsertGeneratedPairingParams struct {
@@ -682,6 +686,7 @@ func (q *Queries) InsertGeneratedPairing(ctx context.Context, arg InsertGenerate
 		&i.RatingGap,
 		&i.ColorPenalty,
 		&i.RepeatOfRound,
+		&i.ChallengerUserID,
 	)
 	return i, err
 }
@@ -1013,7 +1018,7 @@ func (q *Queries) ListPairingPool(ctx context.Context) ([]ListPairingPoolRow, er
 
 const listPairingsForRound = `-- name: ListPairingsForRound :many
 SELECT
-  p.id, p.round_id, p.white_user_id, p.black_user_id, p.creation_method, p.lichess_game_id, p.status, p.match_ambiguous, p.created_at, p.edited_by, p.position, p.rating_gap, p.color_penalty, p.repeat_of_round,
+  p.id, p.round_id, p.white_user_id, p.black_user_id, p.creation_method, p.lichess_game_id, p.status, p.match_ambiguous, p.created_at, p.edited_by, p.position, p.rating_gap, p.color_penalty, p.repeat_of_round, p.challenger_user_id,
   wu.lichess_username AS white_username,
   bu.lichess_username AS black_username,
   ws.power_rating AS white_power_rating,
@@ -1042,6 +1047,7 @@ type ListPairingsForRoundRow struct {
 	RatingGap        *int32             `json:"rating_gap"`
 	ColorPenalty     *int32             `json:"color_penalty"`
 	RepeatOfRound    *int32             `json:"repeat_of_round"`
+	ChallengerUserID pgtype.UUID        `json:"challenger_user_id"`
 	WhiteUsername    string             `json:"white_username"`
 	BlackUsername    string             `json:"black_username"`
 	WhitePowerRating *int32             `json:"white_power_rating"`
@@ -1076,6 +1082,7 @@ func (q *Queries) ListPairingsForRound(ctx context.Context, roundID int32) ([]Li
 			&i.RatingGap,
 			&i.ColorPenalty,
 			&i.RepeatOfRound,
+			&i.ChallengerUserID,
 			&i.WhiteUsername,
 			&i.BlackUsername,
 			&i.WhitePowerRating,
@@ -1093,7 +1100,7 @@ func (q *Queries) ListPairingsForRound(ctx context.Context, roundID int32) ([]Li
 
 const listPairingsForUserInRound = `-- name: ListPairingsForUserInRound :many
 SELECT
-  p.id, p.round_id, p.white_user_id, p.black_user_id, p.creation_method, p.lichess_game_id, p.status, p.match_ambiguous, p.created_at, p.edited_by, p.position, p.rating_gap, p.color_penalty, p.repeat_of_round,
+  p.id, p.round_id, p.white_user_id, p.black_user_id, p.creation_method, p.lichess_game_id, p.status, p.match_ambiguous, p.created_at, p.edited_by, p.position, p.rating_gap, p.color_penalty, p.repeat_of_round, p.challenger_user_id,
   (CASE WHEN p.white_user_id = $2 THEN bu.lichess_username ELSE wu.lichess_username END)::text AS opponent_username,
   (p.white_user_id = $2) AS is_white
 FROM pairings p
@@ -1123,6 +1130,7 @@ type ListPairingsForUserInRoundRow struct {
 	RatingGap        *int32             `json:"rating_gap"`
 	ColorPenalty     *int32             `json:"color_penalty"`
 	RepeatOfRound    *int32             `json:"repeat_of_round"`
+	ChallengerUserID pgtype.UUID        `json:"challenger_user_id"`
 	OpponentUsername string             `json:"opponent_username"`
 	IsWhite          bool               `json:"is_white"`
 }
@@ -1157,6 +1165,7 @@ func (q *Queries) ListPairingsForUserInRound(ctx context.Context, arg ListPairin
 			&i.RatingGap,
 			&i.ColorPenalty,
 			&i.RepeatOfRound,
+			&i.ChallengerUserID,
 			&i.OpponentUsername,
 			&i.IsWhite,
 		); err != nil {

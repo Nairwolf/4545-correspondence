@@ -80,8 +80,12 @@
         <span class="text-zinc-300">You play <a class="font-medium text-zinc-100 hover:underline" href="{{playerURL .Opponent}}">{{.Opponent}}</a> with {{.Color}}.
           {{- if .NotPlayed}} <span class="text-zinc-500">Marked as not played.</span>
           {{- else if .Creating}} <span class="text-zinc-500">Your game is being created on Lichess.</span>
+          {{- else if .Challenger}} <span class="text-zinc-500">We challenged them for you on Lichess; the game starts once they accept.</span>
+          {{- else if .Challenged}} <span class="text-amber-300">They've challenged you on Lichess: accept it to start the game.</span>
           {{- else if .Created}} <span class="text-zinc-500">The league created the game on Lichess: nothing to start.</span>{{end}}</span>
-        {{if or .NotPlayed .Creating}}{{else if .GameID}}<a class="text-sm text-zinc-400 underline hover:text-zinc-100" href="{{gameURL .GameID}}">open on Lichess</a>
+        {{if or .NotPlayed .Creating}}{{else if .Challenged}}<a class="text-sm font-medium text-amber-300 underline hover:text-amber-200" href="{{gameURL .GameID}}">accept on Lichess</a>
+        {{- else if .Challenger}}<a class="text-sm text-zinc-400 underline hover:text-zinc-100" href="{{gameURL .GameID}}">see the challenge</a>
+        {{- else if .GameID}}<a class="text-sm text-zinc-400 underline hover:text-zinc-100" href="{{gameURL .GameID}}">open on Lichess</a>
         {{- else}}<a class="text-sm text-zinc-400 underline hover:text-zinc-100" href="{{userURL .Opponent}}">challenge them on Lichess</a>{{end}}
       </li>
       {{end}}

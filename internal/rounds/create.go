@@ -92,6 +92,12 @@ type CreationReport struct {
 	Adopted int `json:"adopted,omitempty"`
 	// Created counts the games this run's bulk created.
 	Created int `json:"created"`
+	// Challenges counts the challenges this run sent for a pairing with
+	// one working token, each waiting for its opponent to accept.
+	Challenges int `json:"challenges,omitempty"`
+	// Unchallenged says, per pairing, why Lichess refused its
+	// challenge: "alice to bob: …". Those pairings are left by hand.
+	Unchallenged []string `json:"unchallenged,omitempty"`
 	// ByHand counts the pairings left for their players to start.
 	ByHand int `json:"by_hand"`
 	// Bulks names the bulks this run created or adopted.
@@ -105,8 +111,8 @@ type CreationReport struct {
 	// Unreadable names the players whose stored token could not be
 	// decrypted. Their games are started by hand; the token is kept.
 	Unreadable []string `json:"unreadable_tokens,omitempty"`
-	// Unrecorded lists games Lichess created that no pairing took: one
-	// marked failed by an admin while the job ran.
+	// Unrecorded lists games and challenges Lichess created that no
+	// pairing took: one marked failed by an admin while the job ran.
 	Unrecorded []string `json:"unrecorded_games,omitempty"`
 }
 
@@ -118,8 +124,10 @@ type CreationReport struct {
 // started; a stored token expired by then is not used.
 //
 // Pairings whose two players both have a working token go into one
-// bulk; the others are left to their players. The returned error fails
-// the run and river retries it; the report says how far it got.
+// bulk; a pairing with one working token becomes a challenge from that
+// player; the others are left to their players (§3.3). The returned
+// error fails the run and river retries it; the report says how far it
+// got.
 func (c GameCreator) CreateGames(
 	ctx context.Context,
 	db DB,
@@ -165,14 +173,17 @@ func (c GameCreator) CreateGames(
 		}
 	}
 	if len(pending) > 0 {
-		working, err := c.probe(ctx, db, round.ID, pending, now, &report)
+		tokens, err := c.probe(ctx, db, round.ID, pending, now, &report)
 		if err != nil {
 			return report, err
 		}
-		if bulk := bothWorking(pending, working); len(bulk) > 0 {
-			if err := c.createBulk(ctx, db, round, snap, bulk, working, retry, &report); err != nil {
+		if bulk := bothWorking(pending, tokens.working); len(bulk) > 0 {
+			if err := c.createBulk(ctx, db, round, snap, bulk, tokens.working, retry, &report); err != nil {
 				return report, err
 			}
+		}
+		if err := c.challenge(ctx, db, round, snap, tokens, retry, &report); err != nil {
+			return report, err
 		}
 	}
 
@@ -249,7 +260,8 @@ func sameTimeControl(bulk lichess.BulkPairing, snap Snapshot) bool {
 // probe is spec §6.3 step 3: one POST /api/token/test over the tokens
 // of the players still waiting for a game, since validate-tokens can be
 // a day stale by publication and a bulk is all-or-nothing. It returns
-// each player whose token works, with the token. A token works when it
+// each player whose token works, with the token, and every player with
+// a stored token at all, working or not. A token works when it
 // is stored, not revoked, not expired, can be decrypted, and Lichess
 // does not refuse it; one Lichess calls invalid, or without
 // challenge:write, is marked revoked and its player told. One Lichess's
@@ -261,18 +273,23 @@ func (c GameCreator) probe(
 	pending []gen.ListPairingsToCreateRow,
 	now time.Time,
 	report *CreationReport,
-) (map[pgtype.UUID]workingToken, error) {
+) (playerTokens, error) {
 	names := playerNames(pending)
 	rows, err := gen.New(db).ListRoundPlayerTokens(ctx, roundID)
 	if err != nil {
-		return nil, fmt.Errorf("list the players' tokens: %w", err)
+		return playerTokens{}, fmt.Errorf("list the players' tokens: %w", err)
 	}
 
+	tokens := playerTokens{
+		working: make(map[pgtype.UUID]workingToken, len(rows)),
+		stored:  make(map[pgtype.UUID]bool, len(rows)),
+	}
 	var candidates []workingToken
 	for _, row := range rows {
 		if _, waiting := names[row.UserID]; !waiting {
 			continue
 		}
+		tokens.stored[row.UserID] = true
 		if !tokenhealth.PlayerOf(row.IssuedAt, row.RevokedAt, row.ExpiresAt, now).Valid() {
 			continue
 		}
@@ -284,7 +301,7 @@ func (c GameCreator) probe(
 		candidates = append(candidates, workingToken{row: row, secret: secret})
 	}
 	if len(candidates) == 0 {
-		return nil, nil
+		return tokens, nil
 	}
 
 	secrets := make([]tokencrypt.Secret, 0, len(candidates))
@@ -293,22 +310,31 @@ func (c GameCreator) probe(
 	}
 	answers, err := c.Lichess.TestTokens(ctx, secrets)
 	if err != nil {
-		return nil, fmt.Errorf("test the players' tokens: %w", err)
+		return playerTokens{}, fmt.Errorf("test the players' tokens: %w", err)
 	}
 
-	working := make(map[pgtype.UUID]workingToken, len(candidates))
 	for _, cand := range candidates {
 		info, answered := answers[cand.secret]
 		if answered && (info == nil || !info.HasScope(lichess.ScopeChallengeWrite)) {
 			if err := revokeToken(ctx, db, cand.row); err != nil {
-				return nil, fmt.Errorf("revoke %s's token: %w", names[cand.row.UserID], err)
+				return playerTokens{}, fmt.Errorf("revoke %s's token: %w", names[cand.row.UserID], err)
 			}
 			report.Lapsed = append(report.Lapsed, names[cand.row.UserID])
 			continue
 		}
-		working[cand.row.UserID] = cand
+		tokens.working[cand.row.UserID] = cand
 	}
-	return working, nil
+	return tokens, nil
+}
+
+// playerTokens is what the probe found about the tokens of the players
+// waiting for a game.
+type playerTokens struct {
+	// working holds each player whose token works, with the token.
+	working map[pgtype.UUID]workingToken
+	// stored holds each player with a stored token, working or not: one
+	// who has authorised the league at least once.
+	stored map[pgtype.UUID]bool
 }
 
 // workingToken is a player's stored token, as read, and the secret it
@@ -318,8 +344,8 @@ type workingToken struct {
 	secret tokencrypt.Secret
 }
 
-// bothWorking is spec §3.3's partition, as far as this step goes: the
-// pairings whose two players' tokens work go into the bulk.
+// bothWorking is the bulk's part of spec §3.3's partition: the
+// pairings whose two players' tokens work.
 func bothWorking(
 	pending []gen.ListPairingsToCreateRow,
 	working map[pgtype.UUID]workingToken,
@@ -498,6 +524,137 @@ func (c GameCreator) record(
 		return 0, fmt.Errorf("record bulk %s: commit: %w", bulk.ID, err)
 	}
 	return recorded, nil
+}
+
+// challenge is spec §6.3 step 6: each pairing still waiting with one
+// working token becomes a challenge from that player, in their assigned
+// colour and with the round's time control; the opponent must accept it
+// (§3.3). Each is recorded in a transaction of its own right after its
+// call, so a crash between the two can at worst leave one challenge
+// sent twice. A challenge Lichess refuses leaves its pairing to be
+// started by hand and does not stop the others; a cancelled run stops
+// here, and river retries it.
+func (c GameCreator) challenge(
+	ctx context.Context,
+	db DB,
+	round gen.Round,
+	snap Snapshot,
+	tokens playerTokens,
+	retry bool,
+	report *CreationReport,
+) error {
+	// Listed again rather than taken from before the bulk: the bulk's
+	// games are recorded, and an admin may have marked a pairing failed.
+	pending, err := gen.New(db).ListPairingsToCreate(ctx, round.ID)
+	if err != nil {
+		return fmt.Errorf("list pairings to challenge: %w", err)
+	}
+
+	for _, p := range pending {
+		from, to, ok := challengeSides(p, tokens)
+		if !ok {
+			continue
+		}
+		// A side names its opponent: from.opponent is who is challenged,
+		// to.opponent who challenges.
+		ch, err := c.Lichess.CreateChallenge(
+			ctx,
+			tokens.working[from.user].secret,
+			from.opponent,
+			lichess.ChallengeRequest{
+				Days:  snap.DaysPerMove,
+				Rated: snap.Rated,
+				Color: lichess.Color(from.colour),
+			},
+		)
+		if err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("challenge %s for %s: %w", from.opponent, to.opponent, err)
+			}
+			report.Unchallenged = append(report.Unchallenged, fmt.Sprintf("%s to %s: %v", to.opponent, from.opponent, err))
+			continue
+		}
+
+		// Recorded even if the run's context is cancelled meanwhile, as a
+		// bulk is: the challenge exists now.
+		recorded, err := recordChallenge(context.WithoutCancel(ctx), db, round, snap, p.PairingID, from, to, ch.ID, retry)
+		if err != nil {
+			return err
+		}
+		if !recorded {
+			report.Unrecorded = append(report.Unrecorded, ch.ID)
+			continue
+		}
+		report.Challenges++
+	}
+	return nil
+}
+
+// challengeSides is the challenge's part of spec §3.3's partition: a
+// pairing with exactly one working token is challenged by that player,
+// from, and to must accept. The opponent must have authorised the
+// league at least once: a member who never has (seeded from the
+// spreadsheet, say) is never sent a challenge out of the blue, and the
+// two start the game by hand. Under game creation the pool already
+// leaves such a member out (§3.3), but a round generated before it was
+// switched on may hold one.
+func challengeSides(p gen.ListPairingsToCreateRow, tokens playerTokens) (from, to side, ok bool) {
+	sides := sidesOf(p.WhiteUserID, p.BlackUserID, p.WhiteUsername, p.BlackUsername)
+	_, white := tokens.working[p.WhiteUserID]
+	_, black := tokens.working[p.BlackUserID]
+	switch {
+	case white && !black && tokens.stored[p.BlackUserID]:
+		return sides[0], sides[1], true
+	case black && !white && tokens.stored[p.WhiteUserID]:
+		return sides[1], sides[0], true
+	}
+	return side{}, side{}, false
+}
+
+// recordChallenge stores a challenge sent for a pairing, in one
+// transaction with both players' notices: creation_method = challenge,
+// who sent it, and its id as the game id. The pairing stays pending
+// until the opponent accepts and sync-games finds the game. It reports
+// false for a pairing no longer pending — marked failed meanwhile —
+// which keeps its status.
+func recordChallenge(
+	ctx context.Context,
+	db DB,
+	round gen.Round,
+	snap Snapshot,
+	pairingID pgtype.UUID,
+	from, to side,
+	challengeID string,
+	retry bool,
+) (bool, error) {
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("record challenge %s: begin: %w", challengeID, err)
+	}
+	defer tx.Rollback(ctx)
+	q := gen.New(tx)
+
+	id := challengeID
+	n, err := q.RecordChallenge(ctx, gen.RecordChallengeParams{
+		ID:               pairingID,
+		ChallengerUserID: from.user,
+		LichessGameID:    &id,
+	})
+	if err != nil {
+		return false, fmt.Errorf("record challenge %s: %w", challengeID, err)
+	}
+	if n == 0 {
+		return false, nil
+	}
+	for _, notice := range challengeNotices(round, snap, pairingID, challengeID, from, to, retry) {
+		if err := notify.Send(ctx, q, notice); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("record challenge %s: commit: %w", challengeID, err)
+	}
+	return true, nil
 }
 
 // finish is spec §6.3 step 7: the round's games are created, the

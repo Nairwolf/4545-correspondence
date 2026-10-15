@@ -76,3 +76,12 @@ WHERE t.user_id IN (
 UPDATE pairings
 SET creation_method = $2, status = $3, lichess_game_id = $4
 WHERE id = $1 AND status = 'pending' AND lichess_game_id IS NULL;
+
+-- name: RecordChallenge :execrows
+-- A challenge sent for a pairing (spec §6.3 step 6). Its id is the
+-- game's once the opponent accepts (§3.4), so it is stored as the game
+-- id, and the pairing stays pending until sync-games finds the game by
+-- that id. Guarded like RecordCreatedGame.
+UPDATE pairings
+SET creation_method = 'challenge', challenger_user_id = $2, lichess_game_id = $3
+WHERE id = $1 AND status = 'pending' AND lichess_game_id IS NULL;
