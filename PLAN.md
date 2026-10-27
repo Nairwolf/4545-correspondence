@@ -1,6 +1,8 @@
 # Phase 5 implementation plan — Automation
 
-**Status: adopted 2026-09-28, being built.** Proposed 2026-09-24 and
+**Status: built and closed out 2026-10-27** (commits `cf50350` to
+`b6fcfb3`, then the close-out). The live checks at the end are still to
+be run; see step 8 under "What was built". Adopted 2026-09-28. Proposed 2026-09-24 and
 parked in `PLAN_PHASE5.md` until Phase 4's live checks were recorded;
 it replaced the Phase 4 plan here once they were (that plan and its
 record stay in git history, last at `d765c07`). Re-read against those
@@ -1440,6 +1442,66 @@ subtests, from 518). Two rules broken by hand — the 48-hour floor, the
 accepted-challenge check — each failed a test. No new CSS class. Not
 checked in a browser.
 
+### Step 8 — docs and close-out (2026-10-27)
+
+- **README:**
+  - `ic create-games` in the command list, and `create-games` among
+    the jobs `serve` runs;
+  - the "after publication" paragraph now describes `manual` only;
+    the missed-start rules moved to a new runbook, **switching game
+    creation on**: what to do before (the organiser token,
+    `/admin/tokens`' list of who the token rule would leave out,
+    `days_per_move`), the switch itself, what each publication shows,
+    what to do when Lichess keeps refusing or to turn automation off,
+    and the weekly token and missed-start routine.
+- **CLAUDE.md:** the repository state covers Phase 5 and says it ships
+  switched off; "not built yet" is now Phase 6. **Found:** its open
+  questions still listed four that the spec settled in earlier phases
+  (history import, round numbering, the timezone field, unrated
+  players); it now lists only §14.3 and §14.6.
+- **Spec:** the status line; §8.2's registration notification
+  recorded as built; §12 marks Phase 5 built and says game creation
+  ships switched off until §14.3 is settled and the live checks pass;
+  the step 6 and step 7 changelog entries put back in date order; a
+  §15 entry.
+- **Four stale comments corrected,** no behaviour change:
+  - `internal/web/auth.go` said Phase 5 would ask players to
+    re-authorise for `msg:write`; decision 12 says never;
+  - `internal/rounds/edit.go` called *Mark failed* the stand-in for
+    the missed-start job, which now exists;
+  - `internal/db/queries/rounds.sql` (and so `gen/rounds.sql.go`,
+    regenerated): the round lock was there "so Phase 5 can put a
+    Lichess call" under it, which decision 2 replaced; and generated
+    pairings were said to be rewritten at publication, when
+    create-games rewrites them after it.
+- **Left as is:** the comment in `00010_identity.sql` still says
+  `msg:write` arrives in Phase 5. An applied migration is not edited;
+  spec §3.1 is the record.
+- **Phase 5 against its plan.** The decisions held but for these
+  deviations, each recorded in its step: the notification dedupe key
+  is unique per player (step 2); a new package, `internal/tokenhealth`,
+  for the token rule the pool, the dashboard and `/admin/tokens` share
+  (step 4); a new column, `pairings.challenger_user_id` (step 6); a
+  pairing is retired only 48 hours after publication (step 7); no
+  `cmd/ic/evaluate_activity.go` (step 7). No new Go module:
+  `rivertype` moved from indirect to direct (step 5).
+- **Live verification: not run yet.** The six checks below need a
+  scratch database whose only approved players are test accounts, and
+  a test organiser account; that one need not wait for §14.3, which is
+  about the league's real account. Check 1 also confirms, live, one of
+  the points spec §3.2 marks *lila* (read from the server source, not
+  documented): the organiser's message reaches the players. Another,
+  the body of a bulk refused for a token, is hard to provoke on
+  purpose — the publication probe catches a revoked token first — so
+  it stays covered by the client's tests alone. Step 7 gives a psql
+  shortcut for check 4, step 5 one for check 5.
+
+Automated verification: `go build`, `go vet` (both tags), gofmt,
+`make test` green; every integration test green on `ic_test`, three
+runs in a row with the test cache off, none skipped (562 tests and
+subtests, unchanged: this step adds no test). `make sqlc` changed only
+the two comments in `gen/rounds.sql.go`.
+
 ---
 
 ## Verification
@@ -1468,7 +1530,8 @@ gofmt, `make test`, `make test-integration`. Key tests:
   excluded from the round generated right after; the 48h reminder sent
   once.
 
-**Live, by the maintainer**, on a scratch database whose only approved
+**Live, by the maintainer — not run yet** (see step 8), on a scratch
+database whose only approved
 players are test accounts (an organiser account and two or three
 players), `pairing.game_creation = lichess`:
 

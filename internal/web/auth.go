@@ -35,8 +35,9 @@ const (
 	intentLogin = "login"
 )
 
-// scopes is what every player grants. msg:write (Lichess PMs, spec §10)
-// is not requested yet; Phase 5 asks players to re-authorise for it.
+// scopes is what every player grants. msg:write is never requested: a
+// Lichess message is sent as the token's owner, so a player's token could
+// only send messages from that player (spec §3.1, §10).
 var scopes = []string{"challenge:write"}
 
 // oauthState is what the browser carries between the redirect to

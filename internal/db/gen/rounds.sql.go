@@ -518,8 +518,8 @@ SELECT id, number, state, generated_at, publish_at, published_at, pair_at, gener
 `
 
 // Locks the round row. Every publish/cancel/regenerate/edit path takes
-// this lock first, so Phase 5 can put a Lichess call between the lock
-// and the state change without changing this shape.
+// this lock first. No Lichess call is ever made under it: publication
+// queues create-games in its transaction instead (spec §6.3).
 func (q *Queries) GetRoundForUpdate(ctx context.Context, id int32) (Round, error) {
 	row := q.db.QueryRow(ctx, getRoundForUpdate, id)
 	var i Round
@@ -658,8 +658,9 @@ type InsertGeneratedPairingParams struct {
 }
 
 // Every engine-generated pairing starts manual_external/pending — the
-// shape `import-pairings` already produces (spec §6.3: Phase 4 makes
-// no Lichess call; Phase 5 overwrites creation_method at publish).
+// shape `import-pairings` already produces (spec §6.3: generation makes
+// no Lichess call; create-games sets creation_method once it has made
+// the game, after publication).
 func (q *Queries) InsertGeneratedPairing(ctx context.Context, arg InsertGeneratedPairingParams) (Pairing, error) {
 	row := q.db.QueryRow(ctx, insertGeneratedPairing,
 		arg.RoundID,

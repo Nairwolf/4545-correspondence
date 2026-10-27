@@ -125,8 +125,8 @@ SELECT * FROM rounds WHERE id = $1;
 
 -- name: GetRoundForUpdate :one
 -- Locks the round row. Every publish/cancel/regenerate/edit path takes
--- this lock first, so Phase 5 can put a Lichess call between the lock
--- and the state change without changing this shape.
+-- this lock first. No Lichess call is ever made under it: publication
+-- queues create-games in its transaction instead (spec §6.3).
 SELECT * FROM rounds WHERE id = $1 FOR UPDATE;
 
 -- name: ListRounds :many
@@ -198,8 +198,9 @@ RETURNING *;
 
 -- name: InsertGeneratedPairing :one
 -- Every engine-generated pairing starts manual_external/pending — the
--- shape `import-pairings` already produces (spec §6.3: Phase 4 makes
--- no Lichess call; Phase 5 overwrites creation_method at publish).
+-- shape `import-pairings` already produces (spec §6.3: generation makes
+-- no Lichess call; create-games sets creation_method once it has made
+-- the game, after publication).
 INSERT INTO pairings (
   round_id, white_user_id, black_user_id, creation_method, status,
   position, rating_gap, color_penalty, repeat_of_round

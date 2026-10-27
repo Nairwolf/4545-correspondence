@@ -23,8 +23,9 @@ var ErrNotFound = errors.New("pairing not found in this round")
 // and server-side enforced, each nulling the stored diagnostics (they
 // would otherwise describe colours or opponents that no longer exist)
 // and recording edited_by and an audit row. Mark failed is the one
-// exception — it acts on a PUBLISHED round's still-pending pairing, the
-// manual stand-in for Phase 5's missed-start job (decision 7).
+// exception — it acts on a PUBLISHED round's still-pending pairing, at
+// once, for a case that should not wait for the next generation's
+// evaluate-activity (spec §6.4).
 
 // FlipColours swaps a pairing's two colours in place (spec §8.5).
 func FlipColours(

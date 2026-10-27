@@ -98,6 +98,7 @@ ic recompute                                  # rebuild every player_standings r
 ic evaluate-activity                          # retire unstarted pairings, record missed starts, now (generation runs it first)
 ic generate-round                             # run the weekly round generation once
 ic publish-round <round-number>               # publish a draft now
+ic create-games <round-number>                # retry a published round's game creation (queued for serve to run)
 ic validate-tokens                            # test every stored Lichess token, and the organiser's, now
 ic setting <key> <json-value>                 # set a spec §4.2 setting (validated, audited)
 ```
@@ -118,17 +119,18 @@ produced it.
 
 Players normally enter the league through `/join` (Lichess OAuth plus an
 admin's approval), which is also what collects the token bulk pairing
-will need. `seed-players` only creates rows without a token — handy for
+needs. `seed-players` only creates rows without a token — handy for
 a local roster, not the way a real league is populated.
 
 `serve` runs the jobs on their own schedule automatically (spec §7):
 `sync-games` hourly, `refresh-ratings` and `recompute` daily,
 `validate-tokens` an hour before each `pairing.cron` firing,
 `generate-round` on `pairing.cron` (every generation runs
-`evaluate-activity` first), `cancel-challenge` when a challenge nobody
-accepted is retired, `publish-round` when a draft's
-review window ends, and `publish-round-sweep` hourly as the safety net
-for any draft past its window. The subcommands above are for a manual
+`evaluate-activity` first), `publish-round` when a draft's review
+window ends, `publish-round-sweep` hourly as the safety net for any
+draft past its window, `create-games` when a round is published while
+the site creates games, and `cancel-challenge` when a challenge nobody
+accepted is retired. The subcommands above are for a manual
 run or a first-time data load, not something normal operation needs.
 
 `validate-tokens` marks a token Lichess refuses as revoked and tells
@@ -182,24 +184,79 @@ The publication runs in `serve`: if it is down when the window ends,
 the draft publishes as soon as it starts again. *Publish now* (or
 `ic publish-round <number>`) publishes at once.
 
-**After publication** (until Phase 5 creates games on Lichess): players
+**After publication**, while the site does not create games
+(`pairing.game_creation = manual`, the default; see below): players
 challenge each other by hand, and `sync-games` finds the game within
 the hour. It only recognises a **rated, standard, correspondence** game
 at `pairing.days_per_move` days per move (default 2), with the colours
 the round assigned, started no earlier than a day before the round
 published. A pairing still not started 48 hours after publication gets
-one reminder, and the next generation retires it (marks it failed) so
-it stops counting towards anyone's games in flight; *Mark failed* on
-the round page does that at once. A challenge nobody accepted is also
-a missed start for the player who had to accept it: the first warns
-them, the second in a row (`activity.missed_starts_to_pause`, default
-2) pauses them until they press *Resume quest*.
+one reminder, and the next generation retires it (marks it failed),
+with no penalty, so it stops counting towards anyone's games in
+flight; *Mark failed* on the round page does that at once.
 
 **If the server was down at generation time**, river does not catch up
 the missed run: use *Generate now*.
 
 Once a few rounds have gone out without edits, shorten the window, or
 stop drafting altogether with `ic setting pairing.mode '"auto_publish"'`.
+
+### Switching game creation on
+
+With `pairing.game_creation = lichess` the site creates each round's
+games on Lichess when it publishes the round (spec §6.3): one bulk
+pairing from the league's organiser account for every pairing whose
+two players' tokens work, a challenge from the player whose token works
+when the other's has lapsed, and by hand, as above, for the rest. Turn
+it on only once the organiser account is settled (spec §14.3) and the
+live checks at the end of `PLAN.md` have passed on a scratch database.
+
+**Before switching.**
+- Create the organiser token: a personal access token of the league's
+  Lichess account with the `challenge:bulk` scope
+  (lichess.org/account/oauth/token). Set it as `LICHESS_ORG_TOKEN`,
+  restart `serve`, and run `ic validate-tokens`: `/admin/tokens` and
+  `/health` then show it as valid, with its account and expiry.
+- Read `/admin/tokens`. Once the switch is on, an approved player who
+  has never signed in is left out of pairing at once, and one whose
+  token lapsed more than `token.invalid_grace_days` (default 14) ago is
+  left out until they sign in again. The page lists them already, so
+  they can be asked to sign in first.
+- `pairing.days_per_move` must be a value Lichess accepts (1, 2, 3, 5,
+  7, 10 or 14); `ic setting` refuses any other.
+
+**Switching.** `ic setting pairing.game_creation '"lichess"'`, with no
+restart: the next generation applies the token rule and the next
+publication creates games. A draft already waiting is published under
+the new setting.
+
+**At each publication.** The round page says the games are being
+created, then when they were created and the bulk's id, and each
+pairing says how its game was made. Players get an on-site notice with the
+game's link, and Lichess sends the players of each bulk game a message
+from the organiser account. A `sync-games` run follows at once, so the
+games show on the Overview within minutes.
+
+**When Lichess refuses.** `create-games` retries for about four hours
+(10 attempts). If it still fails, it gives up: the players are told to
+start their games by hand, `/health` and the admin banner turn red, and
+once the cause is fixed *Retry game creation* on the round page (or
+`ic create-games <round-number>`) tries again. The retry first looks for
+games players have already started by hand and attaches them instead
+of creating a second. To stop automation altogether,
+`ic setting pairing.game_creation '"manual"'`: a round still waiting
+for its games gives up at its job's next attempt, without calling
+Lichess, and the league carries on by hand.
+
+**Every week after.** `validate-tokens` runs an hour before generation
+and tells each player whose token has lapsed to sign in again; their
+dashboard shows a banner with the days of grace left. A player who
+must accept a challenge and doesn't is reminded after 48 hours; at the
+next generation the challenge is withdrawn on Lichess and counted as a
+missed start. The first warns them; `activity.missed_starts_to_pause`
+(default 2) in a row pause them until they press *Resume quest*. The
+admin banner warns 14 days before the organiser token expires: replace
+it, restart `serve`, and run `ic validate-tokens`.
 
 See `CLAUDE.md` for architecture notes and working conventions in this repo.
 

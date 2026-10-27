@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-Phases 1–4 (spec §12) are implemented. Phase 1, read-only parity:
+Phases 1–5 (spec §12) are implemented. Phase 1, read-only parity:
 schema/migrations, the Lichess client, `sync-games`/`refresh-ratings`/
 `recompute` as both river-scheduled jobs and one-shot `ic` subcommands,
 the pure scoring module, and the public web pages (`/`, `/standings`,
@@ -25,22 +25,31 @@ the `pairing.solver` setting; the rounds service (`internal/rounds`)
 with the one-draft rule, the review window and guarded publication;
 the `generate-round` (on `pairing.cron`), `publish-round` and
 `publish-round-sweep` jobs; admin round management and diagnostics at
-`/admin/rounds`; and the dashboard's "This week" section. Generated
-pairings are `manual_external`: players still start the games by hand
-and `sync-games` finds them. Not built yet: everything that talks to
-Lichess for pairing — bulk pairing, the challenge fallback,
-`validate-tokens`, missed starts and auto-pause, notifications
-(Phase 5) — and the GDPR deletion path (Phase 6, a gate before public
-registration — see spec §11).
+`/admin/rounds`; and the dashboard's "This week" section. Phase 5,
+automation: game creation behind the `pairing.game_creation` switch
+(`manual`, the default, leaves every game to the players as in
+Phase 4; `lichess` creates them) — a `create-games` job queued in the
+publishing transaction that probes tokens, reconciles, creates one
+bulk pairing and falls back to a challenge from the player whose token
+works (`internal/rounds/create.go`); `validate-tokens` and the
+`no_valid_token` grace rule (`internal/tokenhealth`); `evaluate-activity`
+before every generation — unstarted pairings retired, missed starts,
+auto-pause — and `cancel-challenge` (`internal/activity`); the on-site
+notification centre (`internal/notify`); `/admin/tokens` and the admin
+banner. It ships switched off: switching it on waits for the organiser
+account (spec §14.3) and the maintainer's live checks in `PLAN.md`.
+Not built yet: Phase 6 — the admin settings UI (settings are changed
+with `ic setting`), editable rules content, the health page, and the
+GDPR deletion path (a gate before public registration — see spec §11).
 `docs/infinite-correspondence-spec.md`
 is still the source of truth for behaviour; read it before changing
 anything under `internal/`, and update it when a decision changes rather
 than letting code and spec diverge. `PLAN.md` holds the current
-phase's plan (Phase 5 now) and records what was actually built at each
-step, including the live-verification results and the handful of
-deliberate deviations from the spec's original sketch — read it
-alongside the spec, not instead of it. Earlier phases' plans and
-records are in its git history.
+phase's plan (Phase 5: built, its live checks still to run) and records
+what was actually built at each step, including the live-verification
+results and the handful of deliberate deviations from the spec's
+original sketch — read it alongside the spec, not instead of it.
+Earlier phases' plans and records are in its git history.
 
 Build/test commands:
 
@@ -54,9 +63,10 @@ make psql               # psql shell on the dev database
 ```
 
 See `README.md` for the full command list (including `make tailwind` /
-`make css`, the one-shot `ic` admin subcommands and the runbook for the
-first live rounds) and `PLAN.md`'s build order for what's done and
-what's next (automation, Phase 5 onward, is not built yet).
+`make css`, the one-shot `ic` admin subcommands, the runbook for the
+first live rounds and the one for switching game creation on) and
+`PLAN.md`'s build order for what's done and what's next (polish,
+Phase 6 onward, is not built yet).
 
 ## What the system does
 
@@ -120,7 +130,7 @@ Table-driven unit tests for the whole scoring module using fixtures from real sp
 
 ## Open questions (spec §14)
 
-Unresolved with the maintainers: whether history is imported at all, round numbering (continue ~168+ or restart), which account owns the organiser `challenge:bulk` token, whether the registration timezone field has a use, and whether unrated players are pooled at the league median. Don't invent answers to these in code — ask.
+Unresolved with the maintainers: which account owns the organiser `challenge:bulk` token (§14.3 — needed before `pairing.game_creation` is switched to `lichess`, not for building), and whether game analysis can be had for the Stats page (§14.6). The others are settled; spec §13 records how. Don't invent answers to the open ones in code — ask, when the work actually needs the answer.
 
 ## Git workflow
 
