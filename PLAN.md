@@ -1258,6 +1258,188 @@ runs in a row with the test cache off, none skipped (518 tests and
 subtests, from 503). `make css` rebuilt `app.css` for the amber link.
 Not checked in a browser.
 
+### Step 7 — unstarted pairings, missed starts, auto-pause (2026-10-15)
+
+Built as planned: migration `00015_missed_starts.sql` (`missed_starts`,
+`player_profiles.resumed_at`); `internal/activity`; `evaluate-activity`
+as the first step of every generation and alone as `ic
+evaluate-activity`; retiring unstarted pairings; `cancel-challenge`;
+the 48-hour reminder from `sync-games`; `activity.missed_starts_to_pause`
+(≥ 1, default 2); the resume reset; the dashboard warning.
+
+- **Where it lives.** `internal/activity`. The streak rule is pure
+  (`streak.go`): `Streak` keeps the missed starts recorded after both
+  the latest started league game and the latest resume, and `Decide`
+  turns its length into nothing, a warning (one before the threshold)
+  or a pause. `Evaluator.Evaluate` does the work, `Evaluator.Run`
+  records it as an `evaluate-activity` job run, and `Remind` sends the
+  reminder. `Run` is the one helper the three generation paths call
+  (`runGenerateRound` for the weekly job and `ic generate-round`, and
+  *Generate now*); a failed evaluation is logged and the round
+  generated anyway. Under the weekly job both runs carry its river job
+  id.
+- **The evaluation:**
+  1. a draft waiting → nothing (see below);
+  2. the pending pairings of published rounds, published 48 hours ago
+     or more (see below);
+  3. one `GamesByID` call for the challenges among them;
+  4. one transaction: each pairing marked failed, guarded on still
+     pending, not ambiguous and the game id it was listed with; for a
+     challenge, a missed start for the player who had to accept it and
+     the challenge's withdrawal queued; then, for each player with a new
+     missed start, the streak: warned, or paused with their standing
+     recomputed (it carries their eligibility). A paused player is out
+     of the round generated right after.
+- **Decided while building** (spec §6.4, §7, §8.5 amended, §15 entry):
+  - **A pairing has 48 hours before it can be retired** — the same 48
+    hours after which its players are reminded. The plan said "every
+    still-pending pairing", which assumes the generation comes a week
+    after the publication. Off-cycle it doesn't: with a round published
+    Monday 18:00, the next Monday's generation finds it 162 hours old
+    and retires its pairings, but a *Generate now* at 19:00 would have
+    retired challenges sent an hour earlier and counted them as missed
+    starts. Now those wait for the following generation.
+  - **Left alone:** a round still `creating` (its create-games job owns
+    the pairings; retiring them under it would leave games no pairing
+    counts), a pairing flagged ambiguous (two games exist; an admin
+    picks), and a by-hand pairing whose game id is already known.
+  - **An accepted challenge is not a missed start.** The opponent
+    accepts at 11:30, sync-games last ran at 11:00, generation is at
+    12:00: without a check, the player who accepted would get a missed
+    start, and the withdrawal would abort their game. So one
+    `GamesByID` call first; a challenge that is a game is left pending
+    for sync-games. If Lichess cannot answer, the evaluation fails and
+    changes nothing. Without challenges (always under `manual`) Lichess
+    is not asked.
+  - **Nothing changes while a draft is waiting.** It was paired right
+    after the last evaluation; a player paused now would still be in
+    it, and get a challenge they may not answer either.
+  - **One missed start per player and round** (the table's unique
+    key): the volunteer who leaves both challenges unanswered is
+    warned, not paused. A player with two new misses in one evaluation
+    (one failed in between) is paused once.
+  - **Mark failed withdraws a challenge** (step 6's "for step 7"):
+    `rounds.MarkFailed` takes the scheduler and queues
+    `cancel-challenge` in its transaction, with no missed start. Without
+    a scheduler it refuses for a challenge pairing, like publication
+    under `lichess`.
+  - **`cancel-challenge`** withdraws with the challenger's *current*
+    token. 404 (declined, already withdrawn, or a game with moves) is
+    success. A challenger without a working token fails the run with
+    `river.JobCancel`: not retried, since it would fail the same way.
+    Lichess errors are retried. Unique per pairing for good (river's
+    default, which counts completed jobs). Not on `/health`'s list:
+    one challenge left open is not worth a red site for a week. It
+    stays visible on `/admin/jobs`.
+  - **No reminder from a sync-games run with a failed Lichess call:** a
+    game it could not look for may have started. The next run sends it.
+  - **An auto-pause is recorded in the job run's detail, not the audit
+    log**, like the other changes jobs make (validate-tokens'
+    revocations, create-games giving up).
+  - The auto-pause banner said "Two challenges in a row"; the count is
+    a setting now, so it says "Challenges sent to you went unanswered".
+- **Notices** (all link to `/account`, except the challenge reminder,
+  which links to the challenge):
+  - warning (`missed_start`, key `missed_start:<round>`): "Round 201:
+    your game against carol wasn't played" — "carol's challenge in round
+    201 was never accepted, so it counts as a missed start. If your
+    next challenge goes unanswered too, your quest will be paused until
+    you resume it. Re-authorise from your account page and the league
+    can create your games directly, with nothing to accept." The player
+    who must accept is always one whose token lapsed, so re-authorising
+    is the way out;
+  - pause (`auto_pause`, key `auto_pause:<round>`): "Your quest is
+    paused" — "2 challenges in a row went unanswered, the last from
+    carol in round 202, so you won't be paired until you resume your
+    quest. …";
+  - reminder (`unstarted`, key `round:<n>:unstarted:<pairing id>`): to
+    the challenged player, "Round 201: carol's challenge is waiting";
+    to both players of a by-hand pairing, "Round 201: your game against
+    bob hasn't started", naming the game to start, from the round's
+    settings. Both say what happens at the next generation (dropped and
+    a missed start; dropped, with no penalty).
+- **Dashboard.** Under This week, for a player one missed start from a
+  pause, not already paused: "You didn't accept your challenge in round
+  201, so it counts as a missed start. If your next one goes unanswered
+  too, your quest will be paused." Resuming sets `resumed_at`, which
+  ends the run, so the warning goes too. The page now reads the
+  settings once per request and passes them to the token status.
+- **Other changes:**
+  - `rounds.TimeControl`, `rounds.GameURL` and `rounds.ParseSnapshot`
+    are exported for the reminder's wording; `rounds.Scheduler` gains
+    `ScheduleCancelChallenge`, which `activity`'s one-method
+    `Scheduler` also names.
+  - web's `txBeginner` includes the query interface: evaluate-activity
+    writes its run and opens its transaction from the same handle.
+  - `ClearAutoPause` takes the time it records.
+  - `/health` watches `evaluate-activity`, so the admin banner does too.
+  - Module layout: no `cmd/ic/evaluate_activity.go` — the command is a
+    few lines in `main.go` around `activity.Run` — and a new
+    `cmd/ic/cancel_challenge.go`.
+- **For the live checks:**
+  - Check 4 needs the round 48 hours old. After publishing it:
+    `UPDATE rounds SET published_at = published_at - interval '3 days'
+    WHERE number = <n>`, then *Generate now*. Check the pairing is
+    failed, the missed start recorded (`SELECT * FROM missed_starts`),
+    the warning on the challenged account, and the challenge gone on
+    Lichess after serve works `cancel-challenge`.
+  - The dev database's rounds 201 and 202 were published weeks ago.
+    The first sync-games run after this lands reminds their players
+    once, and the first generation retires their pairings, with no
+    missed start (they are hand-started).
+- **Known limit:** *Generate now* runs in a request with a 15-second
+  timeout. If Lichess makes the challenge check wait out a 429 (60
+  seconds), the request's context ends: the evaluation fails, and so
+  does the generation. Only with challenges to check; the admin presses
+  again, or `ic generate-round` has no such limit.
+
+Tests: the streak rule and `Decide` as table tests (a game or a resume
+between two misses, the later of the two, a miss at the very moment of
+a game; thresholds 1, 2 and 3, and a streak beyond the threshold); the
+new setting's values and refusals. Integration, `internal/activity`:
+- every pending pairing retired, a game in progress untouched; a missed
+  start only for the challenged player, the withdrawal queued, the
+  warning with its key and wording, nothing to the challenger or the
+  players of a by-hand pairing;
+- left alone: 48 hours less a minute, a round still creating, an
+  ambiguous pairing, an accepted challenge; exactly 48 hours retired;
+- Lichess down with a challenge → error, nothing changed; without
+  challenges Lichess is not asked and no scheduler is needed; a
+  challenge without a scheduler → error;
+- warned at the first miss, paused at the second, standing ineligible,
+  one notice each, and excluded as `auto_paused` from the round
+  generated next;
+- a started game, and a resume, end the run;
+- the volunteer: one missed start, both challenges withdrawn;
+- running again changes nothing; skipped while a draft waits; an
+  admin's Mark failed during the Lichess call wins;
+- the run recorded with its detail; a bad setting fails it;
+- the reminder: both players of a by-hand pairing with the time
+  control, only the challenged player with the challenge's link, once
+  across two runs; nobody before 48 hours.
+
+`cmd/ic`: cancel-challenge withdraws with the challenger's token; a
+404 is success; no working token → failed, not retried, no token in the
+error; a Lichess error retried; a by-hand or still-pending pairing
+skipped. Generation retires last week's pairing first, so a player at
+their cap of one is paired; a failed evaluation still generates, both
+runs on the one river job. sync-games reminds once, and not when a
+Lichess call failed. `rounds`: Mark failed queues the withdrawal of a
+challenge only, and refuses without a scheduler. `jobs`: one
+cancel-challenge per pairing, even after it completed. Web: Mark failed
+on a challenge queues it, and without a scheduler fails with the
+pairing untouched; the dashboard warning (and not at threshold 3, not
+while paused, gone after resuming, `resumed_at` set); `/health` watches
+evaluate-activity; *Generate now* runs the evaluation before the
+generation.
+
+Automated verification: `go build`, `go vet` (both tags), gofmt,
+`make test` green; every integration test green on `ic_test`, three
+runs in a row with the test cache off, none skipped (562 tests and
+subtests, from 518). Two rules broken by hand — the 48-hour floor, the
+accepted-challenge check — each failed a test. No new CSS class. Not
+checked in a browser.
+
 ---
 
 ## Verification

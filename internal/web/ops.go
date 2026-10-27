@@ -19,7 +19,7 @@ import (
 // failure rather than a silent no-op (spec §6.1).
 var jobNames = []string{
 	"sync-games", "refresh-ratings", "recompute-aggregates",
-	"validate-tokens", "generate-round", "publish-round", "publish-round-sweep",
+	"validate-tokens", "evaluate-activity", "generate-round", "publish-round", "publish-round-sweep",
 	"create-games",
 }
 

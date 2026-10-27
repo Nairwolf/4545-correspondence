@@ -46,7 +46,7 @@ func (q *Queries) CreateApprovedUser(ctx context.Context, arg CreateApprovedUser
 }
 
 const createPlayerProfile = `-- name: CreatePlayerProfile :one
-INSERT INTO player_profiles (user_id) VALUES ($1) RETURNING user_id, is_active, max_concurrent_games, accepts_double_game, paused_by_admin, paused_reason, auto_paused_at, timezone, joined_at
+INSERT INTO player_profiles (user_id) VALUES ($1) RETURNING user_id, is_active, max_concurrent_games, accepts_double_game, paused_by_admin, paused_reason, auto_paused_at, timezone, joined_at, resumed_at
 `
 
 // All other columns take their schema defaults (active, unlimited
@@ -64,6 +64,7 @@ func (q *Queries) CreatePlayerProfile(ctx context.Context, userID pgtype.UUID) (
 		&i.AutoPausedAt,
 		&i.Timezone,
 		&i.JoinedAt,
+		&i.ResumedAt,
 	)
 	return i, err
 }
@@ -93,7 +94,7 @@ func (q *Queries) GetLatestRatingSnapshot(ctx context.Context, userID pgtype.UUI
 }
 
 const getPlayerProfile = `-- name: GetPlayerProfile :one
-SELECT user_id, is_active, max_concurrent_games, accepts_double_game, paused_by_admin, paused_reason, auto_paused_at, timezone, joined_at FROM player_profiles WHERE user_id = $1
+SELECT user_id, is_active, max_concurrent_games, accepts_double_game, paused_by_admin, paused_reason, auto_paused_at, timezone, joined_at, resumed_at FROM player_profiles WHERE user_id = $1
 `
 
 func (q *Queries) GetPlayerProfile(ctx context.Context, userID pgtype.UUID) (PlayerProfile, error) {
@@ -109,6 +110,7 @@ func (q *Queries) GetPlayerProfile(ctx context.Context, userID pgtype.UUID) (Pla
 		&i.AutoPausedAt,
 		&i.Timezone,
 		&i.JoinedAt,
+		&i.ResumedAt,
 	)
 	return i, err
 }

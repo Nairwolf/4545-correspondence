@@ -95,6 +95,7 @@ ic import-pairings [--pair-at RFC3339] <round.csv>  # create a round + pairings 
 ic sync-games                                 # run the hourly Lichess sync job once
 ic refresh-ratings                            # run the daily rating-snapshot job once
 ic recompute                                  # rebuild every player_standings row from scratch
+ic evaluate-activity                          # retire unstarted pairings, record missed starts, now (generation runs it first)
 ic generate-round                             # run the weekly round generation once
 ic publish-round <round-number>               # publish a draft now
 ic validate-tokens                            # test every stored Lichess token, and the organiser's, now
@@ -123,7 +124,9 @@ a local roster, not the way a real league is populated.
 `serve` runs the jobs on their own schedule automatically (spec §7):
 `sync-games` hourly, `refresh-ratings` and `recompute` daily,
 `validate-tokens` an hour before each `pairing.cron` firing,
-`generate-round` on `pairing.cron`, `publish-round` when a draft's
+`generate-round` on `pairing.cron` (every generation runs
+`evaluate-activity` first), `cancel-challenge` when a challenge nobody
+accepted is retired, `publish-round` when a draft's
 review window ends, and `publish-round-sweep` hourly as the safety net
 for any draft past its window. The subcommands above are for a manual
 run or a first-time data load, not something normal operation needs.
@@ -184,9 +187,13 @@ challenge each other by hand, and `sync-games` finds the game within
 the hour. It only recognises a **rated, standard, correspondence** game
 at `pairing.days_per_move` days per move (default 2), with the colours
 the round assigned, started no earlier than a day before the round
-published. A pairing nobody starts keeps counting towards both players'
-games in flight: use *Mark failed* on the round page. The automatic
-missed-start check arrives with Phase 5.
+published. A pairing still not started 48 hours after publication gets
+one reminder, and the next generation retires it (marks it failed) so
+it stops counting towards anyone's games in flight; *Mark failed* on
+the round page does that at once. A challenge nobody accepted is also
+a missed start for the player who had to accept it: the first warns
+them, the second in a row (`activity.missed_starts_to_pause`, default
+2) pauses them until they press *Resume quest*.
 
 **If the server was down at generation time**, river does not catch up
 the missed run: use *Generate now*.

@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/nairwolf/4545-correspondence/internal/activity"
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
 	"github.com/nairwolf/4545-correspondence/internal/rounds"
 	"github.com/nairwolf/4545-correspondence/internal/settings"
@@ -87,10 +88,17 @@ func roundsListError(code string) string {
 
 // handleGenerateRound is "Generate now": rounds.Generate(source=manual)
 // run synchronously, recording a job_runs row exactly as the scheduled
-// job would, so /admin/jobs and /health show it the same way.
+// job would, so /admin/jobs and /health show it the same way. Like
+// every generation it runs evaluate-activity first (spec §6.4), on a
+// job run of its own; a failed evaluation does not stop the round.
 func (s *Server) handleGenerateRound(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	admin, _ := currentUser(r)
+
+	evaluator := activity.Evaluator{Lichess: s.lichess, Scheduler: s.sched}
+	if err := evaluator.Run(ctx, s.db, nil); err != nil {
+		slog.Warn("generate now: evaluation failed, generating anyway", "error", err)
+	}
 
 	jobRun, err := s.q.CreateJobRun(ctx, gen.CreateJobRunParams{JobName: "generate-round"})
 	if err != nil {
@@ -562,7 +570,7 @@ func (s *Server) handleFailPairing(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err := s.roundsTx(ctx, func(tx pgx.Tx) error {
-		_, err := rounds.MarkFailed(ctx, tx, roundID, pairingID, admin.ID)
+		_, err := rounds.MarkFailed(ctx, tx, roundID, pairingID, admin.ID, s.sched)
 		return err
 	})
 	switch {

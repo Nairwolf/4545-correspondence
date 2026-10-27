@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/nairwolf/4545-correspondence/internal/activity"
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
 	"github.com/nairwolf/4545-correspondence/internal/ingest"
 	"github.com/nairwolf/4545-correspondence/internal/lichess"
@@ -31,6 +32,11 @@ type syncGamesStats struct {
 	GamesFinished      int `json:"games_finished"`
 	LichessCallsOK     int `json:"lichess_calls_ok"`
 	LichessCallsFailed int `json:"lichess_calls_failed"`
+
+	// Unstarted counts the pairings still not started 48 hours after
+	// their round was published. Their players are reminded once each
+	// (spec §6.4), by the first run that finds them.
+	Unstarted int `json:"unstarted_after_48h"`
 
 	// LichessErrors holds the first few failed calls' messages, so the
 	// run's own row says what went wrong rather than only a count.
@@ -106,8 +112,9 @@ func syncGamesOutcome(stats syncGamesStats, fatal error) (gen.JobRunStatus, *str
 
 // runSyncGames implements the hourly sync-games job (spec §3.4, §7.3):
 // re-check known in-progress games, match pairings that don't have a
-// game id yet, ingest whatever's finished, and recompute standings for
-// anyone whose game just finished. It never touches a game that isn't
+// game id yet, ingest whatever's finished, recompute standings for
+// anyone whose game just finished, and remind the players of a pairing
+// still not started 48 hours after publication (spec §6.4). It never touches a game that isn't
 // already known to belong to a pairing — that's the whole point of
 // matching being pairing-anchored (spec §7.3): a member's other
 // correspondence games are never looked at.
@@ -197,6 +204,18 @@ func doSyncGames(ctx context.Context, q *gen.Queries, client lichess.API, cfg se
 	}
 	if err := matchPendingPairings(ctx, q, client, cfg, &stats); err != nil {
 		return stats, fmt.Errorf("match pending pairings: %w", err)
+	}
+
+	// The 48-hour reminder, once the games have been looked for, so a
+	// game just found is not reminded about. A run whose Lichess calls
+	// did not all succeed sends none: a game it could not look for may
+	// have started. The next run sends them.
+	if stats.LichessCallsFailed == 0 {
+		unstarted, err := activity.Remind(ctx, q, time.Now())
+		if err != nil {
+			return stats, fmt.Errorf("remind unstarted pairings: %w", err)
+		}
+		stats.Unstarted = unstarted
 	}
 	return stats, nil
 }

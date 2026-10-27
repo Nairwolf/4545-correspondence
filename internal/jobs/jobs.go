@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
@@ -70,6 +71,9 @@ type RoundHandler func(ctx context.Context, roundID int32, riverJobID int64) err
 // then must give the round's games up to its players (spec §6.3).
 type CreateGamesHandler func(ctx context.Context, args CreateGamesArgs, lastAttempt bool, riverJobID int64) error
 
+// PairingHandler is a Handler for a job that acts on one pairing.
+type PairingHandler func(ctx context.Context, pairingID pgtype.UUID, riverJobID int64) error
+
 // Handlers is the set of background jobs `serve` runs.
 type Handlers struct {
 	SyncGames      Handler
@@ -89,6 +93,10 @@ type Handlers struct {
 	// CreateGames creates a published round's games on Lichess (spec
 	// §6.3), queued by its publication or an admin's retry.
 	CreateGames CreateGamesHandler
+	// CancelChallenge withdraws on Lichess the challenge of a pairing
+	// that will never be played (spec §6.4), queued with the change
+	// that retired it.
+	CancelChallenge PairingHandler
 }
 
 // Job argument types. Most carry no data — the job operates on the
@@ -121,6 +129,13 @@ type CreateGamesArgs struct {
 	Retry bool `json:"retry"`
 }
 
+// CancelChallengeArgs names the pairing whose challenge to withdraw.
+// A pairing's challenge is withdrawn once: river's default uniqueness,
+// which also counts a completed job, is what is wanted.
+type CancelChallengeArgs struct {
+	PairingID pgtype.UUID `json:"pairing_id"`
+}
+
 // createGamesAttempts is create-games' retry budget (spec §6.3): river's
 // back-off spreads ten attempts over about four hours, so a short
 // Lichess outage is ridden out before the players are asked to start
@@ -141,21 +156,23 @@ var createGamesUnique = river.UniqueOpts{
 	},
 }
 
-func (syncGamesArgs) Kind() string      { return "sync-games" }
-func (refreshRatingsArgs) Kind() string { return "refresh-ratings" }
-func (recomputeArgs) Kind() string      { return "recompute-aggregates" }
-func (generateRoundArgs) Kind() string  { return "generate-round" }
-func (publishSweepArgs) Kind() string   { return "publish-round-sweep" }
-func (PublishRoundArgs) Kind() string   { return "publish-round" }
-func (validateTokensArgs) Kind() string { return "validate-tokens" }
-func (CreateGamesArgs) Kind() string    { return "create-games" }
+func (syncGamesArgs) Kind() string       { return "sync-games" }
+func (refreshRatingsArgs) Kind() string  { return "refresh-ratings" }
+func (recomputeArgs) Kind() string       { return "recompute-aggregates" }
+func (generateRoundArgs) Kind() string   { return "generate-round" }
+func (publishSweepArgs) Kind() string    { return "publish-round-sweep" }
+func (PublishRoundArgs) Kind() string    { return "publish-round" }
+func (validateTokensArgs) Kind() string  { return "validate-tokens" }
+func (CreateGamesArgs) Kind() string     { return "create-games" }
+func (CancelChallengeArgs) Kind() string { return "cancel-challenge" }
 
 // Scheduler enqueues the jobs internal/rounds asks for, through its
 // own Scheduler interface, in the caller's transaction: a draft's
 // publish-round job with the draft, a round's create-games job with its
-// publication or an admin's retry, and the sync-games run that follows
-// a creation. Each is committed with the change it follows from, or
-// not at all. Every path that generates or publishes a round has one:
+// publication or an admin's retry, the sync-games run that follows a
+// creation, and the withdrawal of a challenge whose pairing was retired
+// by evaluate-activity (internal/activity) or an admin. Each is
+// committed with the change it follows from, or not at all. Every path that generates or publishes a round has one:
 // the jobs and the web layer on serve's running client, the `ic`
 // commands on an insert-only client (spec §7, §8.5).
 type Scheduler struct {
@@ -219,6 +236,20 @@ func (s *Scheduler) ScheduleSyncGames(ctx context.Context, tx pgx.Tx) error {
 	return nil
 }
 
+// ScheduleCancelChallenge queues the withdrawal of a pairing's
+// challenge on Lichess (spec §6.4). A second request for the same
+// pairing adds nothing.
+func (s *Scheduler) ScheduleCancelChallenge(ctx context.Context, tx pgx.Tx, pairingID pgtype.UUID) error {
+	_, err := s.client.InsertTx(ctx, tx,
+		CancelChallengeArgs{PairingID: pairingID},
+		&river.InsertOpts{UniqueOpts: river.UniqueOpts{ByArgs: true}},
+	)
+	if err != nil {
+		return fmt.Errorf("enqueue cancel-challenge for pairing %s: %w", pairingID.String(), err)
+	}
+	return nil
+}
+
 // NewClient builds the river client `serve` runs: one queue, one worker
 // at a time (Lichess wants a single request at a time — spec §3.4), and
 // the periodic jobs. pairingCron is the pairing.cron setting; it is
@@ -258,6 +289,9 @@ func NewClient(
 	river.AddWorker(workers, river.WorkFunc(func(ctx context.Context, job *river.Job[CreateGamesArgs]) error {
 		// Attempt counts from 1 while the job runs.
 		return h.CreateGames(ctx, job.Args, job.Attempt >= job.MaxAttempts, job.ID)
+	}))
+	river.AddWorker(workers, river.WorkFunc(func(ctx context.Context, job *river.Job[CancelChallengeArgs]) error {
+		return h.CancelChallenge(ctx, job.Args.PairingID, job.ID)
 	}))
 
 	return river.NewClient(riverpgxv5.New(pool), &river.Config{

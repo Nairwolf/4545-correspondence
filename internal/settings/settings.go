@@ -143,6 +143,11 @@ type Settings struct {
 	// paired, before they are left out with no_valid_token (spec §3.3).
 	// Read only under GameCreationLichess.
 	TokenInvalidGraceDays int
+
+	// MissedStartsToPause is activity.missed_starts_to_pause (default
+	// 2): how many missed starts in a row auto-pause a player, with a
+	// warning one before (spec §6.4). At least 1.
+	MissedStartsToPause int
 }
 
 // Defaults are the spec §4.2 values, for a database with no override
@@ -169,6 +174,8 @@ func Defaults() Settings {
 		GameCreation:      GameCreationManual,
 
 		TokenInvalidGraceDays: 14,
+
+		MissedStartsToPause: 2,
 	}
 }
 
@@ -201,6 +208,8 @@ const (
 	keyGameCreation      = "pairing.game_creation"
 
 	keyTokenInvalidGraceDays = "token.invalid_grace_days"
+
+	keyMissedStartsToPause = "activity.missed_starts_to_pause"
 )
 
 // keys is every setting this package reads. Load ignores an
@@ -213,7 +222,7 @@ var keys = []string{
 	keyPairingCron, keyPairingMode, keyReviewWindowHours,
 	keyAvoidRecentRounds, keyColorWeight, keyRepeatPenalty,
 	keyOddPoolStrategy, keySolver, keyRated, keyGameCreation,
-	keyTokenInvalidGraceDays,
+	keyTokenInvalidGraceDays, keyMissedStartsToPause,
 }
 
 // Known reports whether key is a setting this package understands.
@@ -339,6 +348,17 @@ func applyOverride(s *Settings, key string, value []byte) error {
 
 	case keyTokenInvalidGraceDays:
 		return unmarshalNonNegative(value, &s.TokenInvalidGraceDays)
+
+	case keyMissedStartsToPause:
+		var v int
+		if err := json.Unmarshal(value, &v); err != nil {
+			return err
+		}
+		if v < 1 {
+			return fmt.Errorf("must be >= 1, got %d (0 would pause a player who never missed a start)", v)
+		}
+		s.MissedStartsToPause = v
+		return nil
 
 	default:
 		return nil // unknown key: not this package's concern yet

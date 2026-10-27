@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/riverqueue/river"
 
 	"github.com/nairwolf/4545-correspondence/internal/config"
@@ -93,7 +94,7 @@ func runServe(ctx context.Context, cfg config.Config) error {
 			return runRecompute(ctx, pool, &id)
 		},
 		GenerateRound: func(ctx context.Context, id int64) error {
-			return runGenerateRound(ctx, pool, gen.RoundSourceSchedule, jobs.NewScheduler(riverClient), &id)
+			return runGenerateRound(ctx, pool, client, gen.RoundSourceSchedule, jobs.NewScheduler(riverClient), &id)
 		},
 		PublishRound: func(ctx context.Context, roundID int32, id int64) error {
 			return runPublishRound(ctx, pool, roundID, jobs.NewScheduler(riverClient), &id)
@@ -112,6 +113,9 @@ func runServe(ctx context.Context, cfg config.Config) error {
 				Scheduler: jobs.NewScheduler(riverClient),
 			}
 			return runCreateGames(ctx, pool, creator, args, lastAttempt, &id)
+		},
+		CancelChallenge: func(ctx context.Context, pairingID pgtype.UUID, id int64) error {
+			return runCancelChallenge(ctx, pool, client, tokenKey, pairingID, &id)
 		},
 	}, league.PairingCron, slog.Default())
 	if err != nil {

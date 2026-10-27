@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -138,4 +139,31 @@ func TestScheduler_QueuesASyncGamesRun(t *testing.T) {
 	require.NoError(t, NewScheduler(client).ScheduleSyncGames(ctx, tx))
 	require.NoError(t, tx.QueryRow(ctx, `SELECT count(*) FROM river_job WHERE kind = 'sync-games'`).Scan(&after))
 	assert.Equal(t, before+1, after)
+}
+
+func TestScheduler_WithdrawsAPairingsChallengeOnce(t *testing.T) {
+	// Spec §6.4: a pairing's challenge is withdrawn once. Asking again —
+	// a second evaluation, an admin's Mark failed after it — adds
+	// nothing, even after the first job has finished.
+	pool, tx := testPoolAndTx(t)
+	ctx := context.Background()
+
+	client, err := NewInsertClient(pool)
+	require.NoError(t, err)
+	sched := NewScheduler(client)
+	var pairing pgtype.UUID
+	require.NoError(t, pairing.Scan("6f1c1c6e-0000-4000-8000-000000000042"))
+
+	require.NoError(t, sched.ScheduleCancelChallenge(ctx, tx, pairing))
+	_, err = tx.Exec(ctx, `
+		UPDATE river_job SET state = 'completed', finalized_at = now()
+		WHERE kind = 'cancel-challenge' AND args->>'pairing_id' = $1`, pairing.String())
+	require.NoError(t, err)
+	require.NoError(t, sched.ScheduleCancelChallenge(ctx, tx, pairing))
+
+	var count int
+	require.NoError(t, tx.QueryRow(ctx, `
+		SELECT count(*) FROM river_job
+		WHERE kind = 'cancel-challenge' AND args->>'pairing_id' = $1`, pairing.String()).Scan(&count))
+	assert.Equal(t, 1, count)
 }

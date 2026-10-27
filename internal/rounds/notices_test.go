@@ -19,8 +19,8 @@ func TestByeSentence(t *testing.T) {
 
 func TestTimeControl(t *testing.T) {
 	assert.Equal(t, "a rated correspondence game at 2 days per move",
-		timeControl(Snapshot{Rated: true, DaysPerMove: 2}))
+		TimeControl(Snapshot{Rated: true, DaysPerMove: 2}))
 	assert.Equal(t, "a casual correspondence game at 1 day per move",
-		timeControl(Snapshot{Rated: false, DaysPerMove: 1}))
-	assert.Equal(t, "a correspondence game", timeControl(Snapshot{}), "no snapshot")
+		TimeControl(Snapshot{Rated: false, DaysPerMove: 1}))
+	assert.Equal(t, "a correspondence game", TimeControl(Snapshot{}), "no snapshot")
 }

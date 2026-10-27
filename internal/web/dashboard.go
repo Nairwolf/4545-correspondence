@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/nairwolf/4545-correspondence/internal/activity"
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
 	"github.com/nairwolf/4545-correspondence/internal/rounds"
 	"github.com/nairwolf/4545-correspondence/internal/settings"
@@ -52,6 +53,9 @@ type dashboardData struct {
 
 	ThisWeek    thisWeekView
 	DoubleGames string // "You've played N double games so far.", empty when none
+	// MissedStartWarning is spec §6.4's warning to a player one missed
+	// start from auto-pause, shown under This week; empty otherwise.
+	MissedStartWarning string
 
 	// NotificationPrefs are the opt-out checkboxes (spec §10), shown
 	// with the other settings when CanConfigure.
@@ -355,10 +359,24 @@ func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, status 
 		}
 	}
 
+	// Read on each request, so the page follows a setting changed with
+	// `ic setting` as soon as the next generation would.
+	cfg, err := settings.Load(ctx, s.q)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+
 	if user.Status == gen.UserStatusApproved {
 		if data.ThisWeek, err = thisWeekFor(ctx, s.q, user.ID); err != nil {
 			serverError(w, err)
 			return
+		}
+		if !profile.AutoPausedAt.Valid {
+			if data.MissedStartWarning, err = missedStartWarning(ctx, s.q, user.ID, cfg); err != nil {
+				serverError(w, err)
+				return
+			}
 		}
 		doubles, err := s.q.CountDoubleGamesForUser(ctx, user.ID)
 		if err != nil {
@@ -379,7 +397,7 @@ func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, status 
 		data.NotificationPrefs = notificationPrefsFor(muted)
 	}
 
-	if err := s.loadTokenStatus(ctx, &data); err != nil {
+	if err := s.loadTokenStatus(ctx, cfg, &data); err != nil {
 		serverError(w, err)
 		return
 	}
@@ -388,16 +406,31 @@ func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, status 
 	s.render(w, "account", data)
 }
 
+// missedStartWarning words spec §6.4's warning for a player one missed
+// start from auto-pause, with the same rule evaluate-activity applies;
+// it is empty for everyone else.
+func missedStartWarning(
+	ctx context.Context,
+	q *gen.Queries,
+	userID pgtype.UUID,
+	cfg settings.Settings,
+) (string, error) {
+	run, err := activity.Current(ctx, q, userID)
+	if err != nil || activity.Decide(len(run), cfg.MissedStartsToPause) != activity.Warn {
+		return "", err
+	}
+	return fmt.Sprintf(
+		"You didn't accept your challenge in round %d, so it counts as a missed start. If your next one goes unanswered too, your quest will be paused.",
+		run[len(run)-1].Round,
+	), nil
+}
+
 // loadTokenStatus fills the dashboard's Lichess authorisation fields
 // with the same rule the pairing pool applies (internal/tokenhealth).
-// The settings are read here rather than at start-up, so the banner
+// cfg is read per request rather than at start-up, so the banner
 // follows pairing.game_creation as soon as it is changed, as the next
 // generation will.
-func (s *Server) loadTokenStatus(ctx context.Context, data *dashboardData) error {
-	cfg, err := settings.Load(ctx, s.q)
-	if err != nil {
-		return err
-	}
+func (s *Server) loadTokenStatus(ctx context.Context, cfg settings.Settings, data *dashboardData) error {
 	data.GameCreation = cfg.GameCreation == settings.GameCreationLichess
 
 	now := time.Now()
@@ -576,15 +609,20 @@ func (s *Server) handleSetDoubleGames(w http.ResponseWriter, r *http.Request) {
 
 // handleResume clears an auto-pause (spec §8.3 "Resume quest"). Only
 // meaningful while auto-paused: otherwise nothing changes and nothing
-// is audited. auto_paused_at is an input to is_eligible, so the
-// standing is recomputed in the same transaction, as for activity.
+// is audited. It also records when, so the missed starts before it no
+// longer count towards the next pause (spec §6.4). auto_paused_at is an
+// input to is_eligible, so the standing is recomputed in the same
+// transaction, as for activity.
 func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 	user, profile, ok := s.settingsRequest(w, r)
 	if !ok {
 		return
 	}
 	err := s.inTx(r.Context(), func(q *gen.Queries) error {
-		n, err := q.ClearAutoPause(r.Context(), user.ID)
+		n, err := q.ClearAutoPause(r.Context(), gen.ClearAutoPauseParams{
+			UserID:    user.ID,
+			ResumedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		})
 		if err != nil || n == 0 {
 			return err
 		}

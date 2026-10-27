@@ -35,6 +35,7 @@ func TestApplyOverride(t *testing.T) {
 	requireNoError(applyOverride(&s, keyRated, []byte(`false`)))
 	requireNoError(applyOverride(&s, keyGameCreation, []byte(`"lichess"`)))
 	requireNoError(applyOverride(&s, keyTokenInvalidGraceDays, []byte(`0`)))
+	requireNoError(applyOverride(&s, keyMissedStartsToPause, []byte(`1`)))
 	requireNoError(applyOverride(&s, "some.unknown.key", []byte(`"ignored"`)))
 
 	assert.Equal(t, 10, s.LastK)
@@ -55,6 +56,7 @@ func TestApplyOverride(t *testing.T) {
 	assert.False(t, s.Rated)
 	assert.Equal(t, GameCreationLichess, s.GameCreation)
 	assert.Equal(t, 0, s.TokenInvalidGraceDays, "no grace at all is allowed")
+	assert.Equal(t, 1, s.MissedStartsToPause, "pausing at the first miss is allowed")
 }
 
 func TestApplyOverride_RejectsInvalidPairingValues(t *testing.T) {
@@ -85,6 +87,9 @@ func TestApplyOverride_RejectsInvalidPairingValues(t *testing.T) {
 		{"game creation: wrong type", keyGameCreation, `true`},
 		{"token grace: negative", keyTokenInvalidGraceDays, `-1`},
 		{"token grace: wrong type", keyTokenInvalidGraceDays, `"14"`},
+		{"missed starts to pause: zero", keyMissedStartsToPause, `0`},
+		{"missed starts to pause: negative", keyMissedStartsToPause, `-2`},
+		{"missed starts to pause: wrong type", keyMissedStartsToPause, `"2"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -125,6 +130,7 @@ func TestDefaults_MatchSpecSection4_2(t *testing.T) {
 	assert.True(t, d.Rated)
 	assert.Equal(t, GameCreationManual, d.GameCreation)
 	assert.Equal(t, 14, d.TokenInvalidGraceDays)
+	assert.Equal(t, 2, d.MissedStartsToPause)
 }
 
 func TestKnown(t *testing.T) {

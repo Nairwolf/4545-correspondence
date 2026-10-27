@@ -655,6 +655,14 @@ type JobRun struct {
 	Detail         []byte             `json:"detail"`
 }
 
+type MissedStart struct {
+	ID         int64              `json:"id"`
+	UserID     pgtype.UUID        `json:"user_id"`
+	RoundID    int32              `json:"round_id"`
+	PairingID  pgtype.UUID        `json:"pairing_id"`
+	RecordedAt pgtype.Timestamptz `json:"recorded_at"`
+}
+
 type Notification struct {
 	ID        int64              `json:"id"`
 	UserID    pgtype.UUID        `json:"user_id"`
@@ -710,6 +718,7 @@ type PlayerProfile struct {
 	AutoPausedAt       pgtype.Timestamptz `json:"auto_paused_at"`
 	Timezone           *string            `json:"timezone"`
 	JoinedAt           pgtype.Timestamptz `json:"joined_at"`
+	ResumedAt          pgtype.Timestamptz `json:"resumed_at"`
 }
 
 type PlayerStanding struct {

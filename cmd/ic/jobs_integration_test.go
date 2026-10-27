@@ -14,6 +14,7 @@ import (
 
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
 	"github.com/nairwolf/4545-correspondence/internal/jobs"
+	"github.com/nairwolf/4545-correspondence/internal/lichess"
 )
 
 // jobRunByRiverID reads back the job_runs row a job wrote, found by the
@@ -118,7 +119,14 @@ func TestRunGenerateRound_TheCLIQueuesThePublication(t *testing.T) {
 	enqueuer, err := jobs.NewInsertClient(pool)
 	require.NoError(t, err)
 
-	require.NoError(t, runGenerateRound(ctx, tx, gen.RoundSourceManual, jobs.NewScheduler(enqueuer), nil))
+	require.NoError(t, runGenerateRound(
+		ctx,
+		tx,
+		lichess.NewFake(),
+		gen.RoundSourceManual,
+		jobs.NewScheduler(enqueuer),
+		nil,
+	))
 
 	draft, err := q.GetDraftRound(ctx)
 	require.NoError(t, err)

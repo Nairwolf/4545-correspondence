@@ -81,10 +81,10 @@ UPDATE pairings SET match_ambiguous = true WHERE id = $1;
 UPDATE pairings SET status = 'failed' WHERE id = $1;
 
 -- name: MarkPublishedPairingFailed :one
--- The admin stand-in for Phase 5's missed-start job (spec §8.5,
--- decision 7): only a PUBLISHED round's still-PENDING pairing can be
--- marked failed by hand — one already picked up by sync-games has a
--- game and is no longer this button's business.
+-- The admin's Mark failed (spec §8.5): only a PUBLISHED round's
+-- still-PENDING pairing can be marked failed by hand — one already
+-- picked up by sync-games has a game and is no longer this button's
+-- business.
 UPDATE pairings SET status = 'failed'
 WHERE pairings.id = $1 AND pairings.status = 'pending' AND pairings.round_id = $2
   AND EXISTS (SELECT 1 FROM rounds r WHERE r.id = $2 AND r.state = 'published')

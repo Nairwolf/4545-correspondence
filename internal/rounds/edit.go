@@ -225,17 +225,23 @@ func SwapPairings(
 	return auditRound(ctx, q, "pairing.swap", actor, round, before, after)
 }
 
-// MarkFailed is the admin stand-in for Phase 5's missed-start job
-// (decision 7): a published round's still-pending pairing — one
-// nobody ever started — is marked failed by hand. It does not touch
+// MarkFailed is the admin's Mark failed (spec §8.5): a published
+// round's still-pending pairing is marked failed by hand. Since Phase 5
+// evaluate-activity retires every unstarted pairing at the next
+// generation (§6.4); the button stays for exceptions. It does not touch
 // capacity or exclusions; the player simply drops out of the in-flight
-// count once the pairing is no longer pending (spec §5.8 decision 7).
+// count once the pairing is no longer pending (spec §5.8). A challenge
+// pairing's challenge is withdrawn on Lichess by a cancel-challenge job
+// queued in the same transaction, as for a missed start, so a late
+// acceptance cannot create a game no pairing counts. No missed start
+// is recorded: the admin, not the player, ended it.
 func MarkFailed(
 	ctx context.Context,
 	tx pgx.Tx,
 	roundID int32,
 	pairingID pgtype.UUID,
 	actor pgtype.UUID,
+	sched Scheduler,
 ) (gen.Pairing, error) {
 	q := gen.New(tx)
 
@@ -250,6 +256,15 @@ func MarkFailed(
 		return gen.Pairing{}, fmt.Errorf("mark pairing failed: %w", err)
 	}
 
+	if after.CreationMethod == gen.PairingMethodChallenge {
+		if sched == nil {
+			return gen.Pairing{}, errNoSchedulerToWithdraw
+		}
+		if err := sched.ScheduleCancelChallenge(ctx, tx, pairingID); err != nil {
+			return gen.Pairing{}, fmt.Errorf("queue the challenge's withdrawal: %w", err)
+		}
+	}
+
 	before := map[string]any{"status": string(gen.PairingStatusPending)}
 	afterDetail := map[string]any{"status": string(after.Status)}
 	if err := auditPairing(ctx, q, "pairing.fail", actor, pairingID, before, afterDetail); err != nil {
@@ -257,6 +272,12 @@ func MarkFailed(
 	}
 	return after, nil
 }
+
+// errNoSchedulerToWithdraw refuses to mark a challenge pairing failed
+// without a job queue: its challenge would stay open on Lichess.
+var errNoSchedulerToWithdraw = errors.New(
+	"no job queue to withdraw the challenge on Lichess: marking a challenge pairing failed needs one",
+)
 
 // playerSnapshot is the colour-relevant slice of a player's current
 // standing: just enough for pairing.AssignColours. A player with no

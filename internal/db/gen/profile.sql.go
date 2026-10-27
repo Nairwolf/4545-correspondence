@@ -12,15 +12,22 @@ import (
 )
 
 const clearAutoPause = `-- name: ClearAutoPause :execrows
-UPDATE player_profiles SET auto_paused_at = NULL
+UPDATE player_profiles SET auto_paused_at = NULL, resumed_at = $2
 WHERE user_id = $1 AND auto_paused_at IS NOT NULL
 `
 
+type ClearAutoPauseParams struct {
+	UserID    pgtype.UUID        `json:"user_id"`
+	ResumedAt pgtype.Timestamptz `json:"resumed_at"`
+}
+
 // "Resume quest" (spec §8.3): only meaningful while auto-paused, so a
 // stale double-submit changes nothing and the caller can tell from the
-// row count that there is nothing to audit.
-func (q *Queries) ClearAutoPause(ctx context.Context, userID pgtype.UUID) (int64, error) {
-	result, err := q.db.Exec(ctx, clearAutoPause, userID)
+// row count that there is nothing to audit. resumed_at is the moment:
+// the missed starts before it no longer count towards the next
+// auto-pause (spec §6.4).
+func (q *Queries) ClearAutoPause(ctx context.Context, arg ClearAutoPauseParams) (int64, error) {
+	result, err := q.db.Exec(ctx, clearAutoPause, arg.UserID, arg.ResumedAt)
 	if err != nil {
 		return 0, err
 	}
@@ -28,7 +35,7 @@ func (q *Queries) ClearAutoPause(ctx context.Context, userID pgtype.UUID) (int64
 }
 
 const setPlayerAcceptsDouble = `-- name: SetPlayerAcceptsDouble :one
-UPDATE player_profiles SET accepts_double_game = $2 WHERE user_id = $1 RETURNING user_id, is_active, max_concurrent_games, accepts_double_game, paused_by_admin, paused_reason, auto_paused_at, timezone, joined_at
+UPDATE player_profiles SET accepts_double_game = $2 WHERE user_id = $1 RETURNING user_id, is_active, max_concurrent_games, accepts_double_game, paused_by_admin, paused_reason, auto_paused_at, timezone, joined_at, resumed_at
 `
 
 type SetPlayerAcceptsDoubleParams struct {
@@ -51,13 +58,14 @@ func (q *Queries) SetPlayerAcceptsDouble(ctx context.Context, arg SetPlayerAccep
 		&i.AutoPausedAt,
 		&i.Timezone,
 		&i.JoinedAt,
+		&i.ResumedAt,
 	)
 	return i, err
 }
 
 const setPlayerActive = `-- name: SetPlayerActive :one
 
-UPDATE player_profiles SET is_active = $2 WHERE user_id = $1 RETURNING user_id, is_active, max_concurrent_games, accepts_double_game, paused_by_admin, paused_reason, auto_paused_at, timezone, joined_at
+UPDATE player_profiles SET is_active = $2 WHERE user_id = $1 RETURNING user_id, is_active, max_concurrent_games, accepts_double_game, paused_by_admin, paused_reason, auto_paused_at, timezone, joined_at, resumed_at
 `
 
 type SetPlayerActiveParams struct {
@@ -84,12 +92,13 @@ func (q *Queries) SetPlayerActive(ctx context.Context, arg SetPlayerActiveParams
 		&i.AutoPausedAt,
 		&i.Timezone,
 		&i.JoinedAt,
+		&i.ResumedAt,
 	)
 	return i, err
 }
 
 const setPlayerCapacity = `-- name: SetPlayerCapacity :one
-UPDATE player_profiles SET max_concurrent_games = $2 WHERE user_id = $1 RETURNING user_id, is_active, max_concurrent_games, accepts_double_game, paused_by_admin, paused_reason, auto_paused_at, timezone, joined_at
+UPDATE player_profiles SET max_concurrent_games = $2 WHERE user_id = $1 RETURNING user_id, is_active, max_concurrent_games, accepts_double_game, paused_by_admin, paused_reason, auto_paused_at, timezone, joined_at, resumed_at
 `
 
 type SetPlayerCapacityParams struct {
@@ -114,6 +123,7 @@ func (q *Queries) SetPlayerCapacity(ctx context.Context, arg SetPlayerCapacityPa
 		&i.AutoPausedAt,
 		&i.Timezone,
 		&i.JoinedAt,
+		&i.ResumedAt,
 	)
 	return i, err
 }

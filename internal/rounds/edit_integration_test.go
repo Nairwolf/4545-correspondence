@@ -238,7 +238,7 @@ func TestMarkFailed_OnlyPublishedPendingPairings(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, stored, 1)
 
-		_, err = rounds.MarkFailed(ctx, tx, draft.ID, stored[0].ID, pgtype.UUID{})
+		_, err = rounds.MarkFailed(ctx, tx, draft.ID, stored[0].ID, pgtype.UUID{}, nil)
 		assert.ErrorIs(t, err, rounds.ErrNotFound)
 
 		_, cancelErr := rounds.Cancel(ctx, tx, draft.ID, "cleanup", pgtype.UUID{})
@@ -253,12 +253,12 @@ func TestMarkFailed_OnlyPublishedPendingPairings(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, stored, 1)
 
-		failed, err := rounds.MarkFailed(ctx, tx, round.ID, stored[0].ID, pgtype.UUID{})
+		failed, err := rounds.MarkFailed(ctx, tx, round.ID, stored[0].ID, pgtype.UUID{}, nil)
 		require.NoError(t, err)
 		assert.Equal(t, gen.PairingStatusFailed, failed.Status)
 
 		// Idempotent-in-spirit: a second call finds nothing pending left.
-		_, err = rounds.MarkFailed(ctx, tx, round.ID, stored[0].ID, pgtype.UUID{})
+		_, err = rounds.MarkFailed(ctx, tx, round.ID, stored[0].ID, pgtype.UUID{}, nil)
 		assert.ErrorIs(t, err, rounds.ErrNotFound)
 	})
 }

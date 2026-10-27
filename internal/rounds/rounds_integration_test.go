@@ -142,11 +142,13 @@ func addRound(t *testing.T, tx pgx.Tx, state gen.RoundState, pairs [][2]gen.User
 // regeneration does not lose it, and that a round whose games the site
 // creates gets its create-games job. busy stands for a create-games job
 // already waiting for a round, which river would refuse to duplicate.
+// cancels lists the pairings whose challenge was to be withdrawn.
 type fakeScheduler struct {
-	calls  []scheduled
-	create []scheduledCreation
-	syncs  int
-	busy   map[int32]bool
+	calls   []scheduled
+	create  []scheduledCreation
+	syncs   int
+	cancels []pgtype.UUID
+	busy    map[int32]bool
 }
 
 type scheduled struct {
@@ -174,6 +176,11 @@ func (f *fakeScheduler) ScheduleCreateGames(_ context.Context, _ pgx.Tx, roundID
 
 func (f *fakeScheduler) ScheduleSyncGames(_ context.Context, _ pgx.Tx) error {
 	f.syncs++
+	return nil
+}
+
+func (f *fakeScheduler) ScheduleCancelChallenge(_ context.Context, _ pgx.Tx, pairingID pgtype.UUID) error {
+	f.cancels = append(f.cancels, pairingID)
 	return nil
 }
 

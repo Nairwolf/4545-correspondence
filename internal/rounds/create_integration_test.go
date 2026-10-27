@@ -787,7 +787,7 @@ func (m markingFailedMidCall) CreateBulkPairing(
 	organiser tokencrypt.Secret,
 	req lichess.BulkPairingRequest,
 ) (lichess.BulkPairing, error) {
-	_, err := rounds.MarkFailed(ctx, m.tx, m.pairing.RoundID, m.pairing.ID, pgtype.UUID{})
+	_, err := rounds.MarkFailed(ctx, m.tx, m.pairing.RoundID, m.pairing.ID, pgtype.UUID{}, &fakeScheduler{})
 	require.NoError(m.t, err)
 	return m.Fake.CreateBulkPairing(ctx, organiser, req)
 }
@@ -798,7 +798,7 @@ func (m markingFailedMidCall) CreateChallenge(
 	opponent string,
 	req lichess.ChallengeRequest,
 ) (lichess.Challenge, error) {
-	_, err := rounds.MarkFailed(ctx, m.tx, m.pairing.RoundID, m.pairing.ID, pgtype.UUID{})
+	_, err := rounds.MarkFailed(ctx, m.tx, m.pairing.RoundID, m.pairing.ID, pgtype.UUID{}, &fakeScheduler{})
 	require.NoError(m.t, err)
 	return m.Fake.CreateChallenge(ctx, challenger, opponent, req)
 }
@@ -843,6 +843,43 @@ func TestCreateGames_AnAdminsMarkFailedDuringAChallengeWins(t *testing.T) {
 	assert.Zero(t, report.Challenges)
 	assert.Empty(t, noticesOf(t, c.tx, alpha))
 	assert.Empty(t, noticesOf(t, c.tx, bravo))
+}
+
+func TestMarkFailed_WithdrawsAChallenge(t *testing.T) {
+	// An admin's Mark failed on a challenge pairing queues its
+	// withdrawal on Lichess in the same transaction, as a missed start
+	// does, so a late acceptance cannot create a game nobody counts.
+	// Without a job queue it refuses rather than leave it open.
+	c := newCreation(t)
+	ctx := context.Background()
+	alpha := c.player(t, "alpha", 2000)
+	bravo := c.player(t, "bravo", 1900)
+	charlie := c.player(t, "charlie", 1800)
+	delta := c.player(t, "delta", 1700)
+	exec(t, c.tx, `UPDATE oauth_tokens SET revoked_at = now() WHERE user_id IN ($1, $2)`, bravo.ID, delta.ID)
+	exec(t, c.tx, `DELETE FROM oauth_tokens WHERE user_id = $1`, charlie.ID)
+	round, pairings := c.creatingRound(t, twoDaysRated, [2]gen.User{alpha, bravo}, [2]gen.User{charlie, delta})
+	c.run(t, round, false)
+	challenged, byHand := c.pairing(t, pairings[0]), c.pairing(t, pairings[1])
+	require.Equal(t, gen.PairingMethodChallenge, challenged.CreationMethod)
+	require.Equal(t, gen.PairingMethodManualExternal, byHand.CreationMethod)
+
+	// The refusal is an error the caller rolls back, as the web handler
+	// does: here, a savepoint.
+	attempt, err := c.tx.Begin(ctx)
+	require.NoError(t, err)
+	_, err = rounds.MarkFailed(ctx, attempt, round.ID, challenged.ID, pgtype.UUID{}, nil)
+	require.Error(t, err, "no job queue: the challenge would stay open")
+	require.NoError(t, attempt.Rollback(ctx))
+
+	sched := &fakeScheduler{}
+	_, err = rounds.MarkFailed(ctx, c.tx, round.ID, challenged.ID, pgtype.UUID{}, sched)
+	require.NoError(t, err)
+	_, err = rounds.MarkFailed(ctx, c.tx, round.ID, byHand.ID, pgtype.UUID{}, sched)
+	require.NoError(t, err)
+
+	assert.Equal(t, []pgtype.UUID{challenged.ID}, sched.cancels, "only the challenge has anything to withdraw")
+	assert.Equal(t, gen.PairingStatusFailed, c.pairing(t, challenged).Status)
 }
 
 func TestCreateGames_SwitchedOffGivesTheGamesUpToThePlayers(t *testing.T) {

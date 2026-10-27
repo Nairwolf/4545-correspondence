@@ -92,7 +92,7 @@ func notifyPublished(ctx context.Context, q *gen.Queries, round gen.Round) error
 		if len(games) == 0 {
 			continue
 		}
-		next := fmt.Sprintf("Start each on Lichess as %s; the site finds them by itself once they begin.", timeControl(snap))
+		next := fmt.Sprintf("Start each on Lichess as %s; the site finds them by itself once they begin.", TimeControl(snap))
 		if creating {
 			next = "The league is creating them on Lichess; you'll be told when each is ready."
 		}
@@ -163,11 +163,11 @@ const (
 // pairing's "paired" event, like createdNotice's, so each player is
 // told once how their game is made.
 func byHandNotice(round gen.Round, snap Snapshot, pairingID pgtype.UUID, s side, reason byHandReason) notify.Notice {
-	start := fmt.Sprintf("Start it on Lichess as %s, you with %s.", timeControl(snap), s.colour)
+	start := fmt.Sprintf("Start it on Lichess as %s, you with %s.", TimeControl(snap), s.colour)
 	if reason == notCreated {
 		start = fmt.Sprintf(
 			"The league couldn't create this game on Lichess, so please start it by hand as %s, you with %s.",
-			timeControl(snap),
+			TimeControl(snap),
 			s.colour,
 		)
 	}
@@ -200,17 +200,17 @@ func createdNotice(
 		Title:    fmt.Sprintf("Round %d: your game against %s is ready", round.Number, s.opponent),
 		Body: fmt.Sprintf(
 			"The league has created it on Lichess: %s, you with %s. It's already in your list of games there, so there's nothing to start.",
-			timeControl(snap),
+			TimeControl(snap),
 			s.colour,
 		),
-		Link: lichessGameURL + gameID,
+		Link: GameURL(gameID),
 		Key:  pairedKey(round, pairingID),
 	}
 	if retry {
 		n.Title = fmt.Sprintf("Round %d: your game against %s has now been created", round.Number, s.opponent)
 		n.Body = fmt.Sprintf(
 			"The league has now created it on Lichess: %s, you with %s. Don't start another one by hand.",
-			timeControl(snap),
+			TimeControl(snap),
 			s.colour,
 		)
 		n.Key = createdKey(round, pairingID)
@@ -243,10 +243,10 @@ func challengeNotices(
 			"The league couldn't create this game directly, so it has challenged %s from your Lichess account instead: %s, you with %s. "+
 				"The game starts once they accept. There's nothing for you to do, but please don't cancel the challenge.",
 			from.opponent,
-			timeControl(snap),
+			TimeControl(snap),
 			from.colour,
 		),
-		Link: lichessGameURL + challengeID,
+		Link: GameURL(challengeID),
 		Key:  pairedKey(round, pairingID),
 	}
 	opponent := notify.Notice{
@@ -257,10 +257,10 @@ func challengeNotices(
 			"The league couldn't create your game against %s directly, so it has sent you a challenge from their account instead: %s, you with %s. "+
 				"Accept it on Lichess to start the game. Re-authorise from your account page and the league can create your next games directly.",
 			to.opponent,
-			timeControl(snap),
+			TimeControl(snap),
 			to.colour,
 		),
-		Link: lichessGameURL + challengeID,
+		Link: GameURL(challengeID),
 		Key:  pairedKey(round, pairingID),
 	}
 	if retry {
@@ -268,14 +268,14 @@ func challengeNotices(
 		challenger.Body = fmt.Sprintf(
 			"It has challenged %s from your Lichess account: %s, you with %s. The game starts once they accept. Don't start another one by hand.",
 			from.opponent,
-			timeControl(snap),
+			TimeControl(snap),
 			from.colour,
 		)
 		challenger.Key = createdKey(round, pairingID)
 		opponent.Body = fmt.Sprintf(
 			"The league has now sent you a challenge from %s's account: %s, you with %s. Accept it on Lichess to start the game, and don't start another one by hand.",
 			to.opponent,
-			timeControl(snap),
+			TimeControl(snap),
 			to.colour,
 		)
 		opponent.Key = createdKey(round, pairingID)
@@ -283,8 +283,9 @@ func challengeNotices(
 	return [2]notify.Notice{challenger, opponent}
 }
 
-// lichessGameURL prefixes a game id to link to the game.
-const lichessGameURL = "https://lichess.org/"
+// GameURL links to a game on Lichess, or to a challenge, whose id is
+// the game's once accepted.
+func GameURL(gameID string) string { return "https://lichess.org/" + gameID }
 
 func pairedKey(round gen.Round, pairingID pgtype.UUID) string {
 	return fmt.Sprintf("round:%d:paired:%s", round.Number, pairingID.String())
@@ -294,10 +295,10 @@ func createdKey(round gen.Round, pairingID pgtype.UUID) string {
 	return fmt.Sprintf("round:%d:created:%s", round.Number, pairingID.String())
 }
 
-// timeControl names the game to start, from the settings the round was
+// TimeControl names the game to start, from the settings the round was
 // generated under. A round without a snapshot (never published through
 // here) falls back to the plain words.
-func timeControl(snap Snapshot) string {
+func TimeControl(snap Snapshot) string {
 	if snap.DaysPerMove == 0 {
 		return "a correspondence game"
 	}

@@ -88,11 +88,15 @@ func TestAdminRounds_GenerateAndView(t *testing.T) {
 	assert.Contains(t, body, "Bravo")
 	assert.Contains(t, body, "Draft")
 
+	// Generate now evaluates activity first, on a job run of its own
+	// (spec §6.4), then records the generation like the weekly job.
 	runs, err := q.ListRecentJobRuns(context.Background(), 20)
 	require.NoError(t, err)
-	require.NotEmpty(t, runs)
-	assert.Equal(t, "generate-round", runs[0].JobName)
-	assert.Equal(t, gen.JobRunStatusSucceeded, runs[0].Status)
+	generation := latestRun(t, runs, "generate-round")
+	evaluation := latestRun(t, runs, "evaluate-activity")
+	assert.Equal(t, gen.JobRunStatusSucceeded, generation.Status)
+	assert.Equal(t, gen.JobRunStatusSucceeded, evaluation.Status)
+	assert.Less(t, evaluation.ID, generation.ID, "evaluated before generating")
 }
 
 func TestAdminRounds_GenerateTwiceFails(t *testing.T) {
@@ -118,7 +122,7 @@ func TestAdminRounds_GenerateTwiceFails(t *testing.T) {
 	// so is identical for both rows. The row ids are still monotonic.
 	runs, err := q.ListRecentJobRuns(context.Background(), 20)
 	require.NoError(t, err)
-	latest := latestGenerateRoundRun(t, runs)
+	latest := latestRun(t, runs, "generate-round")
 	assert.Equal(t, gen.JobRunStatusFailed, latest.Status, "a second generation is a FAILED run, not a silent no-op")
 }
 
@@ -189,6 +193,8 @@ func TestAdminRounds_Regenerate(t *testing.T) {
 type recordingScheduler struct {
 	calls     []scheduledPublish
 	creations []scheduledCreation
+	// cancels lists the pairings whose challenge was to be withdrawn.
+	cancels []pgtype.UUID
 	// busy stands for a create-games job already waiting, which river
 	// would refuse to duplicate.
 	busy bool
@@ -218,6 +224,11 @@ func (s *recordingScheduler) ScheduleCreateGames(_ context.Context, _ pgx.Tx, ro
 }
 
 func (s *recordingScheduler) ScheduleSyncGames(_ context.Context, _ pgx.Tx) error { return nil }
+
+func (s *recordingScheduler) ScheduleCancelChallenge(_ context.Context, _ pgx.Tx, pairingID pgtype.UUID) error {
+	s.cancels = append(s.cancels, pairingID)
+	return nil
+}
 
 func TestAdminRounds_GenerateNowSchedulesThePublication(t *testing.T) {
 	// Spec §8.5 (Phase 5): a draft made with Generate now publishes when
@@ -486,7 +497,7 @@ func TestAdminRounds_ABadSolverSettingFailsVisibly(t *testing.T) {
 
 	runs, err := q.ListRecentJobRuns(context.Background(), 20)
 	require.NoError(t, err)
-	latest := latestGenerateRoundRun(t, runs)
+	latest := latestRun(t, runs, "generate-round")
 	assert.Equal(t, gen.JobRunStatusFailed, latest.Status)
 	require.NotNil(t, latest.Error)
 	assert.Contains(t, *latest.Error, "pairing.solver", "the failed run names the bad key on /admin/jobs")
@@ -512,15 +523,17 @@ func meetInLastRound(t *testing.T, q *gen.Queries, a, b gen.User) {
 	require.NoError(t, err)
 }
 
-func latestGenerateRoundRun(t *testing.T, runs []gen.JobRun) gen.JobRun {
+// latestRun finds the latest run of the named job by its id: runs
+// started in a test's one transaction share their started_at.
+func latestRun(t *testing.T, runs []gen.JobRun, name string) gen.JobRun {
 	t.Helper()
 	var latest gen.JobRun
 	for _, r := range runs {
-		if r.JobName == "generate-round" && r.ID > latest.ID {
+		if r.JobName == name && r.ID > latest.ID {
 			latest = r
 		}
 	}
-	require.NotZero(t, latest.ID, "no generate-round run recorded")
+	require.NotZero(t, latest.ID, "no %s run recorded", name)
 	return latest
 }
 

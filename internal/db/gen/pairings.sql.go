@@ -292,10 +292,10 @@ type MarkPublishedPairingFailedParams struct {
 	RoundID int32       `json:"round_id"`
 }
 
-// The admin stand-in for Phase 5's missed-start job (spec §8.5,
-// decision 7): only a PUBLISHED round's still-PENDING pairing can be
-// marked failed by hand — one already picked up by sync-games has a
-// game and is no longer this button's business.
+// The admin's Mark failed (spec §8.5): only a PUBLISHED round's
+// still-PENDING pairing can be marked failed by hand — one already
+// picked up by sync-games has a game and is no longer this button's
+// business.
 func (q *Queries) MarkPublishedPairingFailed(ctx context.Context, arg MarkPublishedPairingFailedParams) (Pairing, error) {
 	row := q.db.QueryRow(ctx, markPublishedPairingFailed, arg.ID, arg.RoundID)
 	var i Pairing

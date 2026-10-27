@@ -23,6 +23,8 @@ UPDATE player_profiles SET accepts_double_game = $2 WHERE user_id = $1 RETURNING
 -- name: ClearAutoPause :execrows
 -- "Resume quest" (spec §8.3): only meaningful while auto-paused, so a
 -- stale double-submit changes nothing and the caller can tell from the
--- row count that there is nothing to audit.
-UPDATE player_profiles SET auto_paused_at = NULL
+-- row count that there is nothing to audit. resumed_at is the moment:
+-- the missed starts before it no longer count towards the next
+-- auto-pause (spec §6.4).
+UPDATE player_profiles SET auto_paused_at = NULL, resumed_at = $2
 WHERE user_id = $1 AND auto_paused_at IS NOT NULL;

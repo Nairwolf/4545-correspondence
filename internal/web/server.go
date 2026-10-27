@@ -51,18 +51,22 @@ type Deps struct {
 	AdminUsernames []string
 	// SecureCookies marks every cookie Secure; true when served over https.
 	SecureCookies bool
-	// Scheduler enqueues a draft's publish-round job from the admin's
-	// Generate now and Regenerate, on serve's running river client.
-	// Tests that don't look at it leave it nil; the hourly sweep then
-	// publishes the draft.
+	// Scheduler enqueues the jobs the admin's actions lead to, on
+	// serve's running river client: a draft's publish-round job from
+	// Generate now and Regenerate, create-games from Publish now and
+	// Retry, and a challenge's withdrawal from Mark failed and the
+	// evaluation Generate now runs first. Tests that don't look at it
+	// leave it nil; the hourly sweep then publishes the draft.
 	Scheduler rounds.Scheduler
 }
 
-// txBeginner is the one thing the sign-in flow needs from the database
-// beyond queries: a transaction. Both *pgxpool.Pool and pgx.Tx (which
-// nests via a savepoint) satisfy it, so tests can run the whole flow
-// inside their rolled-back transaction.
+// txBeginner is what handlers need from the database beyond the
+// queries of Server.q: a transaction, and for evaluate-activity, which
+// opens its own after asking Lichess, both. *pgxpool.Pool and pgx.Tx
+// (which nests via a savepoint) satisfy it, so tests can run a whole
+// flow inside their rolled-back transaction.
 type txBeginner interface {
+	gen.DBTX
 	Begin(ctx context.Context) (pgx.Tx, error)
 }
 

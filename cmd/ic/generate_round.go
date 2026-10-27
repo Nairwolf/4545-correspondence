@@ -10,7 +10,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/nairwolf/4545-correspondence/internal/activity"
 	"github.com/nairwolf/4545-correspondence/internal/db/gen"
+	"github.com/nairwolf/4545-correspondence/internal/lichess"
 	"github.com/nairwolf/4545-correspondence/internal/rounds"
 	"github.com/nairwolf/4545-correspondence/internal/settings"
 )
@@ -28,8 +30,16 @@ type txBeginner interface {
 
 // runGenerateRound implements the generate-round job (spec §6.1): it
 // pairs the next round on pairing.cron, and backs `ic generate-round`
-// as well. sched enqueues the draft's publish-round job: serve's own
-// river client for the scheduled job, an insert-only one for the CLI.
+// as well. sched enqueues the jobs that follow: the draft's
+// publish-round job, and the withdrawal of each missed challenge.
+// serve's own river client for the scheduled job, an insert-only one
+// for the CLI.
+//
+// It runs evaluate-activity first (spec §6.4), on a job run of its own,
+// so a player the missed-start rule pauses is already out of the round
+// paired next, and the pairings it retires no longer count towards
+// anyone's cap. A failed evaluation is recorded there and does not stop
+// the round. client is the Lichess client it asks about challenges.
 //
 // A second generation while a draft is still waiting is a FAILED run
 // carrying that message, not a silent no-op: it is visible on
@@ -38,10 +48,16 @@ type txBeginner interface {
 func runGenerateRound(
 	ctx context.Context,
 	db txBeginner,
+	client lichess.API,
 	source gen.RoundSource,
 	sched rounds.Scheduler,
 	riverJobID *int64,
 ) error {
+	evaluator := activity.Evaluator{Lichess: client, Scheduler: sched}
+	if err := evaluator.Run(ctx, db, riverJobID); err != nil {
+		slog.Warn("generate-round: evaluation failed, generating anyway", "error", err)
+	}
+
 	q := gen.New(db)
 
 	jobRun, err := q.CreateJobRun(ctx, gen.CreateJobRunParams{JobName: "generate-round", RiverJobID: riverJobID})

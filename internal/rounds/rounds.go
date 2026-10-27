@@ -65,6 +65,10 @@ type Scheduler interface {
 	// ScheduleSyncGames queues a sync-games run, so games just created
 	// reach the site within minutes rather than at the top of the hour.
 	ScheduleSyncGames(ctx context.Context, tx pgx.Tx) error
+	// ScheduleCancelChallenge queues the withdrawal on Lichess of the
+	// challenge of a pairing that will never be played (spec §6.4), so
+	// a late acceptance cannot create a game no pairing counts.
+	ScheduleCancelChallenge(ctx context.Context, tx pgx.Tx, pairingID pgtype.UUID) error
 }
 
 // Snapshot is the §4.2 pairing settings as they stood when a round was
@@ -102,7 +106,13 @@ func snapshot(cfg settings.Settings) Snapshot {
 // SnapshotOf reads back the settings a round was generated under. An
 // imported round has none, and ok is false.
 func SnapshotOf(round gen.Round) (snap Snapshot, ok bool) {
-	if len(round.SettingsUsed) == 0 || json.Unmarshal(round.SettingsUsed, &snap) != nil {
+	return ParseSnapshot(round.SettingsUsed)
+}
+
+// ParseSnapshot reads a round's settings_used column, for a query that
+// returns the column rather than the round.
+func ParseSnapshot(settingsUsed []byte) (snap Snapshot, ok bool) {
+	if len(settingsUsed) == 0 || json.Unmarshal(settingsUsed, &snap) != nil {
 		return Snapshot{}, false
 	}
 	return snap, true
